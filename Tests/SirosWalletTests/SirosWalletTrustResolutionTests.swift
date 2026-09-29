@@ -138,6 +138,26 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         return "\(headerB64).\(payloadB64).\(sigB64)"
     }
 
+    private func jwk(for publicKey: Curve25519.Signing.PublicKey) -> [String: Any] {
+        ["kty": "OKP", "crv": "Ed25519", "x": base64UrlEncode(publicKey.rawRepresentation)]
+    }
+
+    /// Same shape as `signRequestJwt`, but `alg: "EdDSA"` signed by an
+    /// Ed25519 key - Ed25519 signatures are already the raw 64-byte form
+    /// JWS expects, no ASN.1 unwrapping needed (unlike P-256's
+    /// `ECDSASignature.rawRepresentation`, which already does its own
+    /// conversion).
+    private func signRequestJwtEdDSA(privateKey: Curve25519.Signing.PrivateKey, kid: String?) throws -> String {
+        var header: [String: Any] = ["alg": "EdDSA"]
+        if let kid { header["kid"] = kid }
+        let headerB64 = base64UrlEncode(try JSONSerialization.data(withJSONObject: header))
+        let payloadB64 = base64UrlEncode(try JSONSerialization.data(withJSONObject: ["client_id": "did:key:verifier"]))
+        let signingInput = Data("\(headerB64).\(payloadB64)".utf8)
+        let signature = try privateKey.signature(for: signingInput)
+        let sigB64 = base64UrlEncode(signature)
+        return "\(headerB64).\(payloadB64).\(sigB64)"
+    }
+
     func testHandleTrustEvaluationResolvesDidKeyMaterialWhenRequiresResolution() async throws {
         let verifierKey = P256.Signing.PrivateKey()
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
@@ -169,6 +189,74 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertEqual(calls[0].body["subject_type"] as? String, "key")
         let resource = calls[1].body["resource"] as? [String: Any]
         XCTAssertEqual(resource?["type"] as? String, "jwk", "resolved key material must be passed through as a jwk resource")
+    }
+
+    func testHandleTrustEvaluationResolvesEd25519KeyMaterial() async throws {
+        let verifierKey = Curve25519.Signing.PrivateKey()
+        let jwt = try signRequestJwtEdDSA(privateKey: verifierKey, kid: "did:key:verifier#key-1")
+
+        let didDocument: [String: Any] = [
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:key:verifier#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-ed25519", payload: [
+            "request": [
+                "subject_id": "did:key:verifier",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve", "/v1/evaluate"], "an Ed25519-signed request_jwt must verify and reach /v1/evaluate")
+    }
+
+    /// go-wallet-backend#401's `resolution_subject_id` carries the bare DID
+    /// for `/v1/resolve`, distinct from `subject_id` - which, for an
+    /// OpenID4VP 1.0 `decentralized_identifier:`-prefixed client_id, is NOT
+    /// itself a resolvable DID. Passing `subject_id` to `/v1/resolve` here
+    /// would send the still-prefixed value and fail to resolve.
+    func testHandleTrustEvaluationUsesResolutionSubjectIdNotSubjectId() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
+
+        let didDocument: [String: Any] = [
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-prefixed", payload: [
+            "request": [
+                "subject_id": "decentralized_identifier:did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        let calls = log.calls
+        XCTAssertEqual(calls.map(\.path), ["/v1/resolve", "/v1/evaluate"])
+        XCTAssertEqual(calls[0].body["subject_id"] as? String, "did:web:verifier.example.com", "/v1/resolve must get the bare DID, not the prefixed subject_id")
+        let evaluateSubject = calls[1].body["subject"] as? [String: Any]
+        XCTAssertEqual(evaluateSubject?["id"] as? String, "decentralized_identifier:did:web:verifier.example.com", "/v1/evaluate must keep seeing the original, unstripped client_id")
     }
 
     /// The JWT header advertises a `did:web:verifier.example.com#key-1` kid,

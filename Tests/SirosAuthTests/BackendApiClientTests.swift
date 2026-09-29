@@ -22,6 +22,28 @@ final class BackendApiClientTests: XCTestCase {
         XCTAssertEqual(req.headers["Authorization"], "Bearer token-abc")
     }
 
+    // MARK: - DID key resolution (go-wallet-backend#396/#401, this SDK's #168)
+
+    /// `subject_type: "key"` is the core distinction from `resolveIssuer`'s
+    /// `subject_type: "url"` - the two must never be confused.
+    func testResolveKeyPostsKeySubjectTypeToResolveEndpoint() async throws {
+        let server = MockHttpServer()
+        server.enqueue("{\"context\":{}}")
+        let client = BackendApiClient(baseUrl: "https://api.example.com", tenantId: "default", httpFn: server.httpFunction)
+        client.setAppToken("token-resolve")
+
+        _ = try await client.resolveKey(subjectId: "did:web:verifier.example.com")
+
+        XCTAssertEqual(server.requests.count, 1)
+        let req = server.requests[0]
+        XCTAssertEqual(req.path, "/v1/resolve")
+        XCTAssertEqual(req.method, "POST")
+        XCTAssertEqual(req.headers["Authorization"], "Bearer token-resolve")
+        let body = try bodyJSON(req)
+        XCTAssertEqual(body["subject_id"] as? String, "did:web:verifier.example.com")
+        XCTAssertEqual(body["subject_type"] as? String, "key")
+    }
+
     // MARK: - Wallet instance lifecycle (SID-AUTH-06, go-wallet-backend#319)
 
     private func bodyJSON(_ req: MockHttpServer.RecordedRequest) throws -> [String: Any] {

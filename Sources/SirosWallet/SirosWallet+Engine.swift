@@ -1286,13 +1286,19 @@ extension SirosWallet {
     /// key actually verifies the signature, as the `jwk` JSON shape
     /// `handleTrustEvaluation` already accepts as key material.
     ///
-    /// Only ES256 (P-256) signing keys are supported, matching
+    /// ES256 (P-256, `alg: "ES256"`) and EdDSA (Ed25519, `alg: "EdDSA"`)
+    /// signing keys are supported - RSA is not, matching
     /// `DCAPIRequestParser`'s existing JWS-verification precedent: this SDK
     /// has no JOSE/RSA library dependency and CryptoKit itself has no RSA
     /// signature-verification API (the Kotlin SDK's Nimbus-based port also
     /// supports RS256/RSA - this is a known, judged asymmetry, not an
-    /// oversight). A `did:` verifier signing with an unsupported
-    /// algorithm/key type fails closed rather than silently mis-verifying.
+    /// oversight). Ed25519 IS supported despite that gap, unlike RSA:
+    /// CryptoKit has native `Curve25519.Signing` support, and Ed25519
+    /// verification methods are common in `did:key`/`did:web` documents
+    /// emitted by go-trust's supported DID resolvers - omitting it would
+    /// leave every such verifier unresolvable. A `did:` verifier signing
+    /// with an unsupported algorithm/key type fails closed rather than
+    /// silently mis-verifying.
     ///
     /// Fails closed - throws, never silently falls through to
     /// unverified/no key material - when resolution fails, the response
@@ -1305,7 +1311,16 @@ extension SirosWallet {
     /// treated as trusted, or as absent (which callers might read as
     /// legitimately keyless x509_hash/no-attestation cases and proceed
     /// regardless).
-    func resolveDidKeyMaterial(client: BackendApiClient, subjectId: String, requestJwt: String) async throws -> [String: Any] {
+    ///
+    /// `resolutionSubjectId` is deliberately a distinct parameter from the
+    /// `subject_id` used elsewhere for `/v1/evaluate` (go-wallet-backend#401's
+    /// `ResolutionSubjectID`): `/v1/evaluate`'s subject must stay the
+    /// original, wire-form identifier (e.g. still carrying OpenID4VP 1.0's
+    /// `decentralized_identifier:` prefix, per docs/client-id-strategy.md -
+    /// a no-PDP and a PDP-backed flow must evaluate the identical subject),
+    /// but `/v1/resolve` needs the bare DID with that prefix already
+    /// stripped - one field can't serve both.
+    func resolveDidKeyMaterial(client: BackendApiClient, resolutionSubjectId: String, requestJwt: String) async throws -> [String: Any] {
         let parts = requestJwt.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 3,
               let headerData = Self.base64UrlDecodeForTrustResolution(parts[0]),
@@ -1314,7 +1329,7 @@ extension SirosWallet {
             throw SirosError.wallet(message: "request_jwt is not a valid JWS")
         }
         let alg = header["alg"] as? String
-        guard alg == nil || alg == "ES256" else {
+        guard alg == nil || alg == "ES256" || alg == "EdDSA" else {
             throw SirosError.wallet(message: "Unsupported request_jwt signing algorithm: \(alg ?? "")")
         }
         let signingInput = Data((parts[0] + "." + parts[1]).utf8)
@@ -1323,12 +1338,12 @@ extension SirosWallet {
             return split.count > 1 ? String(split[1]) : nil
         }
 
-        let response = try await client.resolveKey(subjectId: subjectId)
+        let response = try await client.resolveKey(subjectId: resolutionSubjectId)
         guard let context = response["context"] as? [String: Any],
               let trustMetadata = context["trust_metadata"] as? [String: Any],
               let verificationMethods = trustMetadata["verificationMethod"] as? [[String: Any]],
               !verificationMethods.isEmpty else {
-            throw SirosError.wallet(message: "Resolved DID document for \(subjectId) has no verificationMethod entries")
+            throw SirosError.wallet(message: "Resolved DID document for \(resolutionSubjectId) has no verificationMethod entries")
         }
 
         func vmKidMatches(_ vm: [String: Any]) -> Bool {
@@ -1344,19 +1359,33 @@ extension SirosWallet {
 
         #if canImport(CryptoKit)
         for vm in candidates {
-            guard let jwk = vm["publicKeyJwk"] as? [String: Any],
-                  let publicKeyBytes = try? Self.ecPublicKeyBytesForTrustResolution(fromJwk: jwk),
-                  let publicKey = try? P256.Signing.PublicKey(x963Representation: publicKeyBytes),
-                  let ecdsaSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
-                  publicKey.isValidSignature(ecdsaSignature, for: signingInput) else {
+            guard let jwk = vm["publicKeyJwk"] as? [String: Any] else { continue }
+            switch jwk["kty"] as? String {
+            case "EC":
+                guard let publicKeyBytes = try? Self.ecPublicKeyBytesForTrustResolution(fromJwk: jwk),
+                      let publicKey = try? P256.Signing.PublicKey(x963Representation: publicKeyBytes),
+                      let ecdsaSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
+                      publicKey.isValidSignature(ecdsaSignature, for: signingInput) else {
+                    continue
+                }
+                return jwk
+            case "OKP":
+                guard (jwk["crv"] as? String) == "Ed25519",
+                      let xStr = jwk["x"] as? String,
+                      let rawKey = Self.base64UrlDecodeForTrustResolution(xStr),
+                      let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: rawKey),
+                      publicKey.isValidSignature(signature, for: signingInput) else {
+                    continue
+                }
+                return jwk
+            default:
                 continue
             }
-            return jwk
         }
         #endif
 
         throw SirosError.wallet(
-            message: "request_jwt signature did not verify against any resolved verification method for \(subjectId)"
+            message: "request_jwt signature did not verify against any resolved verification method for \(resolutionSubjectId)"
         )
     }
 
@@ -1393,12 +1422,24 @@ extension SirosWallet {
         let subjectType = request["subject_type"] as? String
         var keyMaterial = request["key_material"] as? [String: Any]
 
-        // requires_resolution/request_jwt (go-wallet-backend#396/#401, this
-        // SDK's #168): set when the engine could not resolve a did:-scheme
-        // verifier's key material itself (no verifier PDP configured - an
-        // intentional dev/permissive mode) and defers to the frontend/SDK
-        // instead. key_material is absent in that case -
+        // requires_resolution/request_jwt/resolution_subject_id
+        // (go-wallet-backend#396/#401, this SDK's #168): set when the engine
+        // could not resolve a did:-scheme verifier's key material itself and
+        // defers to the frontend/SDK instead. This isn't a universal "no PDP
+        // anywhere" guarantee - go-wallet-backend sets it whenever the
+        // verifier-specific PDP is unconfigured, which a global/issuer PDP
+        // may still be independent of; whether resolution below can actually
+        // succeed depends on that backend-side configuration, not on
+        // anything this SDK controls. key_material is absent in this case -
         // resolveDidKeyMaterial below is what supplies it.
+        //
+        // resolution_subject_id is a DIFFERENT identifier from subject_id:
+        // subject_id is the original wire-form client_id (still carrying
+        // OpenID4VP 1.0's decentralized_identifier: prefix, when the
+        // verifier used it) that /v1/evaluate below must keep seeing
+        // unchanged, but /v1/resolve needs the bare DID with that prefix
+        // already stripped - passing subject_id to resolution would send
+        // the wrong (possibly prefixed) identifier and fail to resolve.
         //
         // Resolution runs to completion (or fails closed and returns)
         // BEFORE the evaluateTrust call below and its own do/catch, which
@@ -1410,13 +1451,14 @@ extension SirosWallet {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
                 return
             }
+            let resolutionSubjectId = (request["resolution_subject_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? subjectId
             lock.lock(); let resolveClient = apiClient; lock.unlock()
             guard let resolveClient else {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: "No API client")
                 return
             }
             do {
-                let resolvedJwk = try await resolveDidKeyMaterial(client: resolveClient, subjectId: subjectId, requestJwt: requestJwt)
+                let resolvedJwk = try await resolveDidKeyMaterial(client: resolveClient, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
                 keyMaterial = ["type": "jwk", "jwk": resolvedJwk]
             } catch {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: error.localizedDescription)
