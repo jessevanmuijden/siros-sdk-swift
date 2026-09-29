@@ -271,6 +271,9 @@
     "simulatorUnavailable": "Kameran är inte tillgänglig i simulatorn",
     "simulatorFallbackHint": "Använd inmatningsfältet nedan för att ange en URI."
   },
+  "activate": {
+    "useProximityInstead": "Använd närhet i stället"
+  },
   "history": {
     "title": "Presentationshistorik",
     "empty": "Ingen presentationshistorik",

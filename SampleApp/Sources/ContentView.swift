@@ -33,12 +33,7 @@ struct ContentView: View {
                 } else if viewModel.showHistory {
                     PresentationHistoryView()
                 } else if viewModel.showActivate {
-                    switch viewModel.activateMode {
-                    case .qr:
-                        QRScannerView()
-                    case .proximity:
-                        ProximityEngagementScreen()
-                    }
+                    ActivateView()
                 } else if viewModel.showAddCredential {
                     AddCredentialView()
                 } else if viewModel.showWscaDeveloper {
@@ -84,7 +79,7 @@ struct ContentView: View {
             // Covers the sheet being dismissed WITHOUT the user tapping a
             // plugin or Cancel (e.g. swiping it away) - see
             // `WalletViewModel.dismissWscdChoice`'s doc comment, mirroring
-            // `ProximityEngagementScreen`'s identical `onDismiss` handling.
+            // `ProximityEngagementContent`'s identical `onDismiss` handling.
             viewModel.dismissWscdChoice()
         }) { choice in
             WscdChoiceSheet(choice: choice)

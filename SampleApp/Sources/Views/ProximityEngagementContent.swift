@@ -23,7 +23,10 @@ import SirosKeystore
 /// the way Android's `HostApduService` does (that capability is restricted
 /// to specific system frameworks, not general app code) - QR code plus both
 /// BLE modes are this screen's engagement/retrieval mechanisms.
-struct ProximityEngagementScreen: View {
+///
+/// No `NavigationStack`/toolbar of its own, so it can be embedded directly
+/// inside `ActivateView`'s single shared toolbar.
+struct ProximityEngagementContent: View {
     @EnvironmentObject var viewModel: WalletViewModel
 
     @State private var engagement: DeviceEngagement.Engagement?
@@ -57,27 +60,18 @@ struct ProximityEngagementScreen: View {
     @State private var activeConsentBox: ConsentContinuationBox?
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let setupError {
-                    errorView(setupError)
-                } else if let result {
-                    ProximityTerminalView(success: result, onClose: { viewModel.closeActivate() })
-                } else if currentStep != "waiting_for_reader" {
-                    ProximityProgressView(step: currentStep)
-                } else if let qrImage {
-                    engagementView(qrImage)
-                } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-            .navigationTitle(L10n.string("proximity.title"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(L10n.string("flow.closeButton")) { viewModel.closeActivate() }
-                }
+        Group {
+            if let setupError {
+                errorView(setupError)
+            } else if let result {
+                ProximityTerminalView(success: result, onClose: { viewModel.closeActivate() })
+            } else if currentStep != "waiting_for_reader" {
+                ProximityProgressView(step: currentStep)
+            } else if let qrImage {
+                engagementView(qrImage)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onAppear(perform: setUpIfNeeded)
@@ -326,7 +320,7 @@ struct ProximityEngagementScreen: View {
 /// Resumes a `ProximityConsentResult` continuation at most once, guarding
 /// the race between the user answering via `PendingConsent.respond` and the
 /// consent sheet being dismissed some other way (see `.sheet(item:onDismiss:)`
-/// in `ProximityEngagementScreen.body`, and `requestConsent`'s doc comment).
+/// in `ProximityEngagementContent.body`, and `requestConsent`'s doc comment).
 /// Both call sites run on the main actor (SwiftUI button actions and
 /// `onDismiss` alike), so no locking is needed here - just the
 /// resume-at-most-once guard itself.

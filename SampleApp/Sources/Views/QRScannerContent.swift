@@ -6,8 +6,10 @@ import SwiftUI
 import AVFoundation
 #endif
 
-/// QR code scanner using the device camera.
-struct QRScannerView: View {
+/// QR code scanner using the device camera - camera viewfinder plus the
+/// always-on paste-URI fallback. No `NavigationStack`/toolbar of its own, so it
+/// can be embedded directly inside `ActivateView`'s single shared toolbar.
+struct QRScannerContent: View {
     @EnvironmentObject var viewModel: WalletViewModel
     @State private var pasteUri = ""
     /// Non-nil the instant a code is decoded, until the delayed handoff below
@@ -23,59 +25,50 @@ struct QRScannerView: View {
     @State private var pendingHandoff: DispatchWorkItem?
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                ZStack {
-                    #if targetEnvironment(simulator)
-                    simulatorFallback
-                    #else
-                    CameraQRScanner { code in
-                        handleDetectedCode(code)
-                    }
-                    #endif
-
-                    // Viewfinder overlay
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(detectedCode == nil ? Color.white : SirosTheme.brand, lineWidth: 3)
-                        .frame(width: 250, height: 250)
-                        .shadow(radius: 8)
-
-                    if detectedCode != nil {
-                        detectionOverlay
-                    }
+        VStack(spacing: 0) {
+            ZStack {
+                #if targetEnvironment(simulator)
+                simulatorFallback
+                #else
+                CameraQRScanner { code in
+                    handleDetectedCode(code)
                 }
+                #endif
 
-                // Paste URI fallback (always visible, like Kotlin)
-                VStack(spacing: 8) {
-                    Text(L10n.string("qr.manualInput"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        TextField("openid-credential-offer://...", text: $pasteUri)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                        Button(L10n.string("qr.pasteButton")) {
-                            let trimmed = pasteUri.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty else { return }
-                            viewModel.handleQrResult(trimmed)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(pasteUri.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
-                .padding()
-                .background(.regularMaterial)
-            }
-            .ignoresSafeArea(edges: .top)
-            .navigationTitle(L10n.string("qr.title"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(L10n.string("common.cancel")) { viewModel.closeActivate() }
+                // Viewfinder overlay
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(detectedCode == nil ? Color.white : SirosTheme.brand, lineWidth: 3)
+                    .frame(width: 250, height: 250)
+                    .shadow(radius: 8)
+
+                if detectedCode != nil {
+                    detectionOverlay
                 }
             }
+
+            // Paste URI fallback (always visible, like Kotlin)
+            VStack(spacing: 8) {
+                Text(L10n.string("qr.manualInput"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    TextField("openid-credential-offer://...", text: $pasteUri)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    Button(L10n.string("qr.pasteButton")) {
+                        let trimmed = pasteUri.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        viewModel.handleQrResult(trimmed)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pasteUri.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding()
+            .background(.regularMaterial)
         }
+        .ignoresSafeArea(edges: .top)
         .onDisappear {
             pendingHandoff?.cancel()
             pendingHandoff = nil

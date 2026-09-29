@@ -724,7 +724,7 @@ final class WalletViewModel: ObservableObject {
 
     /// Bridges `RequestWscdChoice`'s async callback (see `WalletConfig.requestWscdChoice`)
     /// to `WscdChoiceSheet`: suspends the caller until the user taps a
-    /// plugin or Cancel. Mirrors `ProximityEngagementScreen.requestConsent`'s
+    /// plugin or Cancel. Mirrors `ProximityEngagementContent.requestConsent`'s
     /// identical bridge for `RequestProximityConsent`.
     nonisolated func requestWscdChoice(
         issuer: String,
@@ -746,7 +746,7 @@ final class WalletViewModel: ObservableObject {
                         // sheet) - that's fine: `box.resumeOnce` below
                         // already wins the race, so onDismiss's own
                         // `dismissWscdChoice` call is a harmless no-op by
-                        // the time it runs. See `ProximityEngagementScreen
+                        // the time it runs. See `ProximityEngagementContent
                         // .requestConsent`'s identical comment.
                         self.pendingWscdChoice = nil
                         let result = chosenPluginId.map { WscdChoiceResult.chosen(pluginId: $0, rememberScope: rememberScope) } ?? .cancelled
@@ -760,7 +760,7 @@ final class WalletViewModel: ObservableObject {
     /// Resolves `pendingWscdChoice` as `.cancelled` if the sheet is
     /// dismissed without the user tapping a plugin or Cancel (e.g. swiping
     /// it away) - the genuine Swift equivalent of the gap
-    /// `ProximityEngagementScreen`'s own `onDismiss` handles for
+    /// `ProximityEngagementContent`'s own `onDismiss` handles for
     /// `RequestProximityConsent`; without it this continuation would
     /// otherwise hang forever. `resumeOnce` is a no-op if the user already
     /// tapped a plugin/Cancel (`respond` already resumed it).

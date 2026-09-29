@@ -9,7 +9,7 @@ import SirosWallet
 /// key-storage requirement and neither TOFU nor `WalletConfig.defaultWscdMapping`
 /// resolved it automatically (see `WscdSelectionPolicy.resolve`'s doc
 /// comment, steps 2-5). `Identifiable` so it can drive a `.sheet(item:)`
-/// presentation directly, mirroring `ProximityEngagementScreen`'s
+/// presentation directly, mirroring `ProximityEngagementContent`'s
 /// `PendingConsent`.
 struct PendingWscdChoice: Identifiable {
     let id = UUID()
@@ -23,7 +23,7 @@ struct PendingWscdChoice: Identifiable {
 
 /// Bridges `RequestWscdChoice`'s async callback to this sheet: suspends the
 /// caller (`WalletViewModel.requestWscdChoice`) until the user taps a plugin
-/// or Cancel. Mirrors `ProximityEngagementScreen`'s `ConsentContinuationBox`
+/// or Cancel. Mirrors `ProximityEngagementContent`'s `ConsentContinuationBox`
 /// - resumes at most once, guarding the race between the user answering and
 /// the sheet being dismissed some other way (e.g. swiping it away).
 final class WscdChoiceContinuationBox {

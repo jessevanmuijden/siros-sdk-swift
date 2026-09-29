@@ -271,6 +271,9 @@
     "simulatorUnavailable": "Camera not available in Simulator",
     "simulatorFallbackHint": "Use the paste field below to enter a URI."
   },
+  "activate": {
+    "useProximityInstead": "Use proximity instead"
+  },
   "history": {
     "title": "Presentation History",
     "empty": "No presentation history",
