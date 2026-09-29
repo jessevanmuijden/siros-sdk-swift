@@ -184,6 +184,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let jwt = "\(headerB64).\(payloadB64).\(base64UrlEncode(signature.rawRepresentation))"
 
         let didDocument: [String: Any] = [
+            "decision": true,
             "context": [
                 "trust_metadata": [
                     "verificationMethod": [
@@ -220,6 +221,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
 
         let didDocument: [String: Any] = [
+            "decision": true,
             "context": [
                 "trust_metadata": [
                     "verificationMethod": [
@@ -254,6 +256,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
 
         let didDocument: [String: Any] = [
+            "decision": true,
             "context": [
                 "trust_metadata": [
                     "verificationMethod": [
@@ -288,6 +291,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let jwt = try signRequestJwtEdDSA(privateKey: verifierKey, kid: "did:key:verifier#key-1")
 
         let didDocument: [String: Any] = [
+            "decision": true,
             "context": [
                 "trust_metadata": [
                     "verificationMethod": [
@@ -323,6 +327,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
 
         let didDocument: [String: Any] = [
+            "decision": true,
             "context": [
                 "trust_metadata": [
                     "verificationMethod": [
@@ -352,6 +357,82 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertEqual(evaluateSubject?["id"] as? String, "decentralized_identifier:did:web:verifier.example.com", "/v1/evaluate must keep seeing the original, unstripped client_id")
     }
 
+    /// Regression (review finding): `/v1/resolve` is itself an AuthZEN
+    /// evaluation - a denied response (`decision: false`) can still carry
+    /// `trust_metadata` (populated independently of the decision), so a
+    /// genuinely-verifying signature must NOT be enough on its own; the
+    /// decision must be explicit `true` too, mirroring go-wallet-backend's
+    /// own `ResolveDID` path.
+    func testHandleTrustEvaluationFailsClosedWhenResolveDecisionIsNotTrue() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
+
+        let deniedDidDocument: [String: Any] = [
+            "decision": false,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: deniedDidDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-denied", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a denied resolution must never reach /v1/evaluate, even with a validly-signed request_jwt and usable trust_metadata")
+    }
+
+    /// Regression (review finding): a JWK's `kty` alone must not select the
+    /// reconstruction path - `P256.Signing.PublicKey` only ever reconstructs
+    /// a P-256 key regardless of what curve the JWK claims, so a JWK
+    /// declaring `kty: "EC"` but a DIFFERENT curve (not "P-256") must be
+    /// rejected rather than silently reinterpreted as P-256.
+    func testHandleTrustEvaluationFailsClosedWhenJwkCurveIsNotP256() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
+
+        var mismatchedCurveJwk = jwk(for: verifierKey.publicKey)
+        mismatchedCurveJwk["crv"] = "P-384"
+
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": mismatchedCurveJwk],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-wrong-curve", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a JWK claiming a non-P-256 curve must never reach /v1/evaluate")
+    }
+
     /// The JWT header advertises a `did:web:verifier.example.com#key-1` kid,
     /// but that verification method's key never actually signed the JWT (an
     /// attacker key did) - the resolved key material must NOT be accepted,
@@ -362,6 +443,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let jwt = try signRequestJwt(privateKey: attackerKey, kid: "did:web:verifier.example.com#key-1")
 
         let didDocument: [String: Any] = [
+            "decision": true,
             "context": [
                 "trust_metadata": [
                     "verificationMethod": [

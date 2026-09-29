@@ -224,6 +224,17 @@ extension SirosWallet {
         }
 
         let response = try await client.resolveKey(subjectId: resolutionSubjectId)
+        // /v1/resolve is itself an AuthZEN evaluation, not a plain lookup -
+        // its `decision` must be explicitly true before any of `context` is
+        // trusted. A denied response (decision: false) can still carry
+        // `trust_metadata` (context is populated independently of the
+        // decision), so skipping this check would extract and use a denied
+        // subject's key material - go-wallet-backend's own ResolveDID path
+        // explicitly rejects decision == false the same way (review
+        // finding).
+        guard response["decision"] as? Bool == true else {
+            throw SirosError.wallet(message: "Resolution of \(resolutionSubjectId) via /v1/resolve was not decided true")
+        }
         guard let context = response["context"] as? [String: Any],
               let trustMetadata = context["trust_metadata"] as? [String: Any],
               let verificationMethods = trustMetadata["verificationMethod"] as? [[String: Any]],
@@ -301,7 +312,15 @@ extension SirosWallet {
     }
 
     private static func ecPublicKeyBytesForTrustResolution(fromJwk jwk: [String: Any]) throws -> Data {
+        // crv must be checked, not just kty == "EC": P256.Signing.PublicKey
+        // only ever reconstructs a P-256 key regardless of what curve the
+        // JWK actually claims, so a malformed JWK labeled "EC" with a
+        // DIFFERENT curve (e.g. P-384/P-521) but carrying byte strings that
+        // happen to decode without erroring would otherwise be silently
+        // reinterpreted as P-256 and forwarded to the PDP as a semantically
+        // different key than the one actually named (review finding).
         guard (jwk["kty"] as? String) == "EC",
+              (jwk["crv"] as? String) == "P-256",
               let xStr = jwk["x"] as? String,
               let yStr = jwk["y"] as? String,
               let x = base64UrlDecodeForTrustResolution(xStr),
