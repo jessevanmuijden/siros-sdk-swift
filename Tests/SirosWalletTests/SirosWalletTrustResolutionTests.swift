@@ -9,6 +9,15 @@ import SirosTransport
 
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+// swift-crypto's `Crypto` module mirrors CryptoKit's API 1:1 - see
+// SirosWallet+Engine.swift's identical fallback, which is what makes
+// resolveDidKeyMaterial (the code under test here) work on Linux at all.
+// Gating this whole test file on CryptoKit alone (an earlier version of
+// this fix did) silently excluded it - and so never actually ran the
+// verification logic below - on Linux.
+import Crypto
+#endif
 
 /// Minimal `AuthProvider` stub - `handleTrustEvaluation` never invokes the
 /// authenticator, so all methods simply throw. Duplicated from
@@ -181,6 +190,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
                 "subject_type": "credential_verifier",
                 "requires_resolution": true,
                 "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
             ],
         ])
 
@@ -214,6 +224,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
                 "subject_type": "credential_verifier",
                 "requires_resolution": true,
                 "request_jwt": jwt,
+                "resolution_subject_id": "did:key:verifier",
             ],
         ])
 
@@ -287,6 +298,7 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
                 "subject_type": "credential_verifier",
                 "requires_resolution": true,
                 "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
             ],
         ])
 
@@ -308,5 +320,26 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
 
         XCTAssertTrue(log.calls.isEmpty, "must not call resolve or evaluate without a request_jwt to verify")
     }
+
+    /// go-wallet-backend#401's TrustEvaluationRequest.Validate() makes
+    /// resolution_subject_id mandatory whenever requires_resolution is
+    /// true - an engine that omits it is non-conformant, and this must fail
+    /// closed rather than silently falling back to (possibly prefixed)
+    /// subject_id for the resolution call.
+    func testHandleTrustEvaluationFailsClosedWhenRequiresResolutionButNoResolutionSubjectId() async throws {
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: [:])
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-no-resolution-subject-id", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": "header.payload.sig",
+            ],
+        ])
+
+        XCTAssertTrue(log.calls.isEmpty, "must not call resolve or evaluate without resolution_subject_id")
+    }
 }
-#endif

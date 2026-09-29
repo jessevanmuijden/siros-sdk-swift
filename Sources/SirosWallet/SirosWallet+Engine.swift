@@ -12,6 +12,11 @@ import SirosFlow
 @preconcurrency import SwiftCBOR
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+// swift-crypto's `Crypto` module mirrors CryptoKit's API 1:1, including
+// P256 ECDSA - see Package.swift's SirosWallet dependencies and
+// SirosWallet+MdocTrust.swift's identical fallback.
+import Crypto
 #endif
 
 #if canImport(os)
@@ -980,23 +985,24 @@ extension SirosWallet {
     ) async {
         do {
             let dcqlQuery = payload?["dcql_query"]?.objectValue.map { anyCodableDictToAny($0) }
-            let verifierInfo = payload?["verifier"]?.objectValue
-            // The backend defaults verifier.name to the raw client_id (e.g.
-            // "x509_san_dns:verifier.multipaz.org") whenever the verifier
-            // hasn't declared a real client_metadata.client_name - never
-            // show that prefixed form to the user. Running every raw
-            // name/client_id through ClientIdScheme.parse is safe for a
-            // genuine friendly name too: it only matches known scheme
-            // prefixes/URLs (falling into .preRegistered otherwise, which
-            // passes the string through unchanged).
-            let rawVerifierName = verifierInfo?["name"]?.stringValue ?? verifierInfo?["client_id"]?.stringValue
-            let verifierName = rawVerifierName.map { ClientIdScheme.parse($0).displayName }
 
             let allCreds = await credentialStore.getAll()
             // Read only - do NOT remove. The later `sign_presentation` step
             // (`handleSignRequest` -> `validateAudience`) still needs this
             // entry - see `handleMatchRequest`'s identical comment.
             lock.lock(); let trustResult = lastTrustResults[flowId]; lock.unlock()
+
+            // Deliberately not the raw payload's verifier.name/client_id
+            // (an earlier version of this fix parsed that through
+            // ClientIdScheme.parse(...).displayName instead): that raw
+            // field is whatever the verifier itself claimed, unvalidated -
+            // exactly what go-wallet-backend#401 stopped trusting/caching
+            // for the consent screen. Only trustResult?.entityName is a
+            // PDP-validated name; nil here lets PresentationConsentView's
+            // labeled "Verified identity" fallback (trustResult.identifier)
+            // render instead, matching handleMatchRequest's identical fix
+            // (#167 review finding).
+            let verifierName = trustResult?.entityName
 
             let selection = await matchAndSelectCredentials(
                 dcqlQuery: dcqlQuery,
@@ -1070,13 +1076,16 @@ extension SirosWallet {
         let trustResult = lastTrustResults[msg.flowId]
         lock.unlock()
 
-        // The backend/trust evaluator only ever gives a real display name via
-        // entityName when the verifier declared one (client_metadata.client_name
-        // or trust-framework metadata); otherwise fall back to the raw
-        // client_id (`identifier`) and strip its scheme prefix via
-        // ClientIdScheme.displayName rather than showing e.g.
-        // "x509_san_dns:verifier.multipaz.org" verbatim to the user.
-        let verifierName = trustResult?.entityName ?? trustResult?.parsedScheme?.displayName
+        // Deliberately NOT falling back to trustResult?.parsedScheme?.displayName
+        // here (an earlier version of this fix did): verifierName must stay
+        // nil when there's no PDP-validated display name, so the consent
+        // screen can render its own labeled "Verified identity" fallback
+        // (PresentationConsentView's verifiedIdentity) instead of silently
+        // presenting a bare identifier as if it were a friendly declared
+        // name - substituting it here made that UI branch unreachable in
+        // practice, since trustResult.identifier (and so parsedScheme) is
+        // set whenever a trust evaluation ran at all (#167 review finding).
+        let verifierName = trustResult?.entityName
 
         // msg.dcqlQuery IS the DCQL query object directly (not nested under
         // its own "dcql_query" key) - a separate wire shape from
@@ -1328,9 +1337,13 @@ extension SirosWallet {
               let signature = Self.base64UrlDecodeForTrustResolution(parts[2]) else {
             throw SirosError.wallet(message: "request_jwt is not a valid JWS")
         }
+        // A compact JWS requires an `alg` header (RFC 7515 §4.1.1) - a
+        // missing value must not be silently treated as ES256 (review
+        // finding), which would accept a malformed/non-conformant
+        // request_jwt this method's contract explicitly rejects.
         let alg = header["alg"] as? String
-        guard alg == nil || alg == "ES256" || alg == "EdDSA" else {
-            throw SirosError.wallet(message: "Unsupported request_jwt signing algorithm: \(alg ?? "")")
+        guard alg == "ES256" || alg == "EdDSA" else {
+            throw SirosError.wallet(message: "Unsupported request_jwt signing algorithm: \(alg ?? "<missing>")")
         }
         let signingInput = Data((parts[0] + "." + parts[1]).utf8)
         let kidFragment: String? = (header["kid"] as? String).flatMap { kid in
@@ -1357,7 +1370,15 @@ extension SirosWallet {
         // on a verifier this wallet CAN actually verify.
         let candidates = verificationMethods.sorted { vmKidMatches($0) && !vmKidMatches($1) }
 
-        #if canImport(CryptoKit)
+        // Not further gated on canImport(CryptoKit): the import block above
+        // guarantees P256/Curve25519 either way (CryptoKit on Apple
+        // platforms, swift-crypto's API-identical Crypto on Linux) - same
+        // precedent as SirosWallet+MdocTrust.swift, which gates only the
+        // import, never the usage. Gating this loop too, as an earlier
+        // version of this fix did, silently excluded it (and every test
+        // exercising it) on Linux, where every resolution would then throw
+        // the "did not verify against any" error below despite a
+        // genuinely valid signature - never verified, never caught by CI.
         for vm in candidates {
             guard let jwk = vm["publicKeyJwk"] as? [String: Any] else { continue }
             switch jwk["kty"] as? String {
@@ -1382,7 +1403,6 @@ extension SirosWallet {
                 continue
             }
         }
-        #endif
 
         throw SirosError.wallet(
             message: "request_jwt signature did not verify against any resolved verification method for \(resolutionSubjectId)"
@@ -1438,8 +1458,13 @@ extension SirosWallet {
         // OpenID4VP 1.0's decentralized_identifier: prefix, when the
         // verifier used it) that /v1/evaluate below must keep seeing
         // unchanged, but /v1/resolve needs the bare DID with that prefix
-        // already stripped - passing subject_id to resolution would send
-        // the wrong (possibly prefixed) identifier and fail to resolve.
+        // already stripped. Required, not defaulted to subjectId: #401's
+        // own TrustEvaluationRequest.Validate() makes ResolutionSubjectID
+        // mandatory whenever RequiresResolution is true, so an engine that
+        // omits it is itself non-conformant - falling back to the
+        // (possibly prefixed) subjectId would silently attempt resolution
+        // with the wrong identifier instead of surfacing that clearly
+        // (review finding).
         //
         // Resolution runs to completion (or fails closed and returns)
         // BEFORE the evaluateTrust call below and its own do/catch, which
@@ -1451,7 +1476,10 @@ extension SirosWallet {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
                 return
             }
-            let resolutionSubjectId = (request["resolution_subject_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? subjectId
+            guard let resolutionSubjectId = (request["resolution_subject_id"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) else {
+                engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no resolution_subject_id was supplied")
+                return
+            }
             lock.lock(); let resolveClient = apiClient; lock.unlock()
             guard let resolveClient else {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: "No API client")

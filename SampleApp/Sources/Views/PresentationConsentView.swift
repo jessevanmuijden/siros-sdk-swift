@@ -140,7 +140,9 @@ struct PresentationConsentView: View {
                 // unvalidated client-supplied client_metadata.client_name, so
                 // a nil verifierName is now common, not just a rare edge
                 // case.
-                let verifiedIdentity = request.verifierName == nil ? request.trustResult?.identifier : nil
+                let verifiedIdentity = request.verifierName == nil
+                    ? (request.trustResult?.parsedScheme?.displayName ?? request.trustResult?.identifier)
+                    : nil
                 if let verifier = request.verifierName {
                     HStack(spacing: 12) {
                         Image(systemName: "info.circle.fill")
@@ -277,7 +279,10 @@ struct PresentationConsentView: View {
                 Text(L10n.string("presentation.readyToShare"))
                     .font(.title2.bold())
 
-                let verifier = request.verifierName ?? request.trustResult?.identifier ?? L10n.string("presentation.unknownVerifier")
+                let verifier = request.verifierName
+                    ?? request.trustResult?.parsedScheme?.displayName
+                    ?? request.trustResult?.identifier
+                    ?? L10n.string("presentation.unknownVerifier")
                 Text(L10n.string("presentation.sharingSummary", verifier))
                     .font(.body)
                     .foregroundColor(SirosTheme.onSurfaceVariant)
