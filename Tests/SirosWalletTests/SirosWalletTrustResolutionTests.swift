@@ -209,6 +209,46 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "an EC key tried under a mismatched EdDSA alg must never reach /v1/evaluate")
     }
 
+    /// Regression (review finding): `handleWmpTrustEvaluation` (the
+    /// `WalletConfig.useWmpProtocol` transport's trust-evaluation path) is a
+    /// separate code path from the legacy engine's `handleTrustEvaluation`,
+    /// and ignored `requires_resolution`/`request_jwt`/`resolution_subject_id`
+    /// entirely, evaluating trust with no key material at all for a
+    /// did:-scheme verifier over WMP.
+    func testHandleWmpTrustEvaluationResolvesDidKeyMaterialWhenRequiresResolution() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
+
+        let didDocument: [String: Any] = [
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+
+        let payload = AnyCodable.object_([
+            "request": .object_([
+                "subject_id": .string("did:web:verifier.example.com"),
+                "subject_type": .string("credential_verifier"),
+                "requires_resolution": .bool(true),
+                "request_jwt": .string(jwt),
+                "resolution_subject_id": .string("did:web:verifier.example.com"),
+            ]),
+        ])
+
+        let result = await wallet.handleWmpTrustEvaluation(flowId: "flow-wmp-did", payload: payload)
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve", "/v1/evaluate"], "must resolve before evaluating, and must evaluate once resolution succeeds")
+        let resource = log.calls[1].body["resource"] as? [String: Any]
+        XCTAssertEqual(resource?["type"] as? String, "jwk", "resolved key material must be passed through as a jwk resource")
+        XCTAssertTrue(result.trusted)
+    }
+
     func testHandleTrustEvaluationResolvesDidKeyMaterialWhenRequiresResolution() async throws {
         let verifierKey = P256.Signing.PrivateKey()
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")

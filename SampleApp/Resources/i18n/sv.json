@@ -67,6 +67,7 @@
     "required": "Obligatorisk",
     "readyToShare": "Redo att dela",
     "sharingSummary": "Du kommer att dela följande med %1$@:",
+    "sharingSummaryUnnamed": "Du kommer att dela följande med:",
     "unknownVerifier": "verifieraren",
     "verifiedIdentity": "Verifierad identitet",
     "noEligibleCopies": "Inga tillgängliga kopior kvar - förnya detta intyg i Inställningar",

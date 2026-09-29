@@ -554,7 +554,10 @@ extension SirosWallet {
         return MatchResult(matches: matches, noMatchReason: reason)
     }
 
-    private func handleWmpTrustEvaluation(flowId: String, payload: AnyCodable?) async -> SirosTransport.TrustResult {
+    // internal, not private: testable directly (see
+    // SirosWalletTrustResolutionTests), matching handleTrustEvaluation's own
+    // access level for the same reason.
+    func handleWmpTrustEvaluation(flowId: String, payload: AnyCodable?) async -> SirosTransport.TrustResult {
         // Extract subject_id from the payload
         guard case .object_(let payloadDict) = payload,
               case .object_(let request) = payloadDict["request"],
@@ -586,7 +589,31 @@ extension SirosWallet {
             if case .object_(let km) = request["key_material"] {
                 keyMaterial = km
             }
-            let kmType = keyMaterial?["type"]?.stringValue ?? "x5c"
+
+            // requires_resolution/request_jwt/resolution_subject_id
+            // (go-wallet-backend#396/#401, this SDK's #168) - the same
+            // did:-scheme frontend-fallback support the legacy engine path's
+            // handleTrustEvaluation has, shared via resolveDidKeyMaterial.
+            // Without this, a did:-scheme verifier trust evaluation routed
+            // over WMP (WalletConfig.useWmpProtocol) silently ignored these
+            // fields and evaluated with no key material at all (review
+            // finding).
+            var resolvedJwk: [String: Any]?
+            if case .bool(true) = request["requires_resolution"] {
+                guard case .string(let requestJwt) = request["request_jwt"], !requestJwt.isEmpty else {
+                    return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
+                }
+                guard case .string(let resolutionSubjectId) = request["resolution_subject_id"], !resolutionSubjectId.isEmpty else {
+                    return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no resolution_subject_id was supplied")
+                }
+                do {
+                    resolvedJwk = try await resolveDidKeyMaterial(client: client, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
+                } catch {
+                    return SirosTransport.TrustResult(trusted: false, reason: error.localizedDescription)
+                }
+            }
+
+            let kmType = resolvedJwk != nil ? "jwk" : (keyMaterial?["type"]?.stringValue ?? "x5c")
 
             // Include the actual key material (x5c/jwk), not just its type -
             // matching the legacy engine path's `handleTrustEvaluation` and
@@ -594,7 +621,9 @@ extension SirosWallet {
             // backend evaluate trust based on the subject identifier alone,
             // with no cryptographic binding to the key actually presented.
             var resource: [String: Any] = ["type": kmType, "id": subjectId]
-            if let x5c = keyMaterial?["x5c"] {
+            if let resolvedJwk {
+                resource["key"] = [resolvedJwk]
+            } else if let x5c = keyMaterial?["x5c"] {
                 resource["key"] = anyCodableToAny(x5c)
             } else if let jwk = keyMaterial?["jwk"] {
                 resource["key"] = [anyCodableToAny(jwk)]

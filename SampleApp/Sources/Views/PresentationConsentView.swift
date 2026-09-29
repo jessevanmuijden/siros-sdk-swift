@@ -140,8 +140,16 @@ struct PresentationConsentView: View {
                 // unvalidated client-supplied client_metadata.client_name, so
                 // a nil verifierName is now common, not just a rare edge
                 // case.
+                //
+                // parsedScheme?.identifier (which strips only the outer
+                // client-ID scheme classifier, e.g. "did:web:"/"x509_san_dns:")
+                // rather than .displayName (which reduces a did:web path or a
+                // URI down to just its host) - two DISTINCT verified
+                // identities could otherwise display identically, defeating
+                // the point of showing a checkable identifier (review
+                // finding).
                 let verifiedIdentity = request.verifierName == nil
-                    ? (request.trustResult?.parsedScheme?.displayName ?? request.trustResult?.identifier)
+                    ? (request.trustResult?.parsedScheme?.identifier ?? request.trustResult?.identifier)
                     : nil
                 if let verifier = request.verifierName {
                     HStack(spacing: 12) {
@@ -279,13 +287,33 @@ struct PresentationConsentView: View {
                 Text(L10n.string("presentation.readyToShare"))
                     .font(.title2.bold())
 
-                let verifier = request.verifierName
-                    ?? request.trustResult?.parsedScheme?.displayName
-                    ?? request.trustResult?.identifier
-                    ?? L10n.string("presentation.unknownVerifier")
-                Text(L10n.string("presentation.sharingSummary", verifier))
-                    .font(.body)
-                    .foregroundColor(SirosTheme.onSurfaceVariant)
+                // Mirrors previewStep's verifiedIdentity: parsedScheme?.identifier
+                // (not .displayName) - displayName reduces a did:web path or a
+                // URI to just its host, so two DISTINCT verified identities
+                // could otherwise render identically here, defeating the
+                // whole point of showing a checkable identifier (review
+                // finding). Falls back further to the unparsed raw
+                // identifier only if parsing somehow yields nothing.
+                if let verifier = request.verifierName {
+                    Text(L10n.string("presentation.sharingSummary", verifier))
+                        .font(.body)
+                        .foregroundColor(SirosTheme.onSurfaceVariant)
+                } else if let verifiedIdentity = request.trustResult?.parsedScheme?.identifier ?? request.trustResult?.identifier {
+                    Text(L10n.string("presentation.sharingSummaryUnnamed"))
+                        .font(.body)
+                        .foregroundColor(SirosTheme.onSurfaceVariant)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L10n.string("presentation.verifiedIdentity"))
+                            .font(.caption)
+                            .foregroundColor(SirosTheme.onSurfaceVariant)
+                        Text(verifiedIdentity)
+                            .font(.body.weight(.medium))
+                    }
+                } else {
+                    Text(L10n.string("presentation.sharingSummary", L10n.string("presentation.unknownVerifier")))
+                        .font(.body)
+                        .foregroundColor(SirosTheme.onSurfaceVariant)
+                }
 
                 ForEach(displayCandidates, id: \.id) { cred in
                     let claimMetaMap = Dictionary(
