@@ -239,16 +239,20 @@ extension SirosWallet {
         // OpenID4VP requires the specific DID verificationMethod to be
         // identified by the JOSE kid - a missing kid, or one that names no
         // verification method in the resolved document, must be rejected
-        // outright (review finding). Only the fragment is compared (after
-        // the last `#`), which handles both a fully-qualified kid (e.g.
-        // "did:web:example.com#key-1") and a relative one resolved against
-        // resolutionSubjectId (e.g. "#key-1") identically, since a
-        // verificationMethod's own `id` is compared the same way below.
-        guard let kid = header["kid"] as? String, !kid.isEmpty else {
-            throw SirosError.wallet(message: "request_jwt header is missing a kid")
-        }
-        guard let kidFragment = kid.split(separator: "#", maxSplits: 1).last.map(String.init), kid.contains("#") else {
-            throw SirosError.wallet(message: "request_jwt header's kid '\(kid)' has no fragment")
+        // outright (review finding). Comparing ONLY the fragment (after the
+        // last `#`) is not enough: "did:other#key-1" and
+        // "did:subject#key-1" collide on fragment alone, so a resolved
+        // document containing both could match the WRONG DID's method.
+        // normalizeVerificationMethodId resolves a relative kid/id (just
+        // "#key-1") against resolutionSubjectId and leaves a
+        // fully-qualified one unchanged, so both a fully-qualified kid and
+        // one relative to this DID compare correctly against a
+        // verificationMethod's own `id` - but ONLY for the same DID
+        // (review finding).
+        guard let normalizedKid = Self.normalizeVerificationMethodId(header["kid"] as? String, subjectId: resolutionSubjectId),
+              let fragmentRange = normalizedKid.range(of: "#"),
+              !normalizedKid[fragmentRange.upperBound...].isEmpty else {
+            throw SirosError.wallet(message: "request_jwt header is missing a kid with a non-empty fragment")
         }
 
         let response = try await client.resolveKey(subjectId: resolutionSubjectId)
@@ -271,9 +275,8 @@ extension SirosWallet {
         }
 
         func vmKidMatches(_ vm: [String: Any]) -> Bool {
-            guard let vmId = vm["id"] as? String else { return false }
-            let vmFragmentParts = vmId.split(separator: "#", maxSplits: 1)
-            return vmFragmentParts.count > 1 && String(vmFragmentParts[1]) == kidFragment
+            guard let vmId = Self.normalizeVerificationMethodId(vm["id"] as? String, subjectId: resolutionSubjectId) else { return false }
+            return vmId == normalizedKid
         }
         // Exactly the kid-identified verification method, never any other
         // - trying every remaining method as a fallback (an earlier version
@@ -284,10 +287,10 @@ extension SirosWallet {
         // that only verifies under some OTHER method must fail closed, not
         // be silently accepted as if the kid had matched (review finding).
         guard let vm = verificationMethods.first(where: vmKidMatches) else {
-            throw SirosError.wallet(message: "No verification method for \(resolutionSubjectId) matches kid fragment '#\(kidFragment)'")
+            throw SirosError.wallet(message: "No verification method for \(resolutionSubjectId) matches kid '\(normalizedKid)'")
         }
         guard let jwk = vm["publicKeyJwk"] as? [String: Any] else {
-            throw SirosError.wallet(message: "Verification method '#\(kidFragment)' for \(resolutionSubjectId) has no publicKeyJwk")
+            throw SirosError.wallet(message: "Verification method '\(normalizedKid)' for \(resolutionSubjectId) has no publicKeyJwk")
         }
 
         // Not further gated on canImport(CryptoKit): the import block above
@@ -325,10 +328,28 @@ extension SirosWallet {
         }
         guard verified else {
             throw SirosError.wallet(
-                message: "request_jwt signature did not verify against the kid-matching verification method '#\(kidFragment)' for \(resolutionSubjectId)"
+                message: "request_jwt signature did not verify against the kid-matching verification method '\(normalizedKid)' for \(resolutionSubjectId)"
             )
         }
         return jwk
+    }
+
+    /// Normalizes a DID URL/verification-method id for exact comparison: a
+    /// RELATIVE id (just a fragment, e.g. `"#key-1"`) is resolved against
+    /// `subjectId` to the full `"<subjectId>#key-1"` form; an id that's
+    /// already fully-qualified (any other form) is returned unchanged.
+    /// Returns `nil` for a blank/missing id, so callers can fail closed on
+    /// "no kid supplied" the same way as "kid didn't match anything".
+    ///
+    /// Comparing ONLY the fragment (as an earlier version of this fix did)
+    /// let `did:other#key-1` and `did:subject#key-1` collide - a resolved
+    /// document containing a verification method for a DIFFERENT DID with
+    /// the same fragment could be matched instead of (or as well as) the
+    /// correct one. Comparing full normalized ids closes that (review
+    /// finding).
+    private static func normalizeVerificationMethodId(_ id: String?, subjectId: String) -> String? {
+        guard let id, !id.isEmpty else { return nil }
+        return id.hasPrefix("#") ? "\(subjectId)\(id)" : id
     }
 
     /// Resolves a `did:`-scheme ISSUER's key material via `POST

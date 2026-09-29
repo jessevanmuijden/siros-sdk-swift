@@ -289,6 +289,98 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertTrue(result.trusted)
     }
 
+    /// Regression (review finding): the WMP transport's
+    /// handleWmpTrustEvaluation had no VERIFIER-path resolution coverage at
+    /// all (only the issuer path above) - proves request_jwt is required,
+    /// the kid-selected resolved jwk is forwarded to /v1/evaluate, and the
+    /// result is trusted.
+    func testHandleWmpTrustEvaluationResolvesVerifierDidKeyMaterialWithRequestJwt() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+
+        let payload = AnyCodable.object_([
+            "request": .object_([
+                "subject_id": .string("did:web:verifier.example.com"),
+                "subject_type": .string("credential_verifier"),
+                "requires_resolution": .bool(true),
+                "request_jwt": .string(jwt),
+                "resolution_subject_id": .string("did:web:verifier.example.com"),
+            ]),
+        ])
+
+        let result = await wallet.handleWmpTrustEvaluation(flowId: "flow-wmp-verifier", payload: payload)
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve", "/v1/evaluate"])
+        let resource = log.calls[1].body["resource"] as? [String: Any]
+        XCTAssertEqual(resource?["type"] as? String, "jwk")
+        XCTAssertTrue(result.trusted)
+    }
+
+    func testHandleWmpTrustEvaluationFailsClosedWhenVerifierRequiresResolutionButNoRequestJwt() async throws {
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: [:])
+
+        let payload = AnyCodable.object_([
+            "request": .object_([
+                "subject_id": .string("did:web:verifier.example.com"),
+                "subject_type": .string("credential_verifier"),
+                "requires_resolution": .bool(true),
+                "resolution_subject_id": .string("did:web:verifier.example.com"),
+            ]),
+        ])
+
+        let result = await wallet.handleWmpTrustEvaluation(flowId: "flow-wmp-verifier-no-jwt", payload: payload)
+
+        XCTAssertTrue(log.calls.isEmpty)
+        XCTAssertFalse(result.trusted)
+        XCTAssertTrue(result.reason?.contains("request_jwt") == true)
+    }
+
+    func testHandleWmpTrustEvaluationFailsClosedWhenResolveDecisionIsNotTrue() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
+        let didDocument: [String: Any] = [
+            "decision": false,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+
+        let payload = AnyCodable.object_([
+            "request": .object_([
+                "subject_id": .string("did:web:verifier.example.com"),
+                "subject_type": .string("credential_verifier"),
+                "requires_resolution": .bool(true),
+                "request_jwt": .string(jwt),
+                "resolution_subject_id": .string("did:web:verifier.example.com"),
+            ]),
+        ])
+
+        let result = await wallet.handleWmpTrustEvaluation(flowId: "flow-wmp-denied", payload: payload)
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"])
+        XCTAssertFalse(result.trusted)
+        XCTAssertTrue(result.reason?.contains("not decided true") == true)
+    }
+
     func testHandleTrustEvaluationResolvesDidKeyMaterialWhenRequiresResolution() async throws {
         let verifierKey = P256.Signing.PrivateKey()
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
@@ -360,6 +452,39 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         let resource = calls[1].body["resource"] as? [String: Any]
         XCTAssertEqual(resource?["type"] as? String, "jwk")
         XCTAssertEqual((resource?["key"] as? [[String: Any]])?.count, 1, "the resolved verification method's jwk must be forwarded")
+    }
+
+    /// Regression (review finding): resolveIssuerDidKeyMaterial duplicates
+    /// the security-critical decision check resolveDidKeyMaterial already
+    /// has its own test for - without a DEDICATED issuer-path test,
+    /// removing or weakening that check in the issuer branch specifically
+    /// would leave every issuer test green.
+    func testHandleTrustEvaluationFailsClosedWhenIssuerResolveDecisionIsNotTrue() async throws {
+        let issuerKey = P256.Signing.PrivateKey()
+        let didDocument: [String: Any] = [
+            "decision": false,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:issuer.example.com#key-1", "publicKeyJwk": jwk(for: issuerKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-issuer-denied", payload: [
+            "request": [
+                "subject_id": "did:web:issuer.example.com",
+                "subject_type": "credential_issuer",
+                "requires_resolution": true,
+                "resolution_subject_id": "did:web:issuer.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a denied issuer resolution must never reach /v1/evaluate")
     }
 
     func testHandleTrustEvaluationResolvesEd25519KeyMaterial() async throws {
@@ -547,6 +672,47 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         ])
 
         XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a signature that verifies under a DIFFERENT method than the one the kid named must never reach /v1/evaluate")
+    }
+
+    /// Regression (review finding): comparing ONLY the fragment (after `#`)
+    /// lets `did:other#key-1` and `did:subject#key-1` collide - a resolved
+    /// document containing a verification method for a DIFFERENT DID with
+    /// the SAME fragment as the kid must not be matched. Only the full,
+    /// normalized id may match.
+    func testHandleTrustEvaluationFailsClosedWhenFragmentMatchesADifferentDidsVerificationMethod() async throws {
+        let otherDidKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: otherDidKey, kid: "did:web:verifier.example.com#key-1")
+
+        // The resolved document for did:web:verifier.example.com contains
+        // ONLY a verification method belonging to a DIFFERENT DID
+        // (did:web:other.example.com) that happens to share the "#key-1"
+        // fragment - a real document would never legitimately do this, but
+        // a fragment-only comparison would still match it.
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:other.example.com#key-1", "publicKeyJwk": jwk(for: otherDidKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-fragment-collision", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a verification method belonging to a different DID must never match, even with the same fragment")
     }
 
     /// Regression (review finding): a request_jwt with no kid at all must be
