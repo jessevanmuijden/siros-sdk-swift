@@ -10,6 +10,9 @@ import SirosAuth
 import SirosKeystore
 import SirosFlow
 @preconcurrency import SwiftCBOR
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 
 #if canImport(os)
 import os
@@ -1268,6 +1271,118 @@ extension SirosWallet {
         }
     }
 
+    /// Resolves a `did:`-scheme verifier's key material via `POST
+    /// /v1/resolve` and verifies `requestJwt` against it, for the
+    /// `requires_resolution` path in `handleTrustEvaluation`
+    /// (go-wallet-backend#396/#401, this SDK's #168).
+    ///
+    /// The response's `context.trust_metadata` is treated as a W3C DID
+    /// Document: every `verificationMethod` entry's `publicKeyJwk` is a
+    /// candidate, tried against `requestJwt`'s signature - a `kid`-matching
+    /// entry (by fragment, e.g. `#key-1`) first if the JWT header names one,
+    /// then every other entry, so a DID document listing multiple
+    /// verification methods (key rotation, multiple purposes) isn't
+    /// defeated by trying only the first. Returns the first candidate whose
+    /// key actually verifies the signature, as the `jwk` JSON shape
+    /// `handleTrustEvaluation` already accepts as key material.
+    ///
+    /// Only ES256 (P-256) signing keys are supported, matching
+    /// `DCAPIRequestParser`'s existing JWS-verification precedent: this SDK
+    /// has no JOSE/RSA library dependency and CryptoKit itself has no RSA
+    /// signature-verification API (the Kotlin SDK's Nimbus-based port also
+    /// supports RS256/RSA - this is a known, judged asymmetry, not an
+    /// oversight). A `did:` verifier signing with an unsupported
+    /// algorithm/key type fails closed rather than silently mis-verifying.
+    ///
+    /// Fails closed - throws, never silently falls through to
+    /// unverified/no key material - when resolution fails, the response
+    /// carries no usable verification method, or the signature does not
+    /// verify against any candidate. Callers MUST treat any error thrown
+    /// here as an outright trust failure, never as "backend unreachable,
+    /// fall back to cache" (unlike the network errors
+    /// `handleTrustEvaluation`'s own `evaluateTrust` call can throw): a
+    /// `did:`-scheme verifier this wallet cannot actually verify must not be
+    /// treated as trusted, or as absent (which callers might read as
+    /// legitimately keyless x509_hash/no-attestation cases and proceed
+    /// regardless).
+    func resolveDidKeyMaterial(client: BackendApiClient, subjectId: String, requestJwt: String) async throws -> [String: Any] {
+        let parts = requestJwt.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3,
+              let headerData = Self.base64UrlDecodeForTrustResolution(parts[0]),
+              let header = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any],
+              let signature = Self.base64UrlDecodeForTrustResolution(parts[2]) else {
+            throw SirosError.wallet(message: "request_jwt is not a valid JWS")
+        }
+        let alg = header["alg"] as? String
+        guard alg == nil || alg == "ES256" else {
+            throw SirosError.wallet(message: "Unsupported request_jwt signing algorithm: \(alg ?? "")")
+        }
+        let signingInput = Data((parts[0] + "." + parts[1]).utf8)
+        let kidFragment: String? = (header["kid"] as? String).flatMap { kid in
+            let split = kid.split(separator: "#", maxSplits: 1)
+            return split.count > 1 ? String(split[1]) : nil
+        }
+
+        let response = try await client.resolveKey(subjectId: subjectId)
+        guard let context = response["context"] as? [String: Any],
+              let trustMetadata = context["trust_metadata"] as? [String: Any],
+              let verificationMethods = trustMetadata["verificationMethod"] as? [[String: Any]],
+              !verificationMethods.isEmpty else {
+            throw SirosError.wallet(message: "Resolved DID document for \(subjectId) has no verificationMethod entries")
+        }
+
+        func vmKidMatches(_ vm: [String: Any]) -> Bool {
+            guard let kidFragment, let vmId = vm["id"] as? String else { return false }
+            let vmFragmentParts = vmId.split(separator: "#", maxSplits: 1)
+            return vmFragmentParts.count > 1 && String(vmFragmentParts[1]) == kidFragment
+        }
+        // A kid-matching entry first, but every entry is still tried - an
+        // absent/non-matching kid is common (many DID documents predate
+        // per-purpose kids), and refusing to try the rest would fail closed
+        // on a verifier this wallet CAN actually verify.
+        let candidates = verificationMethods.sorted { vmKidMatches($0) && !vmKidMatches($1) }
+
+        #if canImport(CryptoKit)
+        for vm in candidates {
+            guard let jwk = vm["publicKeyJwk"] as? [String: Any],
+                  let publicKeyBytes = try? Self.ecPublicKeyBytesForTrustResolution(fromJwk: jwk),
+                  let publicKey = try? P256.Signing.PublicKey(x963Representation: publicKeyBytes),
+                  let ecdsaSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
+                  publicKey.isValidSignature(ecdsaSignature, for: signingInput) else {
+                continue
+            }
+            return jwk
+        }
+        #endif
+
+        throw SirosError.wallet(
+            message: "request_jwt signature did not verify against any resolved verification method for \(subjectId)"
+        )
+    }
+
+    // Deliberately self-contained rather than sharing `DCAPIRequestParser`'s
+    // private base64url/JWK helpers (file-private, and that file's own
+    // comment explains it avoids depending on other modules' internals for
+    // this exact shape of thing).
+    private static func base64UrlDecodeForTrustResolution(_ string: String) -> Data? {
+        var base64 = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64 += "=" }
+        return Data(base64Encoded: base64)
+    }
+
+    private static func ecPublicKeyBytesForTrustResolution(fromJwk jwk: [String: Any]) throws -> Data {
+        guard (jwk["kty"] as? String) == "EC",
+              let xStr = jwk["x"] as? String,
+              let yStr = jwk["y"] as? String,
+              let x = base64UrlDecodeForTrustResolution(xStr),
+              let y = base64UrlDecodeForTrustResolution(yStr) else {
+            throw SirosError.wallet(message: "Unsupported did: verification method JWK type")
+        }
+        return Data([0x04]) + x + y
+    }
+
     func handleTrustEvaluation(engine: WalletEngineSession, flowId: String, payload: [String: Any]) async {
         guard let request = payload["request"] as? [String: Any],
               let subjectId = request["subject_id"] as? String, !subjectId.isEmpty else {
@@ -1276,7 +1391,39 @@ extension SirosWallet {
         }
 
         let subjectType = request["subject_type"] as? String
-        let keyMaterial = request["key_material"] as? [String: Any]
+        var keyMaterial = request["key_material"] as? [String: Any]
+
+        // requires_resolution/request_jwt (go-wallet-backend#396/#401, this
+        // SDK's #168): set when the engine could not resolve a did:-scheme
+        // verifier's key material itself (no verifier PDP configured - an
+        // intentional dev/permissive mode) and defers to the frontend/SDK
+        // instead. key_material is absent in that case -
+        // resolveDidKeyMaterial below is what supplies it.
+        //
+        // Resolution runs to completion (or fails closed and returns)
+        // BEFORE the evaluateTrust call below and its own do/catch, which
+        // deliberately falls back to a cached positive result on failure -
+        // a resolution/signature failure must never be able to reach that
+        // fallback and be softened into "trusted, from cache".
+        if request["requires_resolution"] as? Bool == true {
+            guard let requestJwt = request["request_jwt"] as? String, !requestJwt.isEmpty else {
+                engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
+                return
+            }
+            lock.lock(); let resolveClient = apiClient; lock.unlock()
+            guard let resolveClient else {
+                engine.sendTrustResult(flowId: flowId, trusted: false, reason: "No API client")
+                return
+            }
+            do {
+                let resolvedJwk = try await resolveDidKeyMaterial(client: resolveClient, subjectId: subjectId, requestJwt: requestJwt)
+                keyMaterial = ["type": "jwk", "jwk": resolvedJwk]
+            } catch {
+                engine.sendTrustResult(flowId: flowId, trusted: false, reason: error.localizedDescription)
+                return
+            }
+        }
+
         let kmType = keyMaterial?["type"] as? String ?? "x5c"
 
         var resource: [String: Any] = [

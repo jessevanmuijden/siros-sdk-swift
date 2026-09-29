@@ -149,6 +149,30 @@ public final class BackendApiClient: @unchecked Sendable {
         return try await post("/v1/resolve", body: body)
     }
 
+    /// POST /v1/resolve — resolve a "key" subject (a `did:` identifier) to
+    /// its verification key material, proxied by the backend directly to
+    /// the PDP (see go-wallet-backend's `AuthZENProxyHandler.Resolve`).
+    ///
+    /// Distinct from `resolveIssuer`, which always sends `subject_type:
+    /// "url"` for OpenID4VCI issuer metadata resolution - this is the
+    /// counterpart for a DID-scheme verifier's
+    /// `TrustEvaluationRequest.requires_resolution` (go-wallet-backend#396/
+    /// #401): when the engine cannot resolve the DID itself (no verifier PDP
+    /// configured), it defers to the frontend/SDK, which must call this
+    /// before `evaluateTrust`.
+    ///
+    /// The response's `context.trust_metadata` is the resolved DID Document
+    /// - the caller is responsible for extracting a `verificationMethod`
+    /// entry's `publicKeyJwk` and verifying the accompanying `request_jwt`
+    /// against it (see `SirosWallet`'s `resolveDidKeyMaterial`).
+    public func resolveKey(subjectId: String) async throws -> [String: Any] {
+        let body: [String: Any] = [
+            "subject_id": subjectId,
+            "subject_type": "key",
+        ]
+        return try await post("/v1/resolve", body: body)
+    }
+
     /// GET /verifier/all — list registered verifiers
     public func getVerifiers() async throws -> [String: Any] {
         try await get("/verifier/all")
