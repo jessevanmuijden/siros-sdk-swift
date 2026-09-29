@@ -554,7 +554,10 @@ extension SirosWallet {
         return MatchResult(matches: matches, noMatchReason: reason)
     }
 
-    private func handleWmpTrustEvaluation(flowId: String, payload: AnyCodable?) async -> SirosTransport.TrustResult {
+    // internal, not private: testable directly (see
+    // SirosWalletTrustResolutionTests), matching handleTrustEvaluation's own
+    // access level for the same reason.
+    func handleWmpTrustEvaluation(flowId: String, payload: AnyCodable?) async -> SirosTransport.TrustResult {
         // Extract subject_id from the payload
         guard case .object_(let payloadDict) = payload,
               case .object_(let request) = payloadDict["request"],
@@ -586,7 +589,48 @@ extension SirosWallet {
             if case .object_(let km) = request["key_material"] {
                 keyMaterial = km
             }
-            let kmType = keyMaterial?["type"]?.stringValue ?? "x5c"
+
+            // requires_resolution/request_jwt/resolution_subject_id
+            // (go-wallet-backend#396/#401, this SDK's #168) - the same
+            // did:-scheme frontend-fallback support the legacy engine path's
+            // handleTrustEvaluation has, shared via resolveDidKeyMaterial.
+            // Without this, a did:-scheme verifier trust evaluation routed
+            // over WMP (WalletConfig.useWmpProtocol) silently ignored these
+            // fields and evaluated with no key material at all (review
+            // finding).
+            var resolvedJwk: [String: Any]?
+            var resolvedIssuerJwks: [[String: Any]]?
+            if case .bool(true) = request["requires_resolution"] {
+                guard case .string(let resolutionSubjectId) = request["resolution_subject_id"], !resolutionSubjectId.isEmpty else {
+                    return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no resolution_subject_id was supplied")
+                }
+                var requestJwt: String?
+                if case .string(let jwt) = request["request_jwt"], !jwt.isEmpty {
+                    requestJwt = jwt
+                }
+                do {
+                    if actionName == "credential-verifier" {
+                        // A verifier's request_jwt is what resolution is
+                        // FOR - there's a signed authorization request to
+                        // verify against, so requiring one here is correct
+                        // (unlike the issuer branch below).
+                        guard let requestJwt else {
+                            return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
+                        }
+                        resolvedJwk = try await resolveDidKeyMaterial(client: client, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
+                    } else {
+                        // OID4VCI issuance has no signed request object to
+                        // verify request_jwt against - the backend never
+                        // sends one for a DID issuer, unlike a verifier
+                        // (review finding, #168 follow-up).
+                        resolvedIssuerJwks = try await resolveIssuerDidKeyMaterial(client: client, resolutionSubjectId: resolutionSubjectId)
+                    }
+                } catch {
+                    return SirosTransport.TrustResult(trusted: false, reason: error.localizedDescription)
+                }
+            }
+
+            let kmType = (resolvedJwk != nil || resolvedIssuerJwks != nil) ? "jwk" : (keyMaterial?["type"]?.stringValue ?? "x5c")
 
             // Include the actual key material (x5c/jwk), not just its type -
             // matching the legacy engine path's `handleTrustEvaluation` and
@@ -594,7 +638,11 @@ extension SirosWallet {
             // backend evaluate trust based on the subject identifier alone,
             // with no cryptographic binding to the key actually presented.
             var resource: [String: Any] = ["type": kmType, "id": subjectId]
-            if let x5c = keyMaterial?["x5c"] {
+            if let resolvedJwk {
+                resource["key"] = [resolvedJwk]
+            } else if let resolvedIssuerJwks {
+                resource["key"] = resolvedIssuerJwks
+            } else if let x5c = keyMaterial?["x5c"] {
                 resource["key"] = anyCodableToAny(x5c)
             } else if let jwk = keyMaterial?["jwk"] {
                 resource["key"] = [anyCodableToAny(jwk)]
@@ -977,23 +1025,24 @@ extension SirosWallet {
     ) async {
         do {
             let dcqlQuery = payload?["dcql_query"]?.objectValue.map { anyCodableDictToAny($0) }
-            let verifierInfo = payload?["verifier"]?.objectValue
-            // The backend defaults verifier.name to the raw client_id (e.g.
-            // "x509_san_dns:verifier.multipaz.org") whenever the verifier
-            // hasn't declared a real client_metadata.client_name - never
-            // show that prefixed form to the user. Running every raw
-            // name/client_id through ClientIdScheme.parse is safe for a
-            // genuine friendly name too: it only matches known scheme
-            // prefixes/URLs (falling into .preRegistered otherwise, which
-            // passes the string through unchanged).
-            let rawVerifierName = verifierInfo?["name"]?.stringValue ?? verifierInfo?["client_id"]?.stringValue
-            let verifierName = rawVerifierName.map { ClientIdScheme.parse($0).displayName }
 
             let allCreds = await credentialStore.getAll()
             // Read only - do NOT remove. The later `sign_presentation` step
             // (`handleSignRequest` -> `validateAudience`) still needs this
             // entry - see `handleMatchRequest`'s identical comment.
             lock.lock(); let trustResult = lastTrustResults[flowId]; lock.unlock()
+
+            // Deliberately not the raw payload's verifier.name/client_id
+            // (an earlier version of this fix parsed that through
+            // ClientIdScheme.parse(...).displayName instead): that raw
+            // field is whatever the verifier itself claimed, unvalidated -
+            // exactly what go-wallet-backend#401 stopped trusting/caching
+            // for the consent screen. Only trustResult?.entityName is a
+            // PDP-validated name; nil here lets PresentationConsentView's
+            // labeled "Verified identity" fallback (trustResult.identifier)
+            // render instead, matching handleMatchRequest's identical fix
+            // (#167 review finding).
+            let verifierName = trustResult?.entityName
 
             let selection = await matchAndSelectCredentials(
                 dcqlQuery: dcqlQuery,
@@ -1067,13 +1116,16 @@ extension SirosWallet {
         let trustResult = lastTrustResults[msg.flowId]
         lock.unlock()
 
-        // The backend/trust evaluator only ever gives a real display name via
-        // entityName when the verifier declared one (client_metadata.client_name
-        // or trust-framework metadata); otherwise fall back to the raw
-        // client_id (`identifier`) and strip its scheme prefix via
-        // ClientIdScheme.displayName rather than showing e.g.
-        // "x509_san_dns:verifier.multipaz.org" verbatim to the user.
-        let verifierName = trustResult?.entityName ?? trustResult?.parsedScheme?.displayName
+        // Deliberately NOT falling back to trustResult?.parsedScheme?.displayName
+        // here (an earlier version of this fix did): verifierName must stay
+        // nil when there's no PDP-validated display name, so the consent
+        // screen can render its own labeled "Verified identity" fallback
+        // (PresentationConsentView's verifiedIdentity) instead of silently
+        // presenting a bare identifier as if it were a friendly declared
+        // name - substituting it here made that UI branch unreachable in
+        // practice, since trustResult.identifier (and so parsedScheme) is
+        // set whenever a trust evaluation ran at all (#167 review finding).
+        let verifierName = trustResult?.entityName
 
         // msg.dcqlQuery IS the DCQL query object directly (not nested under
         // its own "dcql_query" key) - a separate wire shape from
@@ -1265,86 +1317,6 @@ extension SirosWallet {
         guard let trustResult, let expectedId = trustResult.identifier else { return }
         if !audience.isEmpty && !expectedId.isEmpty && audience != expectedId {
             throw SirosError.wallet(message: "Audience mismatch for flow \(flowId): sign_request audience='\(audience)' != trusted identifier='\(expectedId)'")
-        }
-    }
-
-    func handleTrustEvaluation(engine: WalletEngineSession, flowId: String, payload: [String: Any]) async {
-        guard let request = payload["request"] as? [String: Any],
-              let subjectId = request["subject_id"] as? String, !subjectId.isEmpty else {
-            engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Missing subject_id")
-            return
-        }
-
-        let subjectType = request["subject_type"] as? String
-        let keyMaterial = request["key_material"] as? [String: Any]
-        let kmType = keyMaterial?["type"] as? String ?? "x5c"
-
-        var resource: [String: Any] = [
-            "type": kmType,
-            "id": subjectId,
-        ]
-        if let x5c = keyMaterial?["x5c"] {
-            resource["key"] = x5c
-        } else if let jwk = keyMaterial?["jwk"] {
-            resource["key"] = [jwk]
-        }
-
-        let actionName = subjectType == "credential_verifier" ? "credential-verifier" : "credential-issuer"
-
-        var evaluationRequest: [String: Any] = [
-            "subject": ["type": "key", "id": subjectId],
-            "resource": resource,
-            "action": ["name": actionName],
-        ]
-        if let ctx = request["context"] {
-            evaluationRequest["context"] = ctx
-        }
-
-        lock.lock(); let client = apiClient; lock.unlock()
-        guard let client else {
-            engine.sendTrustResult(flowId: flowId, trusted: false, reason: "No API client")
-            return
-        }
-        do {
-            let response = try await client.evaluateTrust(evaluationRequest)
-            let decision = response["decision"] as? Bool ?? false
-            let context = response["context"] as? [String: Any]
-            let reqContext = request["context"] as? [String: Any]
-
-            // Build typed TrustResult from the PDP response
-            let trustResult = TrustResult(
-                trusted: decision,
-                framework: context?["framework"] as? String,
-                reason: (context?["reason"] as? String)
-                    ?? (context?["message"] as? String)
-                    ?? context?["reason"].map { String(describing: $0) },
-                entityName: context?["entity_name"] as? String,
-                entityLogo: context?["logo_uri"] as? String,
-                clientIdScheme: reqContext?["client_id_scheme"] as? String,
-                identifier: subjectId,
-                domain: context?["domain"] as? String
-            )
-
-            // Store for use in credential selection UI
-            lock.lock()
-            lastTrustResults[flowId] = trustResult
-            lock.unlock()
-
-            // Populate trust cache (only positive results are stored)
-            trustCache.put(identifier: subjectId, result: trustResult)
-
-            engine.sendTrustResult(flowId: flowId, trusted: decision)
-        } catch {
-            // Degraded mode: check cache for a recent positive result
-            if let cached = trustCache.get(identifier: subjectId) {
-                print("[SirosWallet] ⚠️ Using cached trust result for \(subjectId) (backend unreachable)")
-                lock.lock()
-                lastTrustResults[flowId] = cached
-                lock.unlock()
-                engine.sendTrustResult(flowId: flowId, trusted: true)
-            } else {
-                engine.sendTrustResult(flowId: flowId, trusted: false, reason: error.localizedDescription)
-            }
         }
     }
 
