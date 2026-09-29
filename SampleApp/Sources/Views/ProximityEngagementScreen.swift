@@ -62,7 +62,7 @@ struct ProximityEngagementScreen: View {
                 if let setupError {
                     errorView(setupError)
                 } else if let result {
-                    ProximityTerminalView(success: result, onClose: { viewModel.closeProximityEngagement() })
+                    ProximityTerminalView(success: result, onClose: { viewModel.closeActivate() })
                 } else if currentStep != "waiting_for_reader" {
                     ProximityProgressView(step: currentStep)
                 } else if let qrImage {
@@ -76,7 +76,7 @@ struct ProximityEngagementScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(L10n.string("flow.closeButton")) { viewModel.closeProximityEngagement() }
+                    Button(L10n.string("flow.closeButton")) { viewModel.closeActivate() }
                 }
             }
         }

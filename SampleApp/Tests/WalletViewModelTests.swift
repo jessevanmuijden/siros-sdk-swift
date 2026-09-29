@@ -88,17 +88,35 @@ final class WalletViewModelTests: XCTestCase {
         XCTAssertFalse(vm.showHistory)
     }
 
-    func testOpenQrScannerSetsFlag() {
+    func testOpenActivateSetsFlag() {
         let vm = makeViewModel()
-        vm.openQrScanner()
-        XCTAssertTrue(vm.showQrScanner)
+        vm.openActivate()
+        XCTAssertTrue(vm.showActivate)
+        XCTAssertEqual(vm.activateMode, .qr)
     }
 
-    func testCloseQrScannerClearsFlag() {
+    /// Exercises a real mode transition (unlike `testOpenActivateSetsFlag`,
+    /// which starts from the default `.qr` and would pass even if
+    /// `openActivate()` stopped resetting a previous mode) - per Copilot
+    /// review.
+    func testOpenActivateResetsModeToQrAfterASwitchToProximity() {
         let vm = makeViewModel()
-        vm.showQrScanner = true
-        vm.closeQrScanner()
-        XCTAssertFalse(vm.showQrScanner)
+        vm.openActivate()
+        vm.switchActivateMode(.proximity)
+        XCTAssertEqual(vm.activateMode, .proximity)
+        vm.closeActivate()
+
+        vm.openActivate()
+
+        XCTAssertTrue(vm.showActivate)
+        XCTAssertEqual(vm.activateMode, .qr, "reopening Activate must always start in QR mode, even after a prior session left it in proximity mode")
+    }
+
+    func testCloseActivateClearsFlag() {
+        let vm = makeViewModel()
+        vm.showActivate = true
+        vm.closeActivate()
+        XCTAssertFalse(vm.showActivate)
     }
 
     // MARK: - Disconnect
@@ -108,14 +126,15 @@ final class WalletViewModelTests: XCTestCase {
         vm.showAddCredential = true
         vm.selectedCredential = StoredCredential(id: 2, format: "jwt", raw: "", batchId: 2, instanceId: 0)
         vm.showHistory = true
-        vm.showQrScanner = true
+        vm.activateMode = .proximity
+        vm.showActivate = true
 
         vm.disconnect()
 
         XCTAssertFalse(vm.showAddCredential)
         XCTAssertNil(vm.selectedCredential)
         XCTAssertFalse(vm.showHistory)
-        XCTAssertFalse(vm.showQrScanner)
+        XCTAssertFalse(vm.showActivate)
         XCTAssertTrue(vm.availableCredentials.isEmpty)
     }
 
@@ -139,17 +158,17 @@ final class WalletViewModelTests: XCTestCase {
     /// error immediately.
     func testHandleQrResultWithUnknownUriFallsBackToPresentation() {
         let vm = makeViewModel()
-        vm.showQrScanner = true
+        vm.showActivate = true
         vm.handleQrResult("https://example.com/not-a-wallet-uri")
-        XCTAssertFalse(vm.showQrScanner)
+        XCTAssertFalse(vm.showActivate)
         XCTAssertNil(vm.errorMessage)
     }
 
     func testHandleQrResultClosesScanner() {
         let vm = makeViewModel()
-        vm.showQrScanner = true
+        vm.showActivate = true
         vm.handleQrResult("openid-credential-offer://some-offer")
-        XCTAssertFalse(vm.showQrScanner)
+        XCTAssertFalse(vm.showActivate)
     }
 
     // MARK: - Flow starting interstitial

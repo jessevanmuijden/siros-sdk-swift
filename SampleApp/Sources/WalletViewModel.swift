@@ -155,10 +155,13 @@ final class WalletViewModel: ObservableObject {
 
     @Published var showAddCredential = false
     @Published var showHistory = false
-    @Published var showQrScanner = false
     @Published var showWscaDeveloper = false
     @Published var showDevices = false
-    @Published var showProximityEngagement = false
+    /// Which mode the merged Activate screen (QR scan / proximity engagement)
+    /// is showing - only meaningful while `showActivate` is true.
+    enum ActivateMode { case qr, proximity }
+    @Published var showActivate = false
+    @Published var activateMode: ActivateMode = .qr
     @Published var selectedCredential: StoredCredential?
     @Published var pendingPresentation: PresentationRequest?
     /// Non-nil while a `RequestWscdChoice` prompt (see `requestWscdChoice`)
@@ -419,7 +422,7 @@ final class WalletViewModel: ObservableObject {
         availableCredentials = []
         selectedCredential = nil
         showHistory = false
-        showQrScanner = false
+        showActivate = false
         showWscaDeveloper = false
         resetDevicesNavigation()
     }
@@ -913,25 +916,25 @@ final class WalletViewModel: ObservableObject {
         showHistory = false
     }
 
-    // MARK: - QR Scanner
+    // MARK: - Activate (QR scan + proximity engagement)
 
-    func openQrScanner() {
-        showQrScanner = true
+    /// Opens Activate, always starting in QR mode (the default engagement path).
+    func openActivate() {
+        activateMode = .qr
+        showActivate = true
     }
 
-    func closeQrScanner() {
-        showQrScanner = false
+    /// Switches an already-open Activate screen into proximity/BLE mode.
+    func switchActivateMode(_ mode: ActivateMode) {
+        activateMode = mode
     }
 
-    // MARK: - Proximity (ISO 18013-5 BLE) presentation
-
-    func openProximityEngagement() {
-        showProximityEngagement = true
+    /// Leaves Activate entirely, from either mode.
+    func closeActivate() {
+        showActivate = false
     }
 
-    func closeProximityEngagement() {
-        showProximityEngagement = false
-    }
+    // MARK: - Proximity (ISO 18013-5 BLE) presentation dependencies
 
     /// Mirrors `SirosWallet.getCredentials` - passed to `BlePeripheralServer`
     /// so it can match a request's docType without depending on this view
@@ -1053,7 +1056,7 @@ final class WalletViewModel: ObservableObject {
     }
 
     func handleQrResult(_ code: String) {
-        showQrScanner = false
+        closeActivate()
         let linkType = DeepLinkClassifier.classify(code)
         switch linkType {
         case .credentialOffer(let uri):

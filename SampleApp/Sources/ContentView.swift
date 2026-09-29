@@ -32,10 +32,13 @@ struct ContentView: View {
                     CredentialDetailView(credential: credential)
                 } else if viewModel.showHistory {
                     PresentationHistoryView()
-                } else if viewModel.showQrScanner {
-                    QRScannerView()
-                } else if viewModel.showProximityEngagement {
-                    ProximityEngagementScreen()
+                } else if viewModel.showActivate {
+                    switch viewModel.activateMode {
+                    case .qr:
+                        QRScannerView()
+                    case .proximity:
+                        ProximityEngagementScreen()
+                    }
                 } else if viewModel.showAddCredential {
                     AddCredentialView()
                 } else if viewModel.showWscaDeveloper {
@@ -276,12 +279,15 @@ struct MainTabView: View {
                     .font(.headline)
                     .fontWeight(.semibold)
                 Spacer()
-                Button(action: { viewModel.openProximityEngagement() }) {
+                Button(action: {
+                    viewModel.activateMode = .proximity
+                    viewModel.showActivate = true
+                }) {
                     Image(systemName: "wave.3.right")
                         .font(.title3)
                         .foregroundColor(SirosTheme.onSurface)
                 }
-                Button(action: { viewModel.openQrScanner() }) {
+                Button(action: { viewModel.openActivate() }) {
                     Image(systemName: "qrcode.viewfinder")
                         .font(.title3)
                         .foregroundColor(SirosTheme.onSurface)

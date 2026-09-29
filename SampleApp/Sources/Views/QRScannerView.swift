@@ -13,6 +13,14 @@ struct QRScannerView: View {
     /// Non-nil the instant a code is decoded, until the delayed handoff below
     /// fires. Drives the checkmark/flash overlay - see `handleDetectedCode`.
     @State private var detectedCode: String?
+    /// The pending delayed handoff scheduled by `handleDetectedCode`, if any -
+    /// cancelled in `onDisappear` so a scan detected right before the user
+    /// navigates away can't fire afterwards and call `viewModel.handleQrResult`,
+    /// which would incorrectly close whatever screen is showing BY THEN (a
+    /// real Copilot-review finding: `handleQrResult`'s unconditional
+    /// `closeActivate()` closes Activate regardless of its current mode, so a
+    /// stale scan could dismiss an unrelated, later-opened screen).
+    @State private var pendingHandoff: DispatchWorkItem?
 
     var body: some View {
         NavigationStack {
@@ -64,9 +72,13 @@ struct QRScannerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(L10n.string("common.cancel")) { viewModel.closeQrScanner() }
+                    Button(L10n.string("common.cancel")) { viewModel.closeActivate() }
                 }
             }
+        }
+        .onDisappear {
+            pendingHandoff?.cancel()
+            pendingHandoff = nil
         }
     }
 
@@ -100,7 +112,7 @@ struct QRScannerView: View {
         withAnimation(.easeOut(duration: 0.15)) {
             detectedCode = code
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        let handoff = DispatchWorkItem { [self] in
             // Don't pre-filter by classification here - handleQrResult
             // already classifies and, deliberately, treats an unclassified
             // URI as a presentation request attempt (covers bare
@@ -110,6 +122,8 @@ struct QRScannerView: View {
             // runs.
             viewModel.handleQrResult(code)
         }
+        pendingHandoff = handoff
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: handoff)
     }
 
     private var simulatorFallback: some View {
