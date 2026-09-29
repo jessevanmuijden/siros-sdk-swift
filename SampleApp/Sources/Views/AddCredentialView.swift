@@ -6,7 +6,6 @@ import SirosCredentials
 /// Credential picker list — shows available credentials from all issuers.
 struct AddCredentialView: View {
     @EnvironmentObject var viewModel: WalletViewModel
-    @State private var showIDVPreparation = false
     @State private var detailOffer: CredentialOffer?
 
     var body: some View {
@@ -33,7 +32,7 @@ struct AddCredentialView: View {
                     // the "offers non-empty" branch.
                     List {
                         Section {
-                            Button(action: { showIDVPreparation = true }) {
+                            Button(action: { viewModel.openIDVPreparation() }) {
                                 HStack(spacing: 12) {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 8)
@@ -106,15 +105,6 @@ struct AddCredentialView: View {
                     Text(L10n.string("credentials.addConfirmMessage", offer.credentialName, offer.issuerName))
                 }
             }
-        }
-        .sheet(isPresented: $showIDVPreparation) {
-            IDVPreparationView(
-                onStartScan: {
-                    showIDVPreparation = false
-                    viewModel.startIDV()
-                },
-                onDismiss: { showIDVPreparation = false }
-            )
         }
         .sheet(isPresented: showDetailOffer) {
             if let offer = detailOffer {

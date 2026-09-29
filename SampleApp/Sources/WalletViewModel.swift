@@ -26,7 +26,9 @@ private let redirectScheme = "siros-sample"
 /// the plain issuer offer from `openAddCredential()`'s list in favor of the
 /// "Scan Physical ID card" / IDV row, which is the one path meant to
 /// actually issue this credential.
-private let sirosIdCredentialConfigurationId = "siros_id"
+/// Not `private` - `WalletViewModel+PhotoIdOnboarding.swift`'s
+/// `hasPhotoIdCredential()` needs this from another file in the same target.
+let sirosIdCredentialConfigurationId = "siros_id"
 
 /// Sample app ViewModel.
 ///
@@ -68,6 +70,10 @@ final class WalletViewModel: ObservableObject {
     /// default since it duplicates the localized label.
     @Published var showDiagnosticMessages: Bool {
         didSet { UserDefaults.standard.set(showDiagnosticMessages, forKey: "siros_show_diagnostic_messages") }
+    }
+    /// Gates Home's "Get your PhotoID" onboarding CTA - see `WalletViewModel+PhotoIdOnboarding.swift`.
+    @Published var showPhotoIdOnboarding: Bool {
+        didSet { UserDefaults.standard.set(showPhotoIdOnboarding, forKey: "siros_show_photo_id_onboarding") }
     }
     /// See `WalletConfig.preferLocalReaderTrustEvaluation`'s doc comment.
     @Published var preferLocalReaderTrustEvaluation: Bool {
@@ -170,6 +176,9 @@ final class WalletViewModel: ObservableObject {
     @Published var showHistory = false
     @Published var showWscaDeveloper = false
     @Published var showDevices = false
+    /// The real entry point for FaceTec IDV capture (`startIDV()`) - see
+    /// `WalletViewModel+PhotoIdOnboarding.swift`.
+    @Published var showIDVPreparation = false
     /// Which mode the merged Activate screen (QR scan / proximity engagement)
     /// is showing - only meaningful while `showActivate` is true.
     enum ActivateMode { case qr, proximity }
@@ -354,6 +363,7 @@ final class WalletViewModel: ObservableObject {
         // localized label alone is enough. Kept as an opt-in toggle for
         // debugging (was default true during initial rollout).
         self.showDiagnosticMessages = defaults.object(forKey: "siros_show_diagnostic_messages") as? Bool ?? false
+        self.showPhotoIdOnboarding = defaults.object(forKey: "siros_show_photo_id_onboarding") as? Bool ?? false
         self.credentialConsumptionPolicy = defaults.string(forKey: "siros_credential_consumption_policy")
             .flatMap { CredentialConsumptionPolicy(rawValue: $0) } ?? .neverConsume
         self.wscdMultiPluginEnabled = defaults.bool(forKey: "siros_wscd_multi_plugin_enabled")
@@ -438,6 +448,7 @@ final class WalletViewModel: ObservableObject {
         showHistory = false
         showActivate = false
         showWscaDeveloper = false
+        showIDVPreparation = false
         resetDevicesNavigation()
     }
 
@@ -862,32 +873,7 @@ final class WalletViewModel: ObservableObject {
         pendingIssuanceOffer = nil
     }
 
-    // MARK: - Identity Verification (FaceTec IDV)
-
-    /// IDV server URL — defaults to facetec-api co-hosted behind /idv path.
-    var idvServerUrl: String { backendUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/idv" }
-
-    func startIDV() {
-        Task {
-            do {
-                isLoading = true
-                guard let wallet else { throw SirosError.wallet(message: "Wallet is not connected") }
-                let token = try await wallet.getAccessToken()
-                let delegate = FaceTecCaptureDelegate()
-                let client = RemoteIDVClient(config: RemoteIDVClient.Config(
-                    serverUrl: idvServerUrl,
-                    authToken: "Bearer \(token)"
-                ))
-                let provider = RemoteIDVProvider(client: client, delegate: delegate)
-                let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
-                let rootViewController = windowScene?.windows.first?.rootViewController ?? UIViewController()
-                try await wallet.verifyIdentityAndIssue(provider: provider, presentingViewController: rootViewController)
-            } catch {
-                errorMessage = "IDV failed: \(error.localizedDescription)"
-            }
-            isLoading = false
-        }
-    }
+    // MARK: - Identity Verification (FaceTec IDV) - see WalletViewModel+PhotoIdOnboarding.swift
 
     func openCredentialDetail(_ credential: StoredCredential) {
         guard showCredentialDetails else { return }
@@ -1132,7 +1118,9 @@ final class WalletViewModel: ObservableObject {
 
     private var presentationContinuation: CheckedContinuation<[Int64], Never>?
 
-    private func setError(_ message: String) {
+    /// Not `private` - other WalletViewModel+*.swift extension files (e.g.
+    /// PhotoIdOnboarding) need this from another file in the same target.
+    func setError(_ message: String) {
         errorMessage = message
         showError = true
     }

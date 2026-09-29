@@ -275,6 +275,10 @@ struct PreLoginSettingsView: View {
                     Text(L10n.string("settings.diagnosticMessagesDescription"))
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    Toggle(L10n.string("settings.photoIdOnboardingToggle"), isOn: $viewModel.showPhotoIdOnboarding)
+                    Text(L10n.string("settings.photoIdOnboardingDescription"))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             .navigationTitle(L10n.string("settings.connectionSettingsTitle"))

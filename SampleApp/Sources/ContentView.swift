@@ -34,6 +34,15 @@ struct ContentView: View {
                     PresentationHistoryView()
                 } else if viewModel.showActivate {
                     ActivateView()
+                } else if viewModel.showIDVPreparation {
+                    // The real entry point for both the "Scan Physical ID
+                    // card" row (AddCredentialView) and Home's PhotoID
+                    // onboarding CTA (HomeView) - see
+                    // WalletViewModel+PhotoIdOnboarding.swift.
+                    IDVPreparationView(
+                        onStartScan: { viewModel.startIDV() },
+                        onDismiss: { viewModel.closeIDVPreparation() }
+                    )
                 } else if viewModel.showAddCredential {
                     AddCredentialView()
                 } else if viewModel.showWscaDeveloper {

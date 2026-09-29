@@ -110,7 +110,9 @@
     "credentialDetailsToggle": "Intygsdetaljer",
     "credentialDetailsDescription": "Om det öppnar detaljvyn (rådata, anspråk, friläggningar) att trycka på ett intyg.",
     "diagnosticMessagesToggle": "Diagnostikmeddelanden",
-    "diagnosticMessagesDescription": "Visa den råa backend-stegtoken tillsammans med den vänliga förloppsetiketten under ett flöde."
+    "diagnosticMessagesDescription": "Visa den råa backend-stegtoken tillsammans med den vänliga förloppsetiketten under ett flöde.",
+    "photoIdOnboardingToggle": "PhotoID-registrering",
+    "photoIdOnboardingDescription": "Visa en genväg \"Skaffa ditt PhotoID\" på hemskärmen när denna klient erbjuder identitetsverifierat PhotoID-utfärdande"
   },
   "wscd": {
     "title": "WSCA Utvecklare",
@@ -275,7 +277,9 @@
   },
   "home": {
     "activateButton": "Aktivera",
-    "addCredentialButton": "Lägg till ett intyg"
+    "addCredentialButton": "Lägg till ett intyg",
+    "photoIdOnboardingTitle": "Skaffa ditt PhotoID",
+    "photoIdOnboardingDescription": "Verifiera din identitet för att lägga till ett PhotoID-intyg av statlig kvalitet"
   },
   "history": {
     "title": "Presentationshistorik",

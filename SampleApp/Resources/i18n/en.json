@@ -110,7 +110,9 @@
     "credentialDetailsToggle": "Credential Details",
     "credentialDetailsDescription": "Whether tapping a credential opens the detail screen (raw credential, claims, disclosures).",
     "diagnosticMessagesToggle": "Diagnostic Messages",
-    "diagnosticMessagesDescription": "Show the raw backend step token alongside the friendly progress label during a flow."
+    "diagnosticMessagesDescription": "Show the raw backend step token alongside the friendly progress label during a flow.",
+    "photoIdOnboardingToggle": "PhotoID Onboarding",
+    "photoIdOnboardingDescription": "Show a \"Get your PhotoID\" shortcut on Home when this tenant offers identity-verified PhotoID issuance"
   },
   "wscd": {
     "title": "WSCA Developer",
@@ -275,7 +277,9 @@
   },
   "home": {
     "activateButton": "Activate",
-    "addCredentialButton": "Add a credential"
+    "addCredentialButton": "Add a credential",
+    "photoIdOnboardingTitle": "Get your PhotoID",
+    "photoIdOnboardingDescription": "Verify your identity to add a government-grade PhotoID credential"
   },
   "history": {
     "title": "Presentation History",

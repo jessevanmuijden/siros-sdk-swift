@@ -13,6 +13,13 @@ import SwiftUI
 /// is also shown - it disappears once the wallet holds at least one
 /// credential, since the Credentials tab's own "+" action (and its
 /// empty-state card) cover that case from then on.
+///
+/// A separate labeled card offers FaceTec-backed PhotoID onboarding directly
+/// from Home (bypassing the Credentials tab's Add Credential list entirely)
+/// when `viewModel.showPhotoIdOnboarding` is on (currently a local
+/// sample-app setting, not gated by any real per-tenant server capability
+/// yet - see `WalletViewModel+PhotoIdOnboarding.swift`) and the wallet
+/// doesn't already hold that credential.
 struct HomeView: View {
     @EnvironmentObject var viewModel: WalletViewModel
 
@@ -64,9 +71,53 @@ struct HomeView: View {
                 .foregroundColor(SirosTheme.onSurfaceVariant)
             }
 
+            if viewModel.showPhotoIdOnboarding && !viewModel.hasPhotoIdCredential() {
+                PhotoIdOnboardingCard(onTap: viewModel.openIDVPreparation)
+                    .padding(.horizontal, 24)
+            }
+
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SirosTheme.background)
+    }
+}
+
+/// Visually consistent with `AddCredentialView`'s "Scan Physical ID card"
+/// row (same icon-in-box + title/subtitle + chevron shape) - the two are the
+/// same feature reached from two different entry points.
+private struct PhotoIdOnboardingCard: View {
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.15))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "camera")
+                        .foregroundColor(.accentColor)
+                }
+                VStack(alignment: .leading) {
+                    Text(L10n.string("home.photoIdOnboardingTitle"))
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .foregroundColor(SirosTheme.onSurface)
+                    Text(L10n.string("home.photoIdOnboardingDescription"))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.secondary)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(SirosTheme.surfaceVariant)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
