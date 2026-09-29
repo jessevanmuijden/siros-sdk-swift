@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-29
+
+### Fixed
+- **Presentation consent screen now shows a verified identity when there's
+  no declared display name.** The backend no longer trusts/caches an
+  unvalidated client-supplied `client_metadata.client_name` for the
+  verifier consent screen, so a `nil` verifier name is now common. The
+  consent screen now falls back to the verified `client_id`/DID/
+  certificate subject, labeled "Verified identity", when there's no
+  declared name (#167).
+- **`did:`-scheme verifiers and issuers can now be resolved when the
+  engine defers to the frontend.** go-wallet-backend sets
+  `requires_resolution: true` / `request_jwt` / `resolution_subject_id`
+  on a trust evaluation when it cannot resolve a `did:`-scheme subject's
+  key material itself (no verifier PDP configured). Both the legacy
+  engine path and the WMP transport now resolve the DID document via
+  `POST /v1/resolve` and verify `request_jwt` against the EXACT
+  verification method its JOSE `kid` names (comparing full normalized
+  identifiers, never just fragments, so a method belonging to a
+  different DID can't collide) - for a `credential_issuer`, which has no
+  signed request object to verify against, every resolved verification
+  method is forwarded instead. Fails closed on a denied AuthZEN
+  `decision`, a missing/unmatched `kid`, or a signature that doesn't
+  verify (#168).
+
 ## [0.14.0] - 2026-09-21
 
 ### Fixed
