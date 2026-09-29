@@ -153,6 +153,19 @@ final class WalletViewModel: ObservableObject {
 
     // MARK: - Navigation state
 
+    /// Which of `MainTabView`'s three tabs is showing (0 = Credentials,
+    /// 1 = Home, 2 = Settings). Lives here rather than as `MainTabView`'s own
+    /// local `@State`: `ContentView.body`'s top-level switch structurally
+    /// replaces `MainTabView` with a sibling screen (credential detail,
+    /// history, Activate, ...) and back again, which destroys and recreates
+    /// `MainTabView` - a local `@State` would silently reset to its default
+    /// every time, so returning from a credential's detail screen would land
+    /// back on Home instead of wherever the user actually was. Confirmed via
+    /// a real on-device UI test failure
+    /// (`CredentialStackInteractionUITests.testAShortDragSpringsBackWithoutReorderingTheDeck`),
+    /// not just reasoned about - the same class of screen round-trip that
+    /// test exercises.
+    @Published var selectedTab = 1
     @Published var showAddCredential = false
     @Published var showHistory = false
     @Published var showWscaDeveloper = false
@@ -418,6 +431,7 @@ final class WalletViewModel: ObservableObject {
 
     func disconnect() {
         wallet?.logout()
+        selectedTab = 1
         showAddCredential = false
         availableCredentials = []
         selectedCredential = nil

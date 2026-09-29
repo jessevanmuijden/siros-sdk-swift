@@ -34,6 +34,21 @@ struct CredentialsView: View {
     @State private var pendingDeleteFor: StoredCredential?
 
     var body: some View {
+        NavigationStack {
+            content
+                .navigationTitle(L10n.string("nav.credentials"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(action: { viewModel.openAddCredential() }) {
+                            Image(systemName: "plus")
+                        }
+                    }
+                }
+        }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L10n.string("credentials.welcome", viewModel.displayName ?? L10n.string("credentials.unknownUser")))
                 .font(.title2)

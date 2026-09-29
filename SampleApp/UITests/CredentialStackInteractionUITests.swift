@@ -51,6 +51,10 @@ final class CredentialStackInteractionUITests: XCTestCase {
         app = XCUIApplication()
         app.launchEnvironment["SIROS_SAMPLE_APP_FIXTURE_CREDENTIALS"] = "1"
         app.launch()
+        // Home, not Credentials, is the default landing tab (see HomeView) -
+        // every test in this suite exercises CredentialStack directly, so
+        // switch tabs before each one runs.
+        app.buttons["nav-tab-credentials"].tap()
     }
 
     /// batch id 1 ("Alpha"), 2 ("Bravo"), 3 ("Charlie") - 3 starts frontmost.

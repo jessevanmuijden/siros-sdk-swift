@@ -261,48 +261,18 @@ struct ErrorView: View {
 
 struct MainTabView: View {
     @EnvironmentObject var viewModel: WalletViewModel
-    @State private var selectedTab = 0
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top bar matching Android
-            HStack {
-                SirosMarkView()
-                    .frame(width: 28, height: 28)
-                Spacer().frame(width: 10)
-                Text(L10n.string("app.name"))
-                    .font(.headline)
-                    .fontWeight(.semibold)
-                Spacer()
-                Button(action: {
-                    viewModel.activateMode = .proximity
-                    viewModel.showActivate = true
-                }) {
-                    Image(systemName: "wave.3.right")
-                        .font(.title3)
-                        .foregroundColor(SirosTheme.onSurface)
-                }
-                Button(action: { viewModel.openActivate() }) {
-                    Image(systemName: "qrcode.viewfinder")
-                        .font(.title3)
-                        .foregroundColor(SirosTheme.onSurface)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(SirosTheme.surface)
-
-            Divider()
-
             // Content area
             Group {
-                switch selectedTab {
-                case 0:
-                    CredentialsView()
+                switch viewModel.selectedTab {
+                case 1:
+                    HomeView()
                 case 2:
                     SettingsView()
                 default:
-                    EmptyView()
+                    CredentialsView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -314,23 +284,22 @@ struct MainTabView: View {
                 tabButton(
                     icon: "wallet.pass",
                     label: L10n.string("nav.credentials"),
-                    tag: 0
+                    tag: 0,
+                    identifier: "nav-tab-credentials"
                 )
                 Spacer()
                 tabButton(
-                    icon: "plus",
-                    label: L10n.string("nav.add"),
+                    mark: true,
+                    label: L10n.string("nav.home"),
                     tag: 1,
-                    action: {
-                        selectedTab = 1
-                        viewModel.openAddCredential()
-                    }
+                    identifier: "nav-tab-home"
                 )
                 Spacer()
                 tabButton(
                     icon: "gear",
                     label: L10n.string("nav.settings"),
-                    tag: 2
+                    tag: 2,
+                    identifier: "nav-tab-settings"
                 )
             }
             .padding(.horizontal, 32)
@@ -350,23 +319,31 @@ struct MainTabView: View {
     }
 
     @ViewBuilder
-    private func tabButton(icon: String, label: String, tag: Int, action: (() -> Void)? = nil) -> some View {
-        let isSelected = selectedTab == tag
-        Button(action: {
-            if let action {
-                action()
-            } else {
-                selectedTab = tag
-            }
-        }) {
+    private func tabButton(icon: String? = nil, mark: Bool = false, label: String, tag: Int, identifier: String) -> some View {
+        let isSelected = viewModel.selectedTab == tag
+        Button(action: { viewModel.selectedTab = tag }) {
             VStack(spacing: 2) {
-                Image(systemName: icon)
-                    .font(.system(size: 20))
+                if mark {
+                    // The SIROS mark is two-tone (navy star on white), so it's
+                    // shown as-is rather than tinted like the other tabs'
+                    // single-color SF Symbols - and noticeably larger, since
+                    // this is the app's primary "home" anchor.
+                    SirosMarkView(size: 32)
+                        .frame(width: 32, height: 32)
+                } else if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 20))
+                        .foregroundColor(isSelected ? SirosTheme.brand : SirosTheme.onSurfaceVariant)
+                }
                 Text(label)
                     .font(.caption2)
+                    .foregroundColor(isSelected ? SirosTheme.brand : SirosTheme.onSurfaceVariant)
             }
-            .foregroundColor(isSelected ? SirosTheme.brand : SirosTheme.onSurfaceVariant)
         }
         .buttonStyle(.plain)
+        // Stable, locale-independent hook for UI tests (see
+        // CredentialStackInteractionUITests, which must switch off Home to
+        // reach the Credentials tab before it can exercise the stack).
+        .accessibilityIdentifier(identifier)
     }
 }

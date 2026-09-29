@@ -258,9 +258,8 @@
   },
   "nav": {
     "credentials": "Credentials",
-    "add": "Add",
+    "home": "Home",
     "settings": "Settings",
-    "qrScan": "Scan QR Code",
     "back": "Back"
   },
   "qr": {
@@ -273,6 +272,10 @@
   },
   "activate": {
     "useProximityInstead": "Use proximity instead"
+  },
+  "home": {
+    "activateButton": "Activate",
+    "addCredentialButton": "Add a credential"
   },
   "history": {
     "title": "Presentation History",

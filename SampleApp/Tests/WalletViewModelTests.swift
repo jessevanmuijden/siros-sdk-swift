@@ -123,6 +123,7 @@ final class WalletViewModelTests: XCTestCase {
 
     func testDisconnectClearsState() {
         let vm = makeViewModel()
+        vm.selectedTab = 2
         vm.showAddCredential = true
         vm.selectedCredential = StoredCredential(id: 2, format: "jwt", raw: "", batchId: 2, instanceId: 0)
         vm.showHistory = true
@@ -131,11 +132,29 @@ final class WalletViewModelTests: XCTestCase {
 
         vm.disconnect()
 
+        XCTAssertEqual(vm.selectedTab, 1)
         XCTAssertFalse(vm.showAddCredential)
         XCTAssertNil(vm.selectedCredential)
         XCTAssertFalse(vm.showHistory)
         XCTAssertFalse(vm.showActivate)
         XCTAssertTrue(vm.availableCredentials.isEmpty)
+    }
+
+    /// Regression test for a real bug found via an on-device UI test run:
+    /// `MainTabView` used to own `selectedTab` as local `@State`, which reset
+    /// to its default every time `ContentView`'s top-level switch tore it
+    /// down and recreated it (e.g. opening then closing a credential's
+    /// detail screen) - so returning from ANY sibling screen silently
+    /// bounced the user back to Home regardless of which tab they were
+    /// actually on. `selectedTab` living on the view model instead must
+    /// survive exactly that round trip.
+    func testSelectedTabSurvivesAcrossViewModelLifetime() {
+        let vm = makeViewModel()
+        XCTAssertEqual(vm.selectedTab, 1, "Home must be the default tab")
+        vm.selectedTab = 0
+        vm.selectedCredential = StoredCredential(id: 3, format: "jwt", raw: "", batchId: 3, instanceId: 0)
+        vm.selectedCredential = nil
+        XCTAssertEqual(vm.selectedTab, 0, "selectedTab must not reset just because a sibling screen opened and closed")
     }
 
     // MARK: - Auth redirect

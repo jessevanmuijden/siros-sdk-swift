@@ -258,9 +258,8 @@
   },
   "nav": {
     "credentials": "Intyg",
-    "add": "Lägg till",
+    "home": "Hem",
     "settings": "Inställningar",
-    "qrScan": "Skanna QR-kod",
     "back": "Tillbaka"
   },
   "qr": {
@@ -273,6 +272,10 @@
   },
   "activate": {
     "useProximityInstead": "Använd närhet i stället"
+  },
+  "home": {
+    "activateButton": "Aktivera",
+    "addCredentialButton": "Lägg till ett intyg"
   },
   "history": {
     "title": "Presentationshistorik",
