@@ -245,7 +245,7 @@
     "presentationSent": "Presentationen skickades"
   },
   "proximity": {
-    "title": "Proximitetsanslutning",
+    "title": "Tryck för att dela",
     "scanPrompt": "Skanna med en ISO 18013-5 mdoc-läsare",
     "activeDescription": "BLE peripheral server-läge och central client-läge är båda aktiva - en verklig läsare kan ansluta via endera och slutföra en presentation om ett sparat intyg matchar den begärda dokumenttypen. NFC statisk handover är inte tillgängligt på iOS.",
     "presentationFailed": "Presentationen slutfördes inte",
@@ -271,7 +271,7 @@
     "simulatorFallbackHint": "Använd inmatningsfältet nedan för att ange en URI."
   },
   "activate": {
-    "useProximityInstead": "Använd närhet i stället"
+    "useProximityInstead": "Tryck för att dela i stället"
   },
   "home": {
     "activateButton": "Aktivera",

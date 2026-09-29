@@ -930,24 +930,6 @@ final class WalletViewModel: ObservableObject {
         showHistory = false
     }
 
-    // MARK: - Activate (QR scan + proximity engagement)
-
-    /// Opens Activate, always starting in QR mode (the default engagement path).
-    func openActivate() {
-        activateMode = .qr
-        showActivate = true
-    }
-
-    /// Switches an already-open Activate screen into proximity/BLE mode.
-    func switchActivateMode(_ mode: ActivateMode) {
-        activateMode = mode
-    }
-
-    /// Leaves Activate entirely, from either mode.
-    func closeActivate() {
-        showActivate = false
-    }
-
     // MARK: - Proximity (ISO 18013-5 BLE) presentation dependencies
 
     /// Mirrors `SirosWallet.getCredentials` - passed to `BlePeripheralServer`

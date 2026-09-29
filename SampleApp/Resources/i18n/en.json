@@ -245,7 +245,7 @@
     "presentationSent": "Presentation sent successfully"
   },
   "proximity": {
-    "title": "Proximity Engagement",
+    "title": "Tap to share",
     "scanPrompt": "Scan with an ISO 18013-5 mdoc reader",
     "activeDescription": "BLE peripheral server mode and central client mode are both active - a real reader can connect via either and complete a presentation if a stored credential matches its requested docType. NFC static handover is not available on iOS.",
     "presentationFailed": "Presentation did not complete",
@@ -271,7 +271,7 @@
     "simulatorFallbackHint": "Use the paste field below to enter a URI."
   },
   "activate": {
-    "useProximityInstead": "Use proximity instead"
+    "useProximityInstead": "Tap to share instead"
   },
   "home": {
     "activateButton": "Activate",

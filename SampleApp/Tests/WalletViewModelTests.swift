@@ -95,6 +95,17 @@ final class WalletViewModelTests: XCTestCase {
         XCTAssertEqual(vm.activateMode, .qr)
     }
 
+    /// Per Copilot review: testOpenActivateSetsFlag only calls the default
+    /// overload, so an implementation that ignored `mode` would still pass -
+    /// this exercises the `.proximity` argument explicitly (HomeView's
+    /// long-press shortcut).
+    func testOpenActivateWithProximityModeOpensDirectlyIntoProximity() {
+        let vm = makeViewModel()
+        vm.openActivate(mode: .proximity)
+        XCTAssertTrue(vm.showActivate)
+        XCTAssertEqual(vm.activateMode, .proximity)
+    }
+
     /// Exercises a real mode transition (unlike `testOpenActivateSetsFlag`,
     /// which starts from the default `.qr` and would pass even if
     /// `openActivate()` stopped resetting a previous mode) - per Copilot
