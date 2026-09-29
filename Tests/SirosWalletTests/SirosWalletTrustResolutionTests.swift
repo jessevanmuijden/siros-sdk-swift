@@ -167,6 +167,48 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         return "\(headerB64).\(payloadB64).\(sigB64)"
     }
 
+    /// Regression (review finding): the verification primitive must be
+    /// selected by the JWS's OWN declared `alg`, never merely by the
+    /// candidate key's `kty` - an EC key's real, validly-computed P-256
+    /// signature must still be REJECTED if the header falsely declares
+    /// `alg: "EdDSA"` (a classic JOSE algorithm-confusion shape), even
+    /// though the resolved DID document's only verification method is that
+    /// same EC key.
+    func testHandleTrustEvaluationFailsClosedWhenAlgDoesNotMatchKeyType() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let header: [String: Any] = ["alg": "EdDSA", "kid": "did:web:verifier.example.com#key-1"]
+        let headerB64 = base64UrlEncode(try JSONSerialization.data(withJSONObject: header))
+        let payloadB64 = base64UrlEncode(try JSONSerialization.data(withJSONObject: ["client_id": "did:web:verifier.example.com"]))
+        let signingInput = Data("\(headerB64).\(payloadB64)".utf8)
+        let signature = try verifierKey.signature(for: signingInput)
+        let jwt = "\(headerB64).\(payloadB64).\(base64UrlEncode(signature.rawRepresentation))"
+
+        let didDocument: [String: Any] = [
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-alg-confusion", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "an EC key tried under a mismatched EdDSA alg must never reach /v1/evaluate")
+    }
+
     func testHandleTrustEvaluationResolvesDidKeyMaterialWhenRequiresResolution() async throws {
         let verifierKey = P256.Signing.PrivateKey()
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")

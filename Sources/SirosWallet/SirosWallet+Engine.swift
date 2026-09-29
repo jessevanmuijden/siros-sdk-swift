@@ -1381,8 +1381,15 @@ extension SirosWallet {
         // genuinely valid signature - never verified, never caught by CI.
         for vm in candidates {
             guard let jwk = vm["publicKeyJwk"] as? [String: Any] else { continue }
-            switch jwk["kty"] as? String {
-            case "EC":
+            // The verification primitive is selected by the JWS's OWN
+            // declared `alg`, not merely by the candidate key's `kty` - a
+            // JWK's kty alone must never pick the algorithm (classic JOSE
+            // algorithm-confusion class), so an EC key is only tried for
+            // `alg: "ES256"` and an OKP/Ed25519 key only for `alg: "EdDSA"`,
+            // matching the exact non-nil `alg` already required above
+            // (review finding).
+            switch (jwk["kty"] as? String, alg) {
+            case ("EC", "ES256"):
                 guard let publicKeyBytes = try? Self.ecPublicKeyBytesForTrustResolution(fromJwk: jwk),
                       let publicKey = try? P256.Signing.PublicKey(x963Representation: publicKeyBytes),
                       let ecdsaSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
@@ -1390,7 +1397,7 @@ extension SirosWallet {
                     continue
                 }
                 return jwk
-            case "OKP":
+            case ("OKP", "EdDSA"):
                 guard (jwk["crv"] as? String) == "Ed25519",
                       let xStr = jwk["x"] as? String,
                       let rawKey = Self.base64UrlDecodeForTrustResolution(xStr),
