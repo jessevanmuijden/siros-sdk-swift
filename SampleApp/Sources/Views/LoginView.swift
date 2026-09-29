@@ -293,6 +293,11 @@ struct PreLoginSettingsView: View {
 /// SwiftUI rendering of the SIROS mark (ic_siros_mark).
 /// Uses the same path data as the Android vector drawable.
 struct SirosMarkView: View {
+    /// Diameter of the mark's circle - the inner glyph scales with it so the
+    /// mark still looks right whether it's a 28pt top-bar accent or a much
+    /// larger Home-screen logo.
+    var size: CGFloat = 56
+
     var body: some View {
         ZStack {
             // Navy background circle
@@ -301,7 +306,7 @@ struct SirosMarkView: View {
 
             // Simplified SIROS star/compass mark in white
             Image(systemName: "sparkle")
-                .font(.system(size: 24, weight: .bold))
+                .font(.system(size: size * 0.43, weight: .bold))
                 .foregroundColor(.white)
         }
     }
