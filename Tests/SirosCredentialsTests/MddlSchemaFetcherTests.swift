@@ -46,6 +46,43 @@ final class MddlSchemaFetcherTests: XCTestCase {
         XCTAssertEqual(schema?.requiredKeyStorage, "iso_18045_moderate")
     }
 
+    /// Regression test for #176 fix review: `CredentialUtilsTests` only
+    /// constructs `MddlSchema`/`MddlClaimMeta` programmatically, so a
+    /// `CodingKeys` mismatch against real issuer JSON (e.g. `svg_templates`,
+    /// `color_scheme`, `svg_id`) would never be caught by any test. This
+    /// decodes the actual raw JSON shape (mirroring `vc`'s
+    /// `pkg/mdoc/schema.go`) through the real fetch path.
+    func testParseMddlSchemaDecodesSvgTemplatesAndSvgIdFromRawJson() {
+        let json = """
+        {
+          "format": "mso_mdoc",
+          "doctype": "eu.europa.ec.eudi.photoid.1",
+          "display": [
+            {
+              "locale": "en",
+              "name": "Photo ID",
+              "rendering": {
+                "svg_templates": [
+                  { "uri": "https://issuer.example.com/photoid.svg", "properties": { "color_scheme": "light" } }
+                ]
+              }
+            }
+          ],
+          "claims": {
+            "org.iso.23220.photoid.1": {
+              "portrait": { "value_type": "bstr", "svg_id": "portrait" }
+            }
+          }
+        }
+        """
+        let fetcher = MddlSchemaFetcher()
+        let schema = fetcher.parseMddlSchema(json)
+
+        XCTAssertEqual(schema?.display?.first?.rendering?.svgTemplates?.first?.uri, "https://issuer.example.com/photoid.svg")
+        XCTAssertEqual(schema?.display?.first?.rendering?.svgTemplates?.first?.properties?.colorScheme, "light")
+        XCTAssertEqual(schema?.claims?["org.iso.23220.photoid.1"]?["portrait"]?.svgId, "portrait")
+    }
+
     func testParseMddlSchemaReturnsNilForInvalidJson() {
         let fetcher = MddlSchemaFetcher()
         XCTAssertNil(fetcher.parseMddlSchema("not json"))

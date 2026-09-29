@@ -41,6 +41,34 @@ final class SvgTemplateRendererTests: XCTestCase {
         XCTAssertEqual(result, "<text>A &amp; B &lt;C&gt; &quot;D&quot; &apos;E&apos;</text>")
     }
 
+    func testSubstitutesImageDataUriRatherThanValueWhenClaimCarriesOne() {
+        let template = "<image href=\"{{portrait}}\"/>"
+        let claims = [
+            DisplayClaim(
+                key: "org.iso.18013.5.1.portrait", label: "Portrait", value: "<1234 bytes>",
+                svgId: "portrait", imageDataUri: "data:image/jpeg;base64,AAAA"
+            ),
+        ]
+        XCTAssertEqual(
+            SvgTemplateRenderer.substitute(template, claims: claims),
+            "<image href=\"data:image/jpeg;base64,AAAA\"/>"
+        )
+    }
+
+    /// Per Copilot review of #178: a legitimate text claim whose value
+    /// happens to look exactly like `CredentialUtils.formatCborValue`'s
+    /// `"<N bytes>"` placeholder must NOT be misclassified as an
+    /// undecodable byte string - `substitute` reads `isUndecodableBytes`
+    /// directly rather than inferring provenance from `value`'s text, so
+    /// this is now impossible by construction rather than by coincidence.
+    func testDoesNotMisclassifyATextClaimThatCoincidentallyLooksLikeTheBytesPlaceholder() {
+        let template = "<text>{{serial}}</text>"
+        let claims = [
+            DisplayClaim(key: "serial", label: "Serial", value: "<12 bytes>", svgId: "serial"),
+        ]
+        XCTAssertEqual(SvgTemplateRenderer.substitute(template, claims: claims), "<text>&lt;12 bytes&gt;</text>")
+    }
+
     func testIsANoOpOnTemplatesWithNoTokens() {
         let template = "<svg><rect width=\"100\" height=\"100\"/></svg>"
         XCTAssertEqual(SvgTemplateRenderer.substitute(template, claims: []), template)
@@ -48,6 +76,32 @@ final class SvgTemplateRendererTests: XCTestCase {
 
     func testEscapeXmlHandlesAllFiveSpecialCharacters() {
         XCTAssertEqual(SvgTemplateRenderer.escapeXml("&<>\"'"), "&amp;&lt;&gt;&quot;&apos;")
+    }
+
+    func testSubstitutesADataUriImageClaimUnescaped() {
+        let template = #"<image href="{{portrait}}"/>"#
+        let dataUri = "data:image/jpeg;base64,/9j/4AAQ"
+        let claims = [
+            DisplayClaim(key: "org.iso.23220.1.portrait", label: "Portrait", value: dataUri, svgId: "portrait"),
+        ]
+        XCTAssertEqual(SvgTemplateRenderer.substitute(template, claims: claims), #"<image href="\#(dataUri)"/>"#)
+    }
+
+    func testRendersADashForAnSvgBoundClaimThatCouldNotBeDecodedAsAnImage() {
+        // Mirrors CredentialUtils.formatCborValue's fallback for a byte
+        // string that isn't a recognized JPEG/PNG (e.g. JPEG 2000) - showing
+        // the raw byte count where an image was expected would be more
+        // confusing than an explicit "not shown" marker. `isUndecodableBytes`
+        // is read directly (not inferred from `value`'s text - see
+        // `testDoesNotMisclassifyATextClaimThatCoincidentallyLooksLikeTheBytesPlaceholder`).
+        let template = #"<image href="{{portrait}}"/>"#
+        let claims = [
+            DisplayClaim(
+                key: "org.iso.23220.1.portrait", label: "Portrait", value: "<38000 bytes>",
+                svgId: "portrait", isUndecodableBytes: true
+            ),
+        ]
+        XCTAssertEqual(SvgTemplateRenderer.substitute(template, claims: claims), #"<image href="-"/>"#)
     }
 
     func testRealDc4euDiplomaTemplateSubstitutesCorrectly() {

@@ -227,12 +227,22 @@ final class CredentialUtilsTests: XCTestCase {
         return .tagged(.encodedCBORDataItem, .byteString(item.encode()))
     }
 
+    private func buildTaggedItemBytes(digestId: UInt64, elementIdentifier: String, elementValue: [UInt8]) -> CBOR {
+        let item: CBOR = .map([
+            .utf8String("digestID"): .unsignedInt(digestId),
+            .utf8String("random"): .byteString([UInt8](repeating: 0, count: 16)),
+            .utf8String("elementIdentifier"): .utf8String(elementIdentifier),
+            .utf8String("elementValue"): .byteString(elementValue),
+        ])
+        return .tagged(.encodedCBORDataItem, .byteString(item.encode()))
+    }
+
     /// Build a synthetic mdoc credential's raw (base64url) bytes: a DeviceResponse-shaped envelope.
-    private func buildMdocRaw() -> String {
+    private func buildMdocRaw(extraItems: [CBOR] = []) -> String {
         let items: CBOR = .array([
             buildTaggedItem(digestId: 0, elementIdentifier: "family_name", elementValue: "Doe"),
             buildTaggedItem(digestId: 1, elementIdentifier: "given_name", elementValue: "Jane"),
-        ])
+        ] + extraItems)
         let nameSpaces: CBOR = .map([.utf8String(mdocNamespace): items])
         let issuerAuth: CBOR = .array(Array(repeating: .byteString([]), count: 4))
         let issuerSigned: CBOR = .map([
@@ -326,6 +336,113 @@ final class CredentialUtilsTests: XCTestCase {
         XCTAssertEqual(metadata.name, "Driving Licence (offer)")
         XCTAssertEqual(metadata.backgroundColor, "#1a365d")
         XCTAssertNil(metadata.claims)
+    }
+
+    // Regression tests for #176: mdoc claims never carried an svgId, so no
+    // mdoc claim could ever be substituted into an SVG rendering card.
+
+    func testBuildMdocMetadataPopulatesSvgIdAndSvgTemplatesFromMddlSchemaRendering() {
+        let offer = CredentialOffer(
+            credentialConfigurationId: "photoid",
+            credentialIssuerIdentifier: "https://issuer.example.com",
+            credentialName: "Photo ID (offer)",
+            issuerName: "Test Issuer"
+        )
+        let locale = Locale.current.identifier.replacingOccurrences(of: "_", with: "-")
+        let schema = MddlSchema(
+            format: "mso_mdoc",
+            doctype: "eu.europa.ec.eudi.photoid.1",
+            display: [
+                MddlDisplay(
+                    locale: locale,
+                    name: "Photo ID",
+                    rendering: MddlRendering(svgTemplates: [MddlSvgTemplate(uri: "https://issuer.example.com/photoid.svg")])
+                ),
+            ],
+            claims: [
+                mdocNamespace: [
+                    "portrait": MddlClaimMeta(
+                        display: [MddlClaimDisplay(locale: locale, name: "Portrait")],
+                        valueType: "bstr",
+                        svgId: "portrait"
+                    ),
+                ],
+            ]
+        )
+
+        let metadata = CredentialUtils.buildMdocMetadata(offer: offer, mddlSchema: schema)
+        XCTAssertEqual(metadata.claims?.first?.svgId, "portrait")
+        XCTAssertEqual(metadata.svgTemplates?.count, 1)
+        XCTAssertEqual(metadata.svgTemplates?.first?.uri, "https://issuer.example.com/photoid.svg")
+    }
+
+    func testExtractMdocClaimsTurnsAJpegPortraitByteStringIntoADataUri() {
+        let jpegBytes: [UInt8] = [0xFF, 0xD8, 0xFF, 0x00, 0x01, 0x02]
+        let cred = StoredCredential(
+            id: 6,
+            format: "mso_mdoc",
+            raw: buildMdocRaw(extraItems: [buildTaggedItemBytes(digestId: 2, elementIdentifier: "portrait", elementValue: jpegBytes)]),
+            metadata: CredentialMetadata(
+                doctype: mdocDocType,
+                claims: [ClaimMeta(path: [mdocNamespace, "portrait"], label: "Portrait", svgId: "portrait")]
+            ),
+            batchId: 6,
+            instanceId: 0
+        )
+
+        let claims = CredentialUtils.extractClaims(cred)
+        let portrait = claims.first { $0.key == "\(mdocNamespace).portrait" }
+        let expectedBase64 = Data(jpegBytes).base64EncodedString()
+        // The generic display `value` stays the concise placeholder - only
+        // `imageDataUri` carries the (potentially huge) base64 URI, so a
+        // credential's Claims tab never renders a giant base64 blob for a
+        // portrait (see `SvgTemplateRenderer`, which is the only consumer
+        // of `imageDataUri`).
+        XCTAssertEqual(portrait?.value, "<\(jpegBytes.count) bytes>")
+        XCTAssertEqual(portrait?.imageDataUri, "data:image/jpeg;base64,\(expectedBase64)")
+        XCTAssertFalse(portrait?.isUndecodableBytes ?? true)
+        XCTAssertEqual(portrait?.svgId, "portrait")
+    }
+
+    func testExtractMdocClaimsTurnsAPngPortraitByteStringIntoADataUri() {
+        let pngBytes: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]
+        let cred = StoredCredential(
+            id: 7,
+            format: "mso_mdoc",
+            raw: buildMdocRaw(extraItems: [buildTaggedItemBytes(digestId: 2, elementIdentifier: "portrait", elementValue: pngBytes)]),
+            metadata: nil,
+            batchId: 7,
+            instanceId: 0
+        )
+
+        let claims = CredentialUtils.extractClaims(cred)
+        let portrait = claims.first { $0.key == "\(mdocNamespace).portrait" }
+        let expectedBase64 = Data(pngBytes).base64EncodedString()
+        XCTAssertEqual(portrait?.value, "<\(pngBytes.count) bytes>")
+        XCTAssertEqual(portrait?.imageDataUri, "data:image/png;base64,\(expectedBase64)")
+        XCTAssertFalse(portrait?.isUndecodableBytes ?? true)
+    }
+
+    func testExtractMdocClaimsLeavesAnUndecodableByteStringAsTheNBytesPlaceholder() {
+        // JPEG 2000 codestream magic bytes - deliberately NOT decoded, per
+        // #176's "Decision: JPEG 2000" (no image-decoding dependency added
+        // to the SDK, despite UIImage/ImageIO being able to decode JP2
+        // natively; issuers targeting SVG cards must transcode JP2 themselves).
+        let jp2Bytes: [UInt8] = [0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x00]
+        let cred = StoredCredential(
+            id: 8,
+            format: "mso_mdoc",
+            raw: buildMdocRaw(extraItems: [buildTaggedItemBytes(digestId: 2, elementIdentifier: "portrait", elementValue: jp2Bytes)]),
+            metadata: nil,
+            batchId: 8,
+            instanceId: 0
+        )
+
+        let claims = CredentialUtils.extractClaims(cred)
+        let portrait = claims.first { $0.key == "\(mdocNamespace).portrait" }
+        XCTAssertEqual(portrait?.value, "<\(jp2Bytes.count) bytes>")
+        XCTAssertNil(portrait?.imageDataUri)
+        XCTAssertTrue(portrait?.isUndecodableBytes ?? false)
     }
 
     // MARK: - eligibleInstances / CredentialConsumptionPolicy

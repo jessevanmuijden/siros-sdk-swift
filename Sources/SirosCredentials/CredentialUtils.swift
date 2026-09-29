@@ -22,6 +22,17 @@ public struct DisplayClaim: Sendable, Equatable {
     public let mandatory: Bool
     /// VCTM SVG template placeholder ID this claim fills, if any.
     public let svgId: String?
+    /// A `data:image/...;base64,...` URI when this claim is a byte-string
+    /// that decoded to a displayable image (e.g. an mdoc portrait) - kept
+    /// separate from `value` so a generic claims list still shows the
+    /// concise `"<N bytes>"` placeholder instead of an enormous base64
+    /// string; only `SvgTemplateRenderer` substitutes this into a card.
+    public let imageDataUri: String?
+    /// True when this claim is a byte-string that could not be turned into
+    /// a displayable image (e.g. JPEG 2000 - see `CredentialUtils.formatCborValue`).
+    /// `SvgTemplateRenderer` renders such a claim as `-` rather than the raw
+    /// `"<N bytes>"` placeholder, which would be more confusing in an image slot.
+    public let isUndecodableBytes: Bool
 
     public init(
         key: String,
@@ -29,7 +40,9 @@ public struct DisplayClaim: Sendable, Equatable {
         value: String,
         description: String? = nil,
         mandatory: Bool = false,
-        svgId: String? = nil
+        svgId: String? = nil,
+        imageDataUri: String? = nil,
+        isUndecodableBytes: Bool = false
     ) {
         self.key = key
         self.label = label
@@ -37,6 +50,8 @@ public struct DisplayClaim: Sendable, Equatable {
         self.description = description
         self.mandatory = mandatory
         self.svgId = svgId
+        self.imageDataUri = imageDataUri
+        self.isUndecodableBytes = isUndecodableBytes
     }
 }
 
@@ -297,6 +312,19 @@ public enum CredentialUtils {
         }
     }
 
+    /// Extract an mdoc credential's data elements as display claims.
+    ///
+    /// A byte-string data element (e.g. an ISO 18013-5/23220 `portrait`) is
+    /// only turned into a displayable image (`DisplayClaim.imageDataUri`,
+    /// consumed by `SvgTemplateRenderer` for `svg_templates` cards) when it
+    /// is JPEG or PNG. **Issuers must not issue JPEG 2000 portraits if they
+    /// want them to render in an SVG card** - this SDK deliberately does not
+    /// decode JPEG 2000 (see issue #176 "Decision: JPEG 2000"); a JPEG
+    /// 2000 (or any other non-JPEG/PNG) byte string instead renders as `-`
+    /// in that card slot (`DisplayClaim.isUndecodableBytes`). An issuer
+    /// wanting SVG-card portraits from a JPEG-2000-native pipeline (e.g.
+    /// ISO 18013-5's default, or `facetec-api`'s FaceTec capture) must
+    /// transcode to JPEG or PNG server-side before issuance.
     public static func extractMdocClaims(_ credential: StoredCredential) -> [DisplayClaim] {
         guard let document = parseMdocDocument(credential.raw) else { return [] }
 
@@ -309,12 +337,22 @@ public enum CredentialUtils {
             items.map { entry -> DisplayClaim in
                 let elementId = entry.item.elementIdentifier
                 let meta = claimMetaByPath["\(namespace)/\(elementId)"]
+                let cborValue = entry.item.elementValue
+                var imageUri: String?
+                var isUndecodableBytes = false
+                if case .byteString(let bytes) = cborValue {
+                    imageUri = imageDataUri(bytes)
+                    isUndecodableBytes = imageUri == nil
+                }
                 return DisplayClaim(
                     key: "\(namespace).\(elementId)",
                     label: meta?.label ?? formatClaimKey(elementId),
-                    value: formatCborValue(entry.item.elementValue),
+                    value: formatCborValue(cborValue),
                     description: meta?.description,
-                    mandatory: meta?.mandatory ?? false
+                    mandatory: meta?.mandatory ?? false,
+                    svgId: meta?.svgId,
+                    imageDataUri: imageUri,
+                    isUndecodableBytes: isUndecodableBytes
                 )
             }
         }
@@ -342,9 +380,19 @@ public enum CredentialUtils {
                 return ClaimMeta(
                     path: [namespace, elementId],
                     label: claimDisplay?.name,
-                    mandatory: meta.mandatory
+                    mandatory: meta.mandatory,
+                    svgId: meta.svgId
                 )
             }
+        }
+
+        let svgTemplates: [SvgTemplateInfo]? = display?.rendering?.svgTemplates?.map { template in
+            SvgTemplateInfo(
+                uri: template.uri,
+                colorScheme: template.properties?.colorScheme,
+                contrast: template.properties?.contrast,
+                orientation: template.properties?.orientation
+            )
         }
 
         return CredentialMetadata(
@@ -356,11 +404,28 @@ public enum CredentialUtils {
             textColor: display?.textColor ?? offer.textColor,
             logo: display?.logo.map { LogoInfo(uri: $0.uri, altText: $0.altText) }
                 ?? offer.logoUri.map { LogoInfo(uri: $0) },
-            claims: claims
+            claims: claims,
+            svgTemplates: svgTemplates
         )
     }
 
-    /// Format a decoded CBOR element value for display.
+    /// Format a decoded CBOR element value for display. A byte string always
+    /// stays the concise `"<N bytes>"` placeholder here, even when it sniffs
+    /// as a displayable image - `DisplayClaim.imageDataUri` (see
+    /// `extractMdocClaims`) is the only place the actual
+    /// `data:image/...;base64,...` URI is surfaced, so a generic claims list
+    /// never has to render an enormous base64 string for a portrait; only
+    /// `SvgTemplateRenderer` substitutes the image URI into a rendering card.
+    ///
+    /// Integrators targeting `svg_templates` cards for mdoc portraits must
+    /// issue the underlying byte string as JPEG or PNG - see `imageDataUri`
+    /// below for exactly which magic bytes are recognized. JPEG 2000 (the
+    /// ISO 18013-5/23220 default) is deliberately NOT decoded by this SDK
+    /// (see issue #176 "Decision: JPEG 2000"); an issuer whose portraits are
+    /// JPEG 2000 must transcode to JPEG or PNG server-side (e.g.
+    /// `facetec-api`'s `issuer.format: mdoc` pipeline does this) before a
+    /// wallet using this SDK can render that portrait in an SVG card - it
+    /// will otherwise always render as `-` in that slot (`DisplayClaim.isUndecodableBytes`).
     private static func formatCborValue(_ value: CBOR) -> String {
         switch value {
         case .utf8String(let s): return s
@@ -372,6 +437,25 @@ public enum CredentialUtils {
         case .float(let f): return String(f)
         default: return String(describing: value)
         }
+    }
+
+    /// Sniffs `bytes` for a JPEG or PNG magic number and, if found, returns a
+    /// `data:image/...;base64,...` URI. Returns nil for anything else
+    /// (including JPEG 2000, deliberately not decoded - see `formatCborValue`),
+    /// so callers fall back to their own non-image placeholder.
+    private static func imageDataUri(_ bytes: [UInt8]) -> String? {
+        let mimeType: String
+        if bytes.count >= 3, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF {
+            mimeType = "image/jpeg"
+        } else if bytes.count >= 4, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47 {
+            mimeType = "image/png"
+        } else {
+            return nil
+        }
+        // Defensive copy: some CBOR decoders can hand back a slice/view into
+        // a larger shared buffer rather than a standalone array.
+        let base64 = Data(bytes).base64EncodedString()
+        return "data:\(mimeType);base64,\(base64)"
     }
 
     /// Build credential metadata from an offer, optional VCTM, and raw credential.
