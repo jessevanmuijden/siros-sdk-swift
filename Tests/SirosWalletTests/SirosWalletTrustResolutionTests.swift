@@ -251,6 +251,44 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertTrue(result.trusted)
     }
 
+    /// Regression (review finding): a DID ISSUER's requires_resolution
+    /// carries no request_jwt at all - OID4VCI issuance has no signed
+    /// request object to verify one against. Unconditionally requiring
+    /// request_jwt (as an earlier version of this fix did) rejected every
+    /// DID issuer over WMP before ever calling /v1/resolve.
+    func testHandleWmpTrustEvaluationResolvesIssuerDidKeyMaterialWithoutRequestJwt() async throws {
+        let issuerKey = P256.Signing.PrivateKey()
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:issuer.example.com#key-1", "publicKeyJwk": jwk(for: issuerKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+
+        let payload = AnyCodable.object_([
+            "request": .object_([
+                "subject_id": .string("did:web:issuer.example.com"),
+                "subject_type": .string("credential_issuer"),
+                "requires_resolution": .bool(true),
+                "resolution_subject_id": .string("did:web:issuer.example.com"),
+            ]),
+        ])
+
+        let result = await wallet.handleWmpTrustEvaluation(flowId: "flow-wmp-issuer", payload: payload)
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve", "/v1/evaluate"], "an issuer resolution with no request_jwt must still resolve and evaluate")
+        let resource = log.calls[1].body["resource"] as? [String: Any]
+        XCTAssertEqual(resource?["type"] as? String, "jwk")
+        XCTAssertEqual((resource?["key"] as? [[String: Any]])?.count, 1, "the resolved verification method's jwk must be forwarded")
+        XCTAssertTrue(result.trusted)
+    }
+
     func testHandleTrustEvaluationResolvesDidKeyMaterialWhenRequiresResolution() async throws {
         let verifierKey = P256.Signing.PrivateKey()
         let jwt = try signRequestJwt(privateKey: verifierKey, kid: "did:web:verifier.example.com#key-1")
@@ -284,6 +322,44 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertEqual(calls[0].body["subject_type"] as? String, "key")
         let resource = calls[1].body["resource"] as? [String: Any]
         XCTAssertEqual(resource?["type"] as? String, "jwk", "resolved key material must be passed through as a jwk resource")
+    }
+
+    /// Regression (review finding): a DID ISSUER's requires_resolution
+    /// carries no request_jwt at all - OID4VCI issuance has no signed
+    /// request object to verify one against. Unconditionally requiring
+    /// request_jwt (as an earlier version of this fix did) rejected every
+    /// DID issuer over the legacy engine path before ever calling
+    /// /v1/resolve.
+    func testHandleTrustEvaluationResolvesIssuerDidKeyMaterialWithoutRequestJwt() async throws {
+        let issuerKey = P256.Signing.PrivateKey()
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:issuer.example.com#key-1", "publicKeyJwk": jwk(for: issuerKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-issuer", payload: [
+            "request": [
+                "subject_id": "did:web:issuer.example.com",
+                "subject_type": "credential_issuer",
+                "requires_resolution": true,
+                "resolution_subject_id": "did:web:issuer.example.com",
+            ],
+        ])
+
+        let calls = log.calls
+        XCTAssertEqual(calls.map(\.path), ["/v1/resolve", "/v1/evaluate"], "an issuer resolution with no request_jwt must still resolve and evaluate")
+        let resource = calls[1].body["resource"] as? [String: Any]
+        XCTAssertEqual(resource?["type"] as? String, "jwk")
+        XCTAssertEqual((resource?["key"] as? [[String: Any]])?.count, 1, "the resolved verification method's jwk must be forwarded")
     }
 
     func testHandleTrustEvaluationResolvesEd25519KeyMaterial() async throws {

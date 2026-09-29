@@ -599,21 +599,38 @@ extension SirosWallet {
             // fields and evaluated with no key material at all (review
             // finding).
             var resolvedJwk: [String: Any]?
+            var resolvedIssuerJwks: [[String: Any]]?
             if case .bool(true) = request["requires_resolution"] {
-                guard case .string(let requestJwt) = request["request_jwt"], !requestJwt.isEmpty else {
-                    return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
-                }
                 guard case .string(let resolutionSubjectId) = request["resolution_subject_id"], !resolutionSubjectId.isEmpty else {
                     return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no resolution_subject_id was supplied")
                 }
+                var requestJwt: String?
+                if case .string(let jwt) = request["request_jwt"], !jwt.isEmpty {
+                    requestJwt = jwt
+                }
                 do {
-                    resolvedJwk = try await resolveDidKeyMaterial(client: client, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
+                    if actionName == "credential-verifier" {
+                        // A verifier's request_jwt is what resolution is
+                        // FOR - there's a signed authorization request to
+                        // verify against, so requiring one here is correct
+                        // (unlike the issuer branch below).
+                        guard let requestJwt else {
+                            return SirosTransport.TrustResult(trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
+                        }
+                        resolvedJwk = try await resolveDidKeyMaterial(client: client, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
+                    } else {
+                        // OID4VCI issuance has no signed request object to
+                        // verify request_jwt against - the backend never
+                        // sends one for a DID issuer, unlike a verifier
+                        // (review finding, #168 follow-up).
+                        resolvedIssuerJwks = try await resolveIssuerDidKeyMaterial(client: client, resolutionSubjectId: resolutionSubjectId)
+                    }
                 } catch {
                     return SirosTransport.TrustResult(trusted: false, reason: error.localizedDescription)
                 }
             }
 
-            let kmType = resolvedJwk != nil ? "jwk" : (keyMaterial?["type"]?.stringValue ?? "x5c")
+            let kmType = (resolvedJwk != nil || resolvedIssuerJwks != nil) ? "jwk" : (keyMaterial?["type"]?.stringValue ?? "x5c")
 
             // Include the actual key material (x5c/jwk), not just its type -
             // matching the legacy engine path's `handleTrustEvaluation` and
@@ -623,6 +640,8 @@ extension SirosWallet {
             var resource: [String: Any] = ["type": kmType, "id": subjectId]
             if let resolvedJwk {
                 resource["key"] = [resolvedJwk]
+            } else if let resolvedIssuerJwks {
+                resource["key"] = resolvedIssuerJwks
             } else if let x5c = keyMaterial?["x5c"] {
                 resource["key"] = anyCodableToAny(x5c)
             } else if let jwk = keyMaterial?["jwk"] {

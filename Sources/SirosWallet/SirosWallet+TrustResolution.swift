@@ -59,10 +59,6 @@ extension SirosWallet {
         // a resolution/signature failure must never be able to reach that
         // fallback and be softened into "trusted, from cache".
         if request["requires_resolution"] as? Bool == true {
-            guard let requestJwt = request["request_jwt"] as? String, !requestJwt.isEmpty else {
-                engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
-                return
-            }
             guard let resolutionSubjectId = (request["resolution_subject_id"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) else {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no resolution_subject_id was supplied")
                 return
@@ -72,9 +68,27 @@ extension SirosWallet {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: "No API client")
                 return
             }
+            let requestJwt = (request["request_jwt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             do {
-                let resolvedJwk = try await resolveDidKeyMaterial(client: resolveClient, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
-                keyMaterial = ["type": "jwk", "jwk": resolvedJwk]
+                if subjectType == "credential_verifier" {
+                    // A verifier's request_jwt is what resolution is FOR -
+                    // there's a signed authorization request to verify
+                    // against, so requiring one here is correct (unlike the
+                    // issuer branch below).
+                    guard let requestJwt else {
+                        engine.sendTrustResult(flowId: flowId, trusted: false, reason: "Trust evaluation requires resolution but no request_jwt was supplied")
+                        return
+                    }
+                    let resolvedJwk = try await resolveDidKeyMaterial(client: resolveClient, resolutionSubjectId: resolutionSubjectId, requestJwt: requestJwt)
+                    keyMaterial = ["type": "jwk", "jwk": resolvedJwk]
+                } else {
+                    // credential_issuer: OID4VCI issuance has no signed
+                    // request object to verify request_jwt against - the
+                    // backend never sends one for a DID issuer, unlike a
+                    // verifier (review finding, #168 follow-up).
+                    let resolvedJwks = try await resolveIssuerDidKeyMaterial(client: resolveClient, resolutionSubjectId: resolutionSubjectId)
+                    keyMaterial = ["type": "jwk", "jwk_array": resolvedJwks]
+                }
             } catch {
                 engine.sendTrustResult(flowId: flowId, trusted: false, reason: error.localizedDescription)
                 return
@@ -89,6 +103,8 @@ extension SirosWallet {
         ]
         if let x5c = keyMaterial?["x5c"] {
             resource["key"] = x5c
+        } else if let jwkArray = keyMaterial?["jwk_array"] as? [[String: Any]] {
+            resource["key"] = jwkArray
         } else if let jwk = keyMaterial?["jwk"] {
             resource["key"] = [jwk]
         }
@@ -297,6 +313,45 @@ extension SirosWallet {
         throw SirosError.wallet(
             message: "request_jwt signature did not verify against any resolved verification method for \(resolutionSubjectId)"
         )
+    }
+
+    /// Resolves a `did:`-scheme ISSUER's key material via `POST
+    /// /v1/resolve`, for the `requires_resolution` path in
+    /// `handleTrustEvaluation`/`handleWmpTrustEvaluation` when the request
+    /// is for a `credential_issuer` rather than a `credential_verifier`
+    /// (review finding, #168 follow-up).
+    ///
+    /// Unlike [resolveDidKeyMaterial], this takes no `requestJwt` and
+    /// verifies no signature: OID4VCI issuance has no signed authorization
+    /// request object to verify against (that's specific to OpenID4VP
+    /// presentation) - go-wallet-backend still sets `requires_resolution`/
+    /// `resolution_subject_id` for a DID-scheme issuer, but never
+    /// `request_jwt`, for exactly this reason. Returns every resolved
+    /// `verificationMethod`'s `publicKeyJwk` (the PDP evaluates the
+    /// resolved key material itself, not a possession proof of it here) -
+    /// unlike the single best-candidate `resolveDidKeyMaterial` returns,
+    /// there's no signature to narrow the field with, so all of them are
+    /// forwarded.
+    ///
+    /// Still fails closed exactly like `resolveDidKeyMaterial`: throws when
+    /// the AuthZEN `decision` on the resolve response isn't explicitly
+    /// `true`, or no verification method is present.
+    func resolveIssuerDidKeyMaterial(client: BackendApiClient, resolutionSubjectId: String) async throws -> [[String: Any]] {
+        let response = try await client.resolveKey(subjectId: resolutionSubjectId)
+        guard response["decision"] as? Bool == true else {
+            throw SirosError.wallet(message: "Resolution of \(resolutionSubjectId) via /v1/resolve was not decided true")
+        }
+        guard let context = response["context"] as? [String: Any],
+              let trustMetadata = context["trust_metadata"] as? [String: Any],
+              let verificationMethods = trustMetadata["verificationMethod"] as? [[String: Any]],
+              !verificationMethods.isEmpty else {
+            throw SirosError.wallet(message: "Resolved DID document for \(resolutionSubjectId) has no verificationMethod entries")
+        }
+        let jwks = verificationMethods.compactMap { $0["publicKeyJwk"] as? [String: Any] }
+        guard !jwks.isEmpty else {
+            throw SirosError.wallet(message: "Resolved DID document for \(resolutionSubjectId) has no verification method with a publicKeyJwk")
+        }
+        return jwks
     }
 
     // Deliberately self-contained rather than sharing `DCAPIRequestParser`'s
