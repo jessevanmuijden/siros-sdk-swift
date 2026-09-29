@@ -174,14 +174,16 @@ extension SirosWallet {
     /// (go-wallet-backend#396/#401, this SDK's #168).
     ///
     /// The response's `context.trust_metadata` is treated as a W3C DID
-    /// Document: every `verificationMethod` entry's `publicKeyJwk` is a
-    /// candidate, tried against `requestJwt`'s signature - a `kid`-matching
-    /// entry (by fragment, e.g. `#key-1`) first if the JWT header names one,
-    /// then every other entry, so a DID document listing multiple
-    /// verification methods (key rotation, multiple purposes) isn't
-    /// defeated by trying only the first. Returns the first candidate whose
-    /// key actually verifies the signature, as the `jwk` JSON shape
-    /// `handleTrustEvaluation` already accepts as key material.
+    /// Document: OpenID4VP requires the request's particular
+    /// `verificationMethod` to be identified by the JOSE `kid` - `requestJwt`
+    /// must carry a non-empty `kid` with a fragment, which is resolved to
+    /// the EXACTLY matching `verificationMethod` (comparing only the
+    /// fragment, which handles a fully-qualified kid and one relative to
+    /// this DID identically) - never any other entry, even one also present
+    /// in the same document. There is deliberately no key-rotation/
+    /// multiple-verification-method fallback: a signature that only
+    /// verifies under some OTHER method than the one the kid names fails
+    /// closed rather than being accepted.
     ///
     /// ES256 (P-256, `alg: "ES256"`) and EdDSA (Ed25519, `alg: "EdDSA"`)
     /// signing keys are supported - RSA is not, matching
