@@ -509,6 +509,80 @@ final class SirosWalletTrustResolutionTests: XCTestCase {
         XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a JWK claiming a non-P-256 curve must never reach /v1/evaluate")
     }
 
+    /// Regression (review finding): the JWT's kid names ONE specific
+    /// verification method (#key-1), but a DIFFERENT method in the SAME
+    /// resolved document (#key-2) actually signed it. This must fail closed
+    /// - key-2 must never be tried as a fallback just because it's also
+    /// present in the document. Trying every remaining method here would
+    /// accept a signature under a method the kid never named.
+    func testHandleTrustEvaluationFailsClosedWhenSignatureVerifiesUnderADifferentMethodThanKid() async throws {
+        let key1 = P256.Signing.PrivateKey()
+        let key2 = P256.Signing.PrivateKey()
+        // Signed by key2, but the header's kid names key1.
+        let jwt = try signRequestJwt(privateKey: key2, kid: "did:web:verifier.example.com#key-1")
+
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: key1.publicKey)],
+                        ["id": "did:web:verifier.example.com#key-2", "publicKeyJwk": jwk(for: key2.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-kid-mismatch", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), ["/v1/resolve"], "a signature that verifies under a DIFFERENT method than the one the kid named must never reach /v1/evaluate")
+    }
+
+    /// Regression (review finding): a request_jwt with no kid at all must be
+    /// rejected outright, not resolved against an arbitrary/first
+    /// verification method.
+    func testHandleTrustEvaluationFailsClosedWhenRequestJwtHasNoKid() async throws {
+        let verifierKey = P256.Signing.PrivateKey()
+        let jwt = try signRequestJwt(privateKey: verifierKey, kid: nil)
+
+        let didDocument: [String: Any] = [
+            "decision": true,
+            "context": [
+                "trust_metadata": [
+                    "verificationMethod": [
+                        ["id": "did:web:verifier.example.com#key-1", "publicKeyJwk": jwk(for: verifierKey.publicKey)],
+                    ],
+                ],
+            ],
+        ]
+        let log = RequestLog()
+        let wallet = makeWallet(log: log, resolveResponse: didDocument)
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+
+        await wallet.handleTrustEvaluation(engine: engine, flowId: "flow-no-kid", payload: [
+            "request": [
+                "subject_id": "did:web:verifier.example.com",
+                "subject_type": "credential_verifier",
+                "requires_resolution": true,
+                "request_jwt": jwt,
+                "resolution_subject_id": "did:web:verifier.example.com",
+            ],
+        ])
+
+        XCTAssertEqual(log.calls.map(\.path), [], "a request_jwt with no kid must be rejected before ever calling /v1/resolve")
+    }
+
     /// The JWT header advertises a `did:web:verifier.example.com#key-1` kid,
     /// but that verification method's key never actually signed the JWT (an
     /// attacker key did) - the resolved key material must NOT be accepted,

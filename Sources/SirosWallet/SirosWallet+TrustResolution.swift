@@ -234,9 +234,19 @@ extension SirosWallet {
             throw SirosError.wallet(message: "Unsupported request_jwt signing algorithm: \(alg ?? "<missing>")")
         }
         let signingInput = Data((parts[0] + "." + parts[1]).utf8)
-        let kidFragment: String? = (header["kid"] as? String).flatMap { kid in
-            let split = kid.split(separator: "#", maxSplits: 1)
-            return split.count > 1 ? String(split[1]) : nil
+        // OpenID4VP requires the specific DID verificationMethod to be
+        // identified by the JOSE kid - a missing kid, or one that names no
+        // verification method in the resolved document, must be rejected
+        // outright (review finding). Only the fragment is compared (after
+        // the last `#`), which handles both a fully-qualified kid (e.g.
+        // "did:web:example.com#key-1") and a relative one resolved against
+        // resolutionSubjectId (e.g. "#key-1") identically, since a
+        // verificationMethod's own `id` is compared the same way below.
+        guard let kid = header["kid"] as? String, !kid.isEmpty else {
+            throw SirosError.wallet(message: "request_jwt header is missing a kid")
+        }
+        guard let kidFragment = kid.split(separator: "#", maxSplits: 1).last.map(String.init), kid.contains("#") else {
+            throw SirosError.wallet(message: "request_jwt header's kid '\(kid)' has no fragment")
         }
 
         let response = try await client.resolveKey(subjectId: resolutionSubjectId)
@@ -259,60 +269,64 @@ extension SirosWallet {
         }
 
         func vmKidMatches(_ vm: [String: Any]) -> Bool {
-            guard let kidFragment, let vmId = vm["id"] as? String else { return false }
+            guard let vmId = vm["id"] as? String else { return false }
             let vmFragmentParts = vmId.split(separator: "#", maxSplits: 1)
             return vmFragmentParts.count > 1 && String(vmFragmentParts[1]) == kidFragment
         }
-        // A kid-matching entry first, but every entry is still tried - an
-        // absent/non-matching kid is common (many DID documents predate
-        // per-purpose kids), and refusing to try the rest would fail closed
-        // on a verifier this wallet CAN actually verify.
-        let candidates = verificationMethods.sorted { vmKidMatches($0) && !vmKidMatches($1) }
+        // Exactly the kid-identified verification method, never any other
+        // - trying every remaining method as a fallback (an earlier version
+        // of this fix did) let a JWT whose kid selects method A be accepted
+        // when a DIFFERENT method B actually signed it, as long as B was
+        // also present in the resolved document. OpenID4VP's kid names the
+        // SPECIFIC method the JWS asserts it was signed with; a signature
+        // that only verifies under some OTHER method must fail closed, not
+        // be silently accepted as if the kid had matched (review finding).
+        guard let vm = verificationMethods.first(where: vmKidMatches) else {
+            throw SirosError.wallet(message: "No verification method for \(resolutionSubjectId) matches kid fragment '#\(kidFragment)'")
+        }
+        guard let jwk = vm["publicKeyJwk"] as? [String: Any] else {
+            throw SirosError.wallet(message: "Verification method '#\(kidFragment)' for \(resolutionSubjectId) has no publicKeyJwk")
+        }
 
         // Not further gated on canImport(CryptoKit): the import block above
         // guarantees P256/Curve25519 either way (CryptoKit on Apple
         // platforms, swift-crypto's API-identical Crypto on Linux) - same
         // precedent as SirosWallet+MdocTrust.swift, which gates only the
-        // import, never the usage. Gating this loop too, as an earlier
-        // version of this fix did, silently excluded it (and every test
-        // exercising it) on Linux, where every resolution would then throw
-        // the "did not verify against any" error below despite a
+        // import, never the usage. Gating this too, as an earlier version
+        // of this fix did, silently excluded it (and every test exercising
+        // it) on Linux, where resolution would then throw despite a
         // genuinely valid signature - never verified, never caught by CI.
-        for vm in candidates {
-            guard let jwk = vm["publicKeyJwk"] as? [String: Any] else { continue }
-            // The verification primitive is selected by the JWS's OWN
-            // declared `alg`, not merely by the candidate key's `kty` - a
-            // JWK's kty alone must never pick the algorithm (classic JOSE
-            // algorithm-confusion class), so an EC key is only tried for
-            // `alg: "ES256"` and an OKP/Ed25519 key only for `alg: "EdDSA"`,
-            // matching the exact non-nil `alg` already required above
-            // (review finding).
-            switch (jwk["kty"] as? String, alg) {
-            case ("EC", "ES256"):
-                guard let publicKeyBytes = try? Self.ecPublicKeyBytesForTrustResolution(fromJwk: jwk),
-                      let publicKey = try? P256.Signing.PublicKey(x963Representation: publicKeyBytes),
-                      let ecdsaSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
-                      publicKey.isValidSignature(ecdsaSignature, for: signingInput) else {
-                    continue
+        //
+        // The verification primitive is selected by the JWS's OWN declared
+        // `alg`, not merely by the candidate key's `kty` - a JWK's kty alone
+        // must never pick the algorithm (classic JOSE algorithm-confusion
+        // class), so an EC key is only tried for `alg: "ES256"` and an
+        // OKP/Ed25519 key only for `alg: "EdDSA"`, matching the exact
+        // non-nil `alg` already required above (review finding).
+        let verified: Bool
+        switch (jwk["kty"] as? String, alg) {
+        case ("EC", "ES256"):
+            verified = (try? Self.ecPublicKeyBytesForTrustResolution(fromJwk: jwk)).flatMap { publicKeyBytes in
+                (try? P256.Signing.PublicKey(x963Representation: publicKeyBytes)).flatMap { publicKey in
+                    (try? P256.Signing.ECDSASignature(rawRepresentation: signature)).map { ecdsaSignature in
+                        publicKey.isValidSignature(ecdsaSignature, for: signingInput)
+                    }
                 }
-                return jwk
-            case ("OKP", "EdDSA"):
-                guard (jwk["crv"] as? String) == "Ed25519",
-                      let xStr = jwk["x"] as? String,
-                      let rawKey = Self.base64UrlDecodeForTrustResolution(xStr),
-                      let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: rawKey),
-                      publicKey.isValidSignature(signature, for: signingInput) else {
-                    continue
-                }
-                return jwk
-            default:
-                continue
-            }
+            } ?? false
+        case ("OKP", "EdDSA"):
+            verified = (jwk["crv"] as? String) == "Ed25519"
+                && (jwk["x"] as? String).flatMap(Self.base64UrlDecodeForTrustResolution)
+                    .flatMap { try? Curve25519.Signing.PublicKey(rawRepresentation: $0) }
+                    .map { $0.isValidSignature(signature, for: signingInput) } ?? false
+        default:
+            verified = false
         }
-
-        throw SirosError.wallet(
-            message: "request_jwt signature did not verify against any resolved verification method for \(resolutionSubjectId)"
-        )
+        guard verified else {
+            throw SirosError.wallet(
+                message: "request_jwt signature did not verify against the kid-matching verification method '#\(kidFragment)' for \(resolutionSubjectId)"
+            )
+        }
+        return jwk
     }
 
     /// Resolves a `did:`-scheme ISSUER's key material via `POST
