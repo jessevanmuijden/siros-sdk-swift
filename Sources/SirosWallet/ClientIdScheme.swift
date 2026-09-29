@@ -76,6 +76,18 @@ public enum ClientIdScheme: Sendable {
             let method = parts.count > 1 ? String(parts[1]) : ""
             return .did(did: clientId, method: method)
         }
+        // OpenID4VP 1.0 final spec's name for the same DID-based scheme
+        // (go-wallet-backend's ClientIDSchemeDecentralizedIdentifier) -
+        // the wire client_id is "decentralized_identifier:" + the bare DID
+        // (e.g. "decentralized_identifier:did:web:verifier.example.com").
+        // Parsed down to the SAME .did case as the bare "did:..." form
+        // (recursing on the stripped remainder), not .preRegistered, so
+        // .identifier/.displayName strip the wire-form wrapper down to just
+        // the DID rather than displaying the "decentralized_identifier:"
+        // protocol prefix verbatim (review finding).
+        if clientId.hasPrefix("decentralized_identifier:did:") {
+            return parse(String(clientId.dropFirst("decentralized_identifier:".count)))
+        }
         if clientId.hasPrefix("verifier_attestation:") {
             return .verifierAttestation(subject: String(clientId.dropFirst("verifier_attestation:".count)))
         }
