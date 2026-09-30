@@ -41,7 +41,7 @@ public enum IDVError: Error, Sendable {
     /// Through ``RemoteIDVClient`` (facetec-api's `/v1/id-scan`) the reason is
     /// always `nfc_skipped`: that path only learns whether the chip was
     /// verified, not why it was not. facetec-api's `/process-request` flow
-    /// distinguishes `nfc_not_supported_by_document`, `nfc_device_not_capable`,
+    /// distinguishes `nfc_not_requested`, `nfc_device_not_capable`,
     /// `nfc_chip_read_failed` and `nfc_not_authenticated` as well, and any
     /// `nfc_*` code a backend sends maps here.
     case documentChipNotVerified(reason: String, message: String)

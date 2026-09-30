@@ -13,7 +13,7 @@ final class RemoteIDVClientTests: XCTestCase {
     func testNfcCodeBecomesDocumentChipNotVerified() {
         for reason in [
             "nfc_skipped",
-            "nfc_not_supported_by_document",
+            "nfc_not_requested",
             "nfc_device_not_capable",
             "nfc_chip_read_failed",
             "nfc_not_authenticated",
