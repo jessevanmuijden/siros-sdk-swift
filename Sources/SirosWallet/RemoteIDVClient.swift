@@ -100,6 +100,24 @@ public final class RemoteIDVClient: @unchecked Sendable {
         )
     }
 
+    /// Maps a 422 from the IDV backend to an ``IDVError``. The backend's error
+    /// body is `{"error": "<message>", "error_code": "<code>"}`: an `nfc_*` code
+    /// means the document's chip was not read and authenticated
+    /// (``IDVError/documentChipNotVerified(reason:message:)``); anything else
+    /// goes to the step's own `fallback`, with the raw body as before.
+    static func idvError(
+        for422ErrorCode errorCode: String?,
+        errorMessage: String?,
+        responseBody: String,
+        fallback: (String) -> IDVError
+    ) -> IDVError {
+        if let errorCode, errorCode.hasPrefix("nfc_") {
+            let message = errorMessage.flatMap { $0.isEmpty ? nil : $0 } ?? responseBody
+            return .documentChipNotVerified(reason: errorCode, message: message)
+        }
+        return fallback(responseBody)
+    }
+
     // MARK: - HTTP helper
 
     private func postJson(
@@ -124,7 +142,13 @@ public final class RemoteIDVClient: @unchecked Sendable {
 
         if http.statusCode == 422, let handler = on422 {
             let msg = String(data: data, encoding: .utf8) ?? "Verification failed"
-            throw handler(msg)
+            let error = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            throw Self.idvError(
+                for422ErrorCode: error?["error_code"] as? String,
+                errorMessage: error?["error"] as? String,
+                responseBody: msg,
+                fallback: handler
+            )
         }
         guard http.statusCode >= 200 && http.statusCode < 300 else {
             let msg = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
