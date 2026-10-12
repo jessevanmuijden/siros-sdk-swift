@@ -151,6 +151,26 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         )
     }
 
+    /// See `KeystoreManager.unlock(prfOutput:encryptedContainer:hkdfSalt:hkdfInfo:prfSalt:)`.
+    /// Forwarded straight to `credentialsKeystore`, same as the four-parameter
+    /// overload above - `prfSalt` only matters to the `JweKeystore` that
+    /// actually owns the PRF-protected container.
+    public func unlock(
+        prfOutput: Data,
+        encryptedContainer: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        prfSalt: Data
+    ) async throws {
+        try await credentialsKeystore.unlock(
+            prfOutput: prfOutput,
+            encryptedContainer: encryptedContainer,
+            hkdfSalt: hkdfSalt,
+            hkdfInfo: hkdfInfo,
+            prfSalt: prfSalt
+        )
+    }
+
     public func lock() {
         credentialsKeystore.lock()
     }

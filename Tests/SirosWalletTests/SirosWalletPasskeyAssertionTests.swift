@@ -72,11 +72,23 @@ private final class FakeAuthServer: @unchecked Sendable {
 }
 
 /// Regression tests for `SirosWallet.performPasskeyAssertion`, the sequence
-/// `login()` and `unlockKeystore()` share and the point at which PRF
-/// resolution fails closed. The invariant under test: when the authenticator
-/// yields no PRF and `getPrfOutput` throws, the helper throws BEFORE returning
-/// the material `loginFinish` needs, so neither caller can complete a
-/// server-side login for a session this side can never unlock.
+/// `login()` and `unlockKeystore()` share. Two invariants are under test:
+///
+/// 1. When a salt for the credential actually used IS known (a per-credential
+///    candidate, or the active session's own stored salt) but the
+///    authenticator still yields no PRF (`getPrfOutput` throws), the helper
+///    throws BEFORE returning the material `loginFinish` needs, so neither
+///    caller can complete a server-side login for a session this side can
+///    never unlock.
+/// 2. When NO salt is known at all for the credential actually used - the
+///    local account cache never recorded it (reinstall, cleared app data,
+///    device migration) and no stored session salt applies - the helper
+///    returns normally with a nil `prfOutput`/`prfSalt`, spending no second
+///    authenticator ceremony on a salt already known to be useless. This is
+///    deliberately NOT a failure here: `login()`'s caller recovers the real
+///    salt from the account's own server-synced `privateData` afterward (see
+///    `SirosWalletLoginRecoveryTests`), which needs a completed `loginFinish`
+///    first.
 ///
 /// `login()`/`unlockKeystore()` themselves are not driven end to end here:
 /// they read the wallet's private `authServerClient`, built over a real
@@ -94,12 +106,22 @@ final class SirosWalletPasskeyAssertionTests: XCTestCase {
         return wallet!
     }
 
+    /// A KNOWN salt (this credential has a registry entry) but an
+    /// authenticator that genuinely cannot produce PRF for it: still fails
+    /// closed, unchanged by the cache-miss recovery path below.
     func testPrfFailureThrowsAfterAssertionAndBeforeAnyFinish() async {
         let provider = RecordingAuthProvider()
         provider.ceremonyPrf = nil
         provider.separatePrf = nil // getPrfOutput fails closed
         let server = FakeAuthServer()
         let wallet = makeWallet(authProvider: provider, sessionStore: InMemorySessionStore())
+        wallet.accountRegistry.upsertAccount(CachedAccount(
+            userId: "user-1", tenantId: "default", displayName: "Alice", backendUrl: "https://example.invalid",
+            passkeys: [CachedPasskey(
+                credentialId: SirosWallet.b64UrlEncode(provider.credentialId),
+                prfSalt: SirosWallet.b64Encode(Data(repeating: 0x7a, count: 32))
+            )]
+        ))
 
         do {
             _ = try await wallet.performPasskeyAssertion(asClient: server.makeClient())
@@ -118,6 +140,32 @@ final class SirosWalletPasskeyAssertionTests: XCTestCase {
         )
     }
 
+    /// The cache-miss condition itself: nothing - not a per-credential
+    /// candidate, not a stored session salt - ties this credential to a salt.
+    /// `performPasskeyAssertion` must return normally with a nil
+    /// `prfOutput`/`prfSalt` rather than guessing one (the pre-fix behavior)
+    /// or throwing, and must not spend a second authenticator ceremony on a
+    /// salt already known to be useless.
+    func testCacheMissReturnsNilPrfWithoutASecondCeremony() async throws {
+        let provider = RecordingAuthProvider()
+        provider.ceremonyPrf = nil // not in any evalByCredential map offered
+        provider.separatePrf = PrfOutput(first: Data("should-never-be-used".utf8))
+        let server = FakeAuthServer()
+        let wallet = makeWallet(authProvider: provider, sessionStore: InMemorySessionStore())
+        // No accountRegistry entry at all for provider.credentialId: the
+        // local cache has no idea this credential exists.
+
+        let assertion = try await wallet.performPasskeyAssertion(asClient: server.makeClient())
+
+        XCTAssertNil(assertion.prfOutput, "no guessed PRF output - the caller must recover the real one")
+        XCTAssertNil(assertion.prfSalt)
+        XCTAssertEqual(assertion.credentialId, provider.credentialId)
+        XCTAssertNil(assertion.cachedAccount)
+        XCTAssertTrue(provider.getPrfCalls.isEmpty, "no ceremony spent on a salt already known to be useless")
+        XCTAssertEqual(server.postedPaths, ["/auth/passkey/login/begin"])
+    }
+
+
     func testCeremonyPrfIsPreferredOverSeparateCeremony() async throws {
         let provider = RecordingAuthProvider()
         provider.ceremonyPrf = PrfOutput(first: Data("from-ceremony".utf8))
@@ -127,7 +175,7 @@ final class SirosWalletPasskeyAssertionTests: XCTestCase {
 
         let assertion = try await wallet.performPasskeyAssertion(asClient: server.makeClient())
 
-        XCTAssertEqual(assertion.prfOutput.first, Data("from-ceremony".utf8))
+        XCTAssertEqual(assertion.prfOutput?.first, Data("from-ceremony".utf8))
         XCTAssertTrue(provider.getPrfCalls.isEmpty, "no redundant second ceremony when the assertion carried PRF")
         XCTAssertEqual(assertion.challengeId, "challenge-1")
         XCTAssertEqual(assertion.credential["id"] as? String, SirosWallet.b64UrlEncode(provider.credentialId))
@@ -147,7 +195,7 @@ final class SirosWalletPasskeyAssertionTests: XCTestCase {
 
         let assertion = try await wallet.performPasskeyAssertion(asClient: server.makeClient())
 
-        XCTAssertEqual(assertion.prfOutput.first, Data("from-separate".utf8))
+        XCTAssertEqual(assertion.prfOutput?.first, Data("from-separate".utf8))
         XCTAssertEqual(provider.getPrfCalls.count, 1)
         XCTAssertEqual(provider.getPrfCalls.first?.credentialId, provider.credentialId, "never an empty placeholder")
         XCTAssertEqual(provider.getPrfCalls.first?.salt, storedSalt, "the stored PRF salt, so the unwrap key is stable")
@@ -227,7 +275,15 @@ final class SirosWalletPasskeyAssertionTests: XCTestCase {
 
         let assertion = try await wallet.performPasskeyAssertion(asClient: server.makeClient())
 
-        XCTAssertNotEqual(provider.getPrfCalls.first?.salt, activeSalt, "another account's credential never gets the active account's salt")
+        // "other-user"'s own passkey entry carries no real salt at all (so it
+        // never even enters `loginPrfCandidates`'s per-credential map - see
+        // `CachedAccount.hasPrfKeys`), and the active session's salt belongs
+        // to a different account - so this is the cache-miss condition: no
+        // ceremony spent on the active account's salt, which would derive a
+        // real PRF under the wrong one and fail only later, at unwrap.
+        XCTAssertTrue(provider.getPrfCalls.isEmpty, "another account's credential never gets the active account's salt")
+        XCTAssertNil(assertion.prfOutput)
+        XCTAssertNil(assertion.prfSalt)
         XCTAssertEqual(assertion.cachedAccount?.userId, "other-user")
     }
 

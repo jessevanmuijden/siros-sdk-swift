@@ -27,6 +27,37 @@ public protocol KeystoreManager: AnyObject, Sendable {
         hkdfInfo: Data
     ) async throws
 
+    /// `unlock(prfOutput:encryptedContainer:hkdfSalt:hkdfInfo:)` with the real
+    /// WebAuthn PRF extension salt (`prf.eval.first`/evalByCredential input)
+    /// that produced `prfOutput`.
+    ///
+    /// - Parameter prfSalt: consumed only on first-time setup (an empty
+    ///   `encryptedContainer`), where it is persisted into the new
+    ///   container's own `PrfKeyInfo.prfSalt` - matching the wallet-frontend
+    ///   wire format - instead of a disconnected random value, so a later
+    ///   login, even from a device whose local account cache never saw this
+    ///   registration, can recover the exact salt this credential needs from
+    ///   the account's server-synced privateData rather than guessing. See
+    ///   `SirosWallet`'s login recovery path. Ignored once a container
+    ///   already exists: an existing entry's own stored salt is always
+    ///   authoritative over whatever salt a caller happened to use for
+    ///   *this* unlock call.
+    ///
+    /// A genuine protocol REQUIREMENT (default-implemented below to forward
+    /// to the four-parameter overload, for conformers written before this
+    /// existed) rather than merely a defaulted extension method - see
+    /// `generateProof(audience:nonce:freshKey:holderBinding:)`'s doc comment
+    /// for why that distinction matters when called through a
+    /// `KeystoreManager` existential, which is exactly how `SirosWallet`
+    /// holds its `keystore`.
+    func unlock(
+        prfOutput: Data,
+        encryptedContainer: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        prfSalt: Data
+    ) async throws
+
     /// Lock the keystore, clearing key material from memory.
     func lock()
 
@@ -297,6 +328,22 @@ public extension KeystoreManager {
     /// Default: freshKey=false for backward compatibility.
     func generateProof(audience: String, nonce: String) async throws -> String {
         try await generateProof(audience: audience, nonce: nonce, freshKey: false)
+    }
+
+    /// Default for a conformer written before the `prfSalt` parameter
+    /// existed: forwards unchanged, so a first-time-setup container it
+    /// creates still gets *some* `PrfKeyInfo.prfSalt` (whatever its own
+    /// four-parameter implementation generates internally) rather than
+    /// failing to compile. Only the keystores in this SDK (`JweKeystore`/
+    /// `WscdKeystoreAdapter`) override this to thread the real salt through.
+    func unlock(
+        prfOutput: Data,
+        encryptedContainer: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        prfSalt: Data
+    ) async throws {
+        try await unlock(prfOutput: prfOutput, encryptedContainer: encryptedContainer, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)
     }
 
     /// Default for a conformer - including a host's own `KeystoreManager`,

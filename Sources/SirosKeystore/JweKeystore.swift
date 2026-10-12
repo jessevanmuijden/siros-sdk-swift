@@ -200,13 +200,14 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
     }
 
     // MARK: - Unlock / Lock
+    // (the four-parameter overload is in JweKeystore+DefaultPrfSaltUnlock.swift)
 
-    // swiftlint:disable:next function_body_length
     public func unlock(
         prfOutput: Data,
         encryptedContainer: Data,
         hkdfSalt: Data,
-        hkdfInfo: Data
+        hkdfInfo: Data,
+        prfSalt: Data
     ) async throws {
         mutex.lock()
         defer { mutex.unlock() }
@@ -258,10 +259,6 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
                 mainKey: newMainKey,
                 mainKeyInfo: newMainKeyInfo
             )
-
-            var prfSalt = Data(count: 32)
-            // swiftlint:disable:next force_unwrapping
-            prfSalt.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
 
             containerMetadata = ContainerData(
                 jwe: "",

@@ -1,6 +1,7 @@
 import Foundation
 import SirosAuth
 import SirosCredentials
+import SirosKeystore
 
 // MARK: - Passkey assertion shared by login() and unlockKeystore()
 
@@ -11,10 +12,22 @@ extension SirosWallet {
     struct PasskeyAssertion {
         let challengeId: String
         let credential: [String: Any]
-        let prfOutput: PrfOutput
+        /// nil exactly when no PRF salt for `credentialId` was known locally
+        /// - neither this ceremony's per-credential candidates nor the active
+        /// session's own stored salt named one. Most commonly: the local
+        /// account cache was wiped (reinstall, cleared app data, device
+        /// migration) while the passkey itself is still perfectly healthy in
+        /// the platform authenticator. Rather than derive a PRF output from a
+        /// guessed salt - which can never unwrap the real container, and used
+        /// to fail only much later (and much less clearly) at
+        /// `keystore.unlock`'s unwrap step - this is left nil so the caller
+        /// can recover the real salt from the account's own server-synced
+        /// privateData container instead. See `login()`'s recovery branch.
+        let prfOutput: PrfOutput?
         /// The salt `prfOutput` was evaluated for - what the session store must
-        /// record, since the container's PRF key is bound to it.
-        let prfSalt: Data
+        /// record, since the container's PRF key is bound to it. nil under the
+        /// same condition as `prfOutput`.
+        let prfSalt: Data?
         /// The cached account whose passkey answered the ceremony, if known.
         let cachedAccount: CachedAccount?
         /// The credential the ceremony actually completed with. Kept raw
@@ -22,6 +35,36 @@ extension SirosWallet {
         /// registry match, which is not enough to decide anything destructive
         /// - see `loginRefusalSubject(forCredential:)`.
         let credentialId: Data
+    }
+
+    /// What `recoverPrfFromPrivateData` recovered from one `PrfKeyInfo` entry.
+    struct RecoveredPrf {
+        let prfOutput: PrfOutput
+        let prfSalt: Data
+        let hkdfSalt: Data
+        let hkdfInfo: Data
+    }
+
+    /// What `resolveLoginPrf` resolved for `login()` to unlock with.
+    struct LoginPrfResolution {
+        let prfOutput: PrfOutput
+        let prfSalt: Data
+        let hkdfSalt: Data
+        let hkdfInfo: Data
+        /// Non-nil exactly when recovered from privateData - see
+        /// `recordSuccessfulLogin`'s doc comment on what that triggers.
+        let recoveredSalt: Data?
+    }
+
+    /// What `resolveUnlockKeystorePrf` resolved for `unlockKeystore()` to
+    /// unlock with.
+    struct UnlockKeystorePrfResolution {
+        let prfOutput: PrfOutput
+        let hkdfSalt: Data
+        let hkdfInfo: Data
+        /// Non-nil exactly when recovered from privateData - the caller heals
+        /// the account cache in that case, same as `LoginPrfResolution`'s.
+        let recoveredSalt: Data?
     }
 
     /// Runs `loginBegin` -> platform `authenticate` -> PRF resolution.
@@ -103,25 +146,59 @@ extension SirosWallet {
         // the credential is not known to belong to a different cached account
         // (the session salt is the active account's - pairing it with another
         // account's credential would derive a real PRF under the wrong salt
-        // and fail only later, at unwrap). A fresh random salt is only right
-        // when nothing is known about this credential at all (first login on
-        // a new install with no registry entry) - then no container could be
-        // opened anyway and the unlock fails on unwrap rather than on a
-        // silently wrong key.
+        // and fail only later, at unwrap).
         let sessionSaltApplies = cachedAccount == nil || cachedAccount?.accountId == sessionStore.activeAccountId
-        let prfSalt = options.prfSalt(for: result.credentialId)
+        let knownSalt = options.prfSalt(for: result.credentialId)
             ?? (sessionSaltApplies ? storedPrfSalt : nil)
-            ?? Self.randomBytes(32)
-        let prfOutput = try await resolvePrfOutput(
-            ceremonyPrf: result.prfOutput,
-            credentialId: result.credentialId,
-            salt: prfSalt
-        )
+
+        // The ceremony's own PRF output, if any, is always authoritative and
+        // checked FIRST, before the cache-miss guard below: a real
+        // authenticator only ever produces one when it was actually given an
+        // input salt for this exact credential (i.e. `knownSalt` could not
+        // really be nil here on a real platform) - but a few test doubles
+        // model `authenticate` more loosely, and in any case trusting data
+        // already in hand is strictly better than discarding it.
+        if let ceremonyPrf = result.prfOutput {
+            return PasskeyAssertion(
+                challengeId: challengeId,
+                credential: credential,
+                prfOutput: ceremonyPrf,
+                prfSalt: knownSalt ?? Self.randomBytes(32),
+                cachedAccount: cachedAccount,
+                credentialId: result.credentialId
+            )
+        }
+
+        guard let knownSalt else {
+            // Nothing locally known ties this credential to a salt at all -
+            // this is the cache-miss condition itself, not merely an
+            // authenticator without PRF support (that failure mode is
+            // below, and is unaffected: it still runs, and still fails
+            // closed, whenever a salt *is* known). Previously this fell
+            // through to a fresh random salt (or a stale `storedPrfSalt`
+            // belonging to a different account entirely) and spent a real
+            // authenticator ceremony deriving a PRF output from it - one
+            // that could never unwrap the real container, silently wrong
+            // rather than visibly absent. Returning here instead, with no
+            // second ceremony spent on a salt already known to be useless,
+            // lets the caller recover the real salt from privateData and
+            // spend exactly one real recovery ceremony - see `login()`.
+            return PasskeyAssertion(
+                challengeId: challengeId,
+                credential: credential,
+                prfOutput: nil,
+                prfSalt: nil,
+                cachedAccount: cachedAccount,
+                credentialId: result.credentialId
+            )
+        }
+
+        let prfOutput = try await authProvider.getPrfOutput(credentialId: result.credentialId, salt: knownSalt)
         return PasskeyAssertion(
             challengeId: challengeId,
             credential: credential,
             prfOutput: prfOutput,
-            prfSalt: prfSalt,
+            prfSalt: knownSalt,
             cachedAccount: cachedAccount,
             credentialId: result.credentialId
         )
@@ -194,5 +271,212 @@ extension SirosWallet {
     func resolvePrfOutput(ceremonyPrf: PrfOutput?, credentialId: Data, salt: Data) async throws -> PrfOutput {
         if let ceremonyPrf { return ceremonyPrf }
         return try await authProvider.getPrfOutput(credentialId: credentialId, salt: salt)
+    }
+
+    /// Recovers the `PrfKeyInfo` entry `credentialId` was registered with
+    /// from the account's own server-synced `privateData` container, then
+    /// spends one more authenticator ceremony to get the real PRF output for
+    /// it.
+    ///
+    /// Used by `login()`'s cache-miss branch, after `performPasskeyAssertion`
+    /// returns a nil `prfOutput`/`prfSalt` (see that struct's doc comment):
+    /// every credential's `PrfKeyInfo` entry in `privateData` carries the
+    /// exact `prfSalt`/`hkdfSalt`/`hkdfInfo` it was registered with, keyed by
+    /// `credentialId` - recoverable even when the local account cache never
+    /// saw this registration at all (reinstall, cleared app data, device
+    /// migration). The passkey itself is unaffected by any of that; this is
+    /// recovery, not re-registration, and it's why `JweKeystore.unlock`
+    /// threads the real salt into a brand-new container's own `PrfKeyInfo`
+    /// rather than a disconnected random one - without that, there would be
+    /// nothing here to recover.
+    ///
+    /// - Throws: `SirosError.wallet` with the same user-facing message either
+    ///   when no matching `PrfKeyInfo` entry exists in `privateData` (this
+    ///   passkey isn't one this account's container actually knows), or when
+    ///   the authenticator's ceremony with the recovered salt fails for any
+    ///   reason (no PRF support, cancellation, etc.) - both come down to the
+    ///   same outcome for the user: the wallet data cannot be decrypted.
+    func recoverPrfFromPrivateData(
+        credentialId: Data,
+        privateData: Data
+    ) async throws -> RecoveredPrf {
+        let prfKeyInfo = try recoverPrfKeyInfo(credentialId: credentialId, from: privateData)
+        do {
+            let prfOutput = try await authProvider.getPrfOutput(credentialId: credentialId, salt: prfKeyInfo.prfSalt)
+            return RecoveredPrf(
+                prfOutput: prfOutput, prfSalt: prfKeyInfo.prfSalt,
+                hkdfSalt: prfKeyInfo.hkdfSalt, hkdfInfo: prfKeyInfo.hkdfInfo
+            )
+        } catch {
+            throw SirosError.wallet(
+                message: "PRF not supported by authenticator — cannot decrypt wallet data",
+                underlying: error
+            )
+        }
+    }
+
+    /// The pure lookup half of `recoverPrfFromPrivateData` - parses
+    /// `privateData` and finds the `PrfKeyInfo` entry for `credentialId`, with
+    /// no authenticator ceremony involved. Split out so it's directly
+    /// testable without the network/ceremony seams `recoverPrfFromPrivateData`
+    /// needs - see `SirosWalletPasskeyAssertionTests`.
+    func recoverPrfKeyInfo(credentialId: Data, from privateData: Data) throws -> PrfKeyInfo {
+        let container: ContainerData
+        do {
+            container = try EncryptedContainer.parse(privateData)
+        } catch {
+            throw SirosError.wallet(
+                message: "PRF not supported by authenticator — cannot decrypt wallet data",
+                underlying: error
+            )
+        }
+        guard let prfKeyInfo = container.prfKeys.first(where: { $0.credentialId == credentialId }) else {
+            throw SirosError.wallet(message: "PRF not supported by authenticator — cannot decrypt wallet data")
+        }
+        return prfKeyInfo
+    }
+
+    /// `login()`'s own PRF/HKDF resolution, extracted so the caller stays
+    /// readable: either trusts `assertion`'s own resolved values (the normal
+    /// case - `hkdfSalt`/`hkdfInfo` come from the session store, then the
+    /// confirmed account's registry entry, then fresh random values for a
+    /// first login on this install), or - when the local account cache
+    /// didn't know this credential at all, see `PasskeyAssertion.prfOutput`'s
+    /// doc comment - recovers all four from `privateData` instead.
+    ///
+    /// - Parameter cachedAccount: the registry entry for the account the
+    ///   server just confirmed this login is for (not merely whichever
+    ///   account `assertion.cachedAccount` names - that may be a different
+    ///   account entirely in the recovery case).
+    /// - Returns: `recoveredSalt` is non-nil exactly when recovery happened,
+    ///   so the caller knows to heal the account cache afterward.
+    func resolveLoginPrf(
+        assertion: PasskeyAssertion,
+        privateData: Data,
+        cachedAccount: CachedAccount?
+    ) async throws -> LoginPrfResolution {
+        if let knownPrfOutput = assertion.prfOutput, let knownPrfSalt = assertion.prfSalt {
+            let hkdfSalt = sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
+                ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfSalt) }
+                ?? Self.randomBytes(32)
+            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) }
+                ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfInfo) }
+                ?? Data(Self.hkdfInfo.utf8)
+            return LoginPrfResolution(
+                prfOutput: knownPrfOutput, prfSalt: knownPrfSalt,
+                hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo, recoveredSalt: nil
+            )
+        }
+        // The recovered values are this credential's own real
+        // registration-time salts - not a guess - so they take priority over
+        // whatever `sessionStore`/`cachedAccount` hold (stale, or simply
+        // absent on a device that never completed a normal login for this
+        // account).
+        let recovered = try await recoverPrfFromPrivateData(
+            credentialId: assertion.credentialId, privateData: privateData
+        )
+        return LoginPrfResolution(
+            prfOutput: recovered.prfOutput, prfSalt: recovered.prfSalt,
+            hkdfSalt: recovered.hkdfSalt, hkdfInfo: recovered.hkdfInfo, recoveredSalt: recovered.prfSalt
+        )
+    }
+
+    /// Session/account bookkeeping once `login()`'s keystore unlock has
+    /// actually succeeded: records which credential/salts this installation
+    /// logs in with (`generateWIA` needs `sessionStore.credentialId` to bind
+    /// the wallet instance to it, SID-AUTH-06), and - when this login
+    /// recovered its PRF salt from `privateData` (`recoveredSalt` non-nil) -
+    /// heals the account cache via `healAccountCache` so the next login for
+    /// this account is a normal one-tap match again.
+    func recordSuccessfulLogin(
+        accountId: String,
+        session: LoginFinishResult,
+        assertion: PasskeyAssertion,
+        prfSaltBytes: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        recoveredSalt: Data?
+    ) {
+        accountRegistry.activeAccountId = accountId
+        sessionStore.userId = session.uuid
+        sessionStore.displayName = session.displayName
+        sessionStore.tenantId = config.tenantId
+        if let credentialId = assertion.credential["id"] as? String {
+            sessionStore.credentialId = credentialId
+        }
+        sessionStore.prfSalt = Self.b64Encode(prfSaltBytes)
+        sessionStore.hkdfSalt = Self.b64Encode(hkdfSalt)
+        sessionStore.hkdfInfo = Self.b64Encode(hkdfInfo)
+
+        if let recoveredSalt {
+            healAccountCache(
+                accountId: accountId,
+                userId: session.uuid,
+                displayName: session.displayName,
+                credentialId: assertion.credentialId,
+                prfSalt: recoveredSalt,
+                hkdfSalt: hkdfSalt,
+                hkdfInfo: hkdfInfo
+            )
+        }
+    }
+
+    /// `unlockKeystore()`'s own PRF/HKDF resolution - the resume-after-logout
+    /// counterpart to `resolveLoginPrf`. Simpler: `encryptedContainer` here is
+    /// always `storedContainer` (this account was already resumed from a
+    /// prior session) and the known-salt branch has nothing to fall back to
+    /// (an absent `sessionStore.hkdfSalt` is a genuine error, not a case for
+    /// a fresh random value, since this isn't a first-time setup). The
+    /// recovery branch needs no extra network round trip: `storedContainer`
+    /// is already in hand.
+    func resolveUnlockKeystorePrf(
+        assertion: PasskeyAssertion,
+        storedContainer: Data
+    ) async throws -> UnlockKeystorePrfResolution {
+        if let knownPrfOutput = assertion.prfOutput {
+            guard let hkdfSalt = sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
+                throw SirosError.keystore(message: "Missing HKDF salt")
+            }
+            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) } ?? Data(Self.hkdfInfo.utf8)
+            return UnlockKeystorePrfResolution(prfOutput: knownPrfOutput, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo, recoveredSalt: nil)
+        }
+        let recovered = try await recoverPrfFromPrivateData(
+            credentialId: assertion.credentialId, privateData: storedContainer
+        )
+        return UnlockKeystorePrfResolution(
+            prfOutput: recovered.prfOutput, hkdfSalt: recovered.hkdfSalt,
+            hkdfInfo: recovered.hkdfInfo, recoveredSalt: recovered.prfSalt
+        )
+    }
+
+    /// Heals the local account cache after a successful PRF-salt recovery
+    /// (`recoverPrfFromPrivateData`), so the *next* login for this account is
+    /// a normal one-tap match again instead of repeating the recovery
+    /// ceremony every time. Upserts a `CachedAccount`/`CachedPasskey` entry
+    /// for `credentialId` with the salt that was actually recovered - the
+    /// real value this credential needs, not a guess - alongside whatever
+    /// else the registry entry already has.
+    func healAccountCache(
+        accountId: String,
+        userId: String,
+        displayName: String?,
+        credentialId: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) {
+        let credIdStr = Self.b64UrlEncode(credentialId)
+        let healedPasskey = CachedPasskey(credentialId: credIdStr, prfSalt: Self.b64Encode(prfSalt))
+        let existing = accountRegistry.findAccount(accountId: accountId)
+        var account = existing ?? CachedAccount(
+            userId: userId,
+            tenantId: config.tenantId,
+            displayName: displayName ?? "",
+            backendUrl: config.backendUrl,
+            hkdfSalt: Self.b64Encode(hkdfSalt),
+            hkdfInfo: Self.b64Encode(hkdfInfo)
+        )
+        account.passkeys = (existing?.passkeys.filter { $0.credentialId != credIdStr } ?? []) + [healedPasskey]
+        accountRegistry.upsertAccount(account)
     }
 }
