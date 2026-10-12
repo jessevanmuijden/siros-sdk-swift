@@ -32,13 +32,14 @@ import SirosCredentials
 ///
 /// `buildWitness` is real (ECDSA witness from `issuerAuth`'s x5chain +
 /// signature, MSO body from `issuerAuth`'s payload, fixed 4-slot claim
-/// selection) - see its own doc comment for the slot-selection policy.
-/// Everything else (the `prepProve`/`prove` FFI wiring, fold-and-reuse state
-/// threading, pseudonym handling) mirrors `LongfellowZkProofSystem`'s own
-/// shape, except pseudonym handling itself: Vega has no pseudonym-derivation
-/// concept at all (confirmed in the Kotlin port's own design research), so
-/// that one aspect instead matches `BbsProofSystem`'s constant
-/// `.notSupportedBySystem`.
+/// selection) - see its own doc comment for the slot-selection policy. The
+/// `prepProve`/`prove` FFI wiring mirrors `LongfellowZkProofSystem`'s own
+/// shape, with two deliberate differences: pseudonym handling (Vega has no
+/// pseudonym-derivation concept at all, confirmed in the Kotlin port's own
+/// design research, so that aspect instead matches `BbsProofSystem`'s
+/// constant `.notSupportedBySystem`) and state reuse - unlike Longfellow,
+/// `generateProof` does NOT fold-and-reuse `priorState`; see its own doc
+/// comment for why.
 public actor VegaProofSystem: ZkProofSystem {
 
     /// The circuit's fixed claim-slot count (`MAX_CLAIMS_V1` in the Rust
@@ -216,11 +217,15 @@ public actor VegaProofSystem: ZkProofSystem {
     /// is the namespace's own document order (stable per credential,
     /// independent of which claims a given presentation discloses) -
     /// `disclose` only varies per slot based on membership in
-    /// `requestedClaims`. This keeps `ZkProofResult.nextState` reuse valid
-    /// across repeat presentations of the SAME disclosed-claim set; a later
-    /// presentation disclosing a DIFFERENT subset still reuses the same
-    /// slot/witness identity (only the `disclose` flags change), so reuse
-    /// stays sound regardless.
+    /// `requestedClaims`, which MUST already be a subset of the namespace's
+    /// own element identifiers (see the `requested`/`unknown` guard below -
+    /// an identifier the credential does not carry cannot be disclosed, so
+    /// this rejects the request rather than silently proving over it with
+    /// every slot's `disclose` left `false`). This per-slot stability is
+    /// what would make `ZkProofResult.nextState` reuse sound across repeat
+    /// presentations of a credential, if `generateProof` reused it - which
+    /// it deliberately does not; see `generateProof`'s own doc comment for
+    /// why.
     // Not `private`: `VegaProofSystemTests` (`@testable import`) exercises
     // the docType/namespace/digestID guards below directly against
     // hand-built `DocumentMdoc` fixtures, without needing a real signed
@@ -245,16 +250,37 @@ public actor VegaProofSystem: ZkProofSystem {
         }
 
         let requested = Set(requestedClaims)
+        // A requested identifier the credential's own namespace does not
+        // carry can never be disclosed - silently proceeding would prove
+        // successfully with every slot's `disclose` left `false` (none of
+        // them match), handing the verifier a presentation quietly missing
+        // a claim it explicitly asked for, the same presentation-
+        // correctness failure `generateProof`'s pseudonym guard above
+        // exists to prevent (Copilot review, PR #182).
+        let available = Set(namespaceItems.map { $0.item.elementIdentifier })
+        let unknown = requested.subtracting(available)
+        guard unknown.isEmpty else {
+            throw MdocError.malformed(
+                "VegaProofSystem: requested claim(s) \(unknown.sorted()) are not present in credential namespace '\(namespace)' " +
+                "(available: \(available.sorted()))"
+            )
+        }
         let claims: [VegaFfiClaim] = try namespaceItems.map { entry in
             // `digestID` is a CBOR unsigned int, i.e. a `UInt64` in
             // `IssuerSignedItem` - an issuer-controlled value with no spec
-            // ceiling at `UInt32.max`. `UInt32(entry.item.digestId)` traps
-            // (crashing proof generation) on a malformed/adversarial
-            // credential whose digest ID exceeds that; reject it as a
-            // malformed credential instead.
-            guard let digestId = UInt32(exactly: entry.item.digestId) else {
+            // ceiling. The native FFI contract (`zk_cred_vega.swift`'s
+            // generated doc comment on `FfiClaim.digestId`) requires digest
+            // IDs below `2^31` - ISO 18013-5's own digest IDs are a
+            // CBOR-encodable non-negative int with no upper bound in the
+            // spec text, but the native crate asserts the `< 2^31` bound
+            // while reconstructing the MSO and panics rather than returning
+            // an error if it's violated, so this has to reject the same
+            // range Swift-side rather than only guarding against overflowing
+            // `UInt32` outright (Copilot review, PR #182).
+            guard let digestId = UInt32(exactly: entry.item.digestId), digestId < (1 << 31) else {
                 throw MdocError.malformed(
-                    "VegaProofSystem: digestID \(entry.item.digestId) for '\(entry.item.elementIdentifier)' exceeds UInt32 range"
+                    "VegaProofSystem: digestID \(entry.item.digestId) for '\(entry.item.elementIdentifier)' " +
+                    "is not in the native crate's supported range (0..<2^31)"
                 )
             }
             return VegaFfiClaim(

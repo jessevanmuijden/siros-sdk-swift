@@ -400,6 +400,10 @@ public final class SirosWallet: @unchecked Sendable {
 
     let credentialStore: CredentialStore
 
+    /// A BBS credential's holder state vault - `nil` unless `keystore`
+    /// conforms to `ExtensionStore`. See `removeBbsHolderStateIfAny`.
+    let bbsHolderStateVault: BbsHolderStateVault?
+
     /// Resolves the DID methods the active `config.diipProfile` requires, for
     /// Issuer and Verifier identities. `did:jwk` resolves offline; `did:web`
     /// goes over HTTPS with no wallet credentials attached, since it targets
@@ -769,6 +773,7 @@ public final class SirosWallet: @unchecked Sendable {
         #endif
 
         self.credentialStore = config.credentialStore ?? KeystoreBackedCredentialStore(keystore: self.keystore)
+        self.bbsHolderStateVault = (self.keystore as? ExtensionStore).map { BbsHolderStateVault(keystore: $0) }
 
         // Set up new AS-based auth. Moved ahead of the DID resolver below
         // (it used to follow it) so `tokens` already exists to authenticate
@@ -846,22 +851,22 @@ public final class SirosWallet: @unchecked Sendable {
         self.vctmFetcher = VctmFetcher(httpGet: typeMetadataGet)
         self.mddlSchemaFetcher = MddlSchemaFetcher(httpGet: typeMetadataGet)
         self.zkCircuitClient = ZkCircuitClient(sources: config.zkCircuitUrls)
+
         #if os(iOS)
-        // One residency shared by every mdoc ZK proof system constructed
-        // here - see `ZkProverResidency`'s own doc comment for why.
-        //
-        // BbsProofSystem (SirosCredentials) is NOT registered here - unlike
-        // VegaProofSystem, it needs a holder-state store (BbsHolderStateVault)
-        // and a WalletConfig field naming its VCTs, neither of which exists
-        // yet. A real, pre-existing gap (predates Vega), not a side effect
-        // of adding it.
-        let zkProverResidency = ZkProverResidency()
+        // See `makeIOSZkProofSystemRegistry`'s own doc comment for how the
+        // registry and residency are assembled.
+        let (zkProofSystemRegistry, zkProverResidency) = Self.makeIOSZkProofSystemRegistry(
+            config: config,
+            credentialStore: self.credentialStore,
+            zkCircuitClient: self.zkCircuitClient,
+            bbsHolderStateVault: self.bbsHolderStateVault
+        )
         self.zkProverResidency = zkProverResidency
-        self.zkProofSystemRegistry = ZkProofSystemRegistry(systems: [
-            LongfellowZkProofSystem(zkCircuitClient: self.zkCircuitClient, residency: zkProverResidency),
-            VegaProofSystem(zkCircuitClient: self.zkCircuitClient, residency: zkProverResidency),
-        ])
+        self.zkProofSystemRegistry = zkProofSystemRegistry
         #else
+        // Longfellow/Vega/BBS are all iOS-only (each one's native
+        // XCFramework ships no macOS/Linux slice - see Package.swift), so
+        // there is nothing to register on this platform.
         self.zkProofSystemRegistry = ZkProofSystemRegistry(systems: [])
         #endif
 
@@ -1406,38 +1411,11 @@ public final class SirosWallet: @unchecked Sendable {
     }
 
     // MARK: - Credentials
-
-    /// Get credentials, optionally including expired.
-    public func getCredentials(includeExpired: Bool = false) async -> [StoredCredential] {
-        let all = await credentialStore.getAll()
-        if includeExpired { return all }
-        let now = Int64(Date().timeIntervalSince1970)
-        return all.filter { $0.expiresAt == nil || $0.expiresAt! > now }
-    }
-
-    /// Delete a credential by ID and sync to backend.
-    public func deleteCredential(_ credentialId: Int64) async {
-        let deletedBatchId = await credentialStore.getAll().first { $0.id == credentialId }?.batchId
-        await credentialStore.delete(credentialId)
-        // A deleted id can be reused (review finding) - an unrelated
-        // credential later assigned this same id must not read back the
-        // deleted one's cached status.
-        credentialStatusCache.remove(credentialId)
-        // If that was the last instance of its batch, its refresh_token
-        // entry (if any) is now orphaned - privatedata-spec §6.2 requires
-        // it not linger pointing at a batch that no longer exists.
-        if let batchId = deletedBatchId {
-            let remaining = await credentialStore.getAll()
-            if !remaining.contains(where: { $0.batchId == batchId }) {
-                await removeCredentialRefreshToken(batchId: batchId)
-            }
-        }
-        if case .ready(let userId, let displayName, _, _) = state {
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
-        }
-        await persistAndSyncKeystore()
-    }
+    //
+    // getCredentials/deleteCredential moved to
+    // SirosWallet+CredentialLifecycle.swift (file_length gate - review
+    // finding on PR #194, which also added deleteCredential's BBS-vault
+    // cleanup call; see that file).
 
     /// Sign an mDoc DeviceResponse for an ISO 18013-5 proximity (BLE)
     /// presentation - the local, engine-free counterpart to the redirect/

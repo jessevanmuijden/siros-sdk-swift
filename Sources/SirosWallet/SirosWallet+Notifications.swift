@@ -287,6 +287,7 @@ extension SirosWallet {
         let existing = await credentialStore.getAll()
         for cred in existing where cred.batchId == oldBatchId {
             await credentialStore.delete(cred.id)
+            await removeBbsHolderStateIfAny(credentialId: cred.id)
         }
         await removeCredentialRefreshToken(batchId: oldBatchId)
     }

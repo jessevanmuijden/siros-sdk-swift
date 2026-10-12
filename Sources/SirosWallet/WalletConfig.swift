@@ -201,6 +201,32 @@ public struct WalletConfig: Sendable {
     /// tolerance wallet-frontend applies to signature verification.
     public var clockTolerance: TimeInterval
 
+    /// The blind-BBS credential types (JWP `vct` values) this deployment
+    /// actually issues, if any - mirrors Kotlin's
+    /// `WalletConfig.bbsCredentialTypes`. `BbsProofSystem` has its holder
+    /// state in this wallet's own keystore (see `BbsHolderStateVault`),
+    /// unlike `LongfellowZkProofSystem`/`VegaProofSystem`, which need no
+    /// wallet-local state at all - so it is registered here, in
+    /// `SirosWallet.init`, rather than being a fixed member of the mdoc ZK
+    /// registry. Empty (the default) means this deployment issues no BBS
+    /// credentials, and `BbsProofSystem` is not registered at all: an empty
+    /// set is not "support nothing in particular", it is "this type does not
+    /// exist here" - `BbsProofSystem.supportedCredentialTypes` maps straight
+    /// from this set, and `ZkProofSystemRegistry.resolve` already requires
+    /// that set to contain the requested credential type before
+    /// `matchingSpec` is even consulted, so a verifier's `zk_system_type`
+    /// request for BBS could never actually resolve against an empty set
+    /// regardless of registration (Copilot review, PR #194: an earlier
+    /// version of this comment claimed the opposite - that registering
+    /// anyway would let such a request resolve and only fail later at
+    /// presentation time - which `resolve`'s own logic already rules out).
+    /// The real, observable reason to skip registration is narrower:
+    /// `ZkProofSystemRegistry.registeredSystemIds` is this wallet's
+    /// diagnostics/settings-UI surface for "what can I actually present" -
+    /// advertising a system id there that can never resolve a real request
+    /// would be a pointless, misleading entry.
+    public var bbsCredentialTypes: Set<String>
+
     public init(
         backendUrl: String,
         tenantId: String = "default",
@@ -225,7 +251,8 @@ public struct WalletConfig: Sendable {
         interopProfile: InteropProfile = .default,
         issuerInteropProfiles: [String: InteropProfile] = [:],
         diipProfile: DiipProfile = .latest,
-        clockTolerance: TimeInterval = 60
+        clockTolerance: TimeInterval = 60,
+        bbsCredentialTypes: Set<String> = []
     ) {
         self.backendUrl = backendUrl
         self.tenantId = tenantId
@@ -257,6 +284,7 @@ public struct WalletConfig: Sendable {
         self.issuerInteropProfiles = issuerInteropProfiles
         self.diipProfile = diipProfile
         self.clockTolerance = clockTolerance
+        self.bbsCredentialTypes = bbsCredentialTypes
     }
 
     /// Discover the engine base URL from the backend's
