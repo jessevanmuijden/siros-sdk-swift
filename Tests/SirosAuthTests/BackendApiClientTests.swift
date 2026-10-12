@@ -127,174 +127,132 @@ final class BackendApiClientTests: XCTestCase {
         }
     }
 
-    func testSetWalletInstanceStatusDecodesFullObjectWhenReturned() async throws {
-        let server = MockHttpServer()
-        server.enqueue(#"{"id":"jkt-1","tenant_id":"default","status":"revoked","wscd_type":"native_ios","credential_id":"pk-1","status_reason":"stolen"}"#)
+    // MARK: - Account deletion (go-wallet-backend#352)
+
+    private static let beginBody = #"{"challengeId":"ch-1","publicKey":{"challenge":{"$b64u":"AQID"},"rpId":"wallet.example.com","userVerification":"required","allowCredentials":[{"type":"public-key","id":{"$b64u":"cGstMQ"},"transports":["internal"]}]}}"#
+
+    private func deletingClient(_ server: MockHttpServer) -> BackendApiClient {
         let client = BackendApiClient(baseUrl: "https://api.example.com", tenantId: "default", httpFn: server.httpFunction)
-        client.setAppToken("t")
-
-        let result = try await client.setWalletInstanceStatus(instanceId: "jkt-1", status: .revoked, reason: "stolen")
-
-        XCTAssertEqual(result.status, .revoked)
-        XCTAssertEqual(result.credentialId, "pk-1")
-        XCTAssertEqual(result.statusReason, "stolen")
-    }
-
-    func testSetWalletInstanceStatusPutsStatusAndReason() async throws {
-        let server = MockHttpServer()
-        server.enqueue(#"{"id":"jkt-1","status":"suspended"}"#)
-        let client = BackendApiClient(baseUrl: "https://api.example.com", tenantId: "default", httpFn: server.httpFunction)
-        client.setAppToken("t")
-
-        let result = try await client.setWalletInstanceStatus(instanceId: "jkt-1", status: .suspended, reason: "lost phone")
-
-        XCTAssertEqual(server.requests[0].method, "PUT")
-        XCTAssertEqual(server.requests[0].path, "/user/session/instances/jkt-1/status")
-        let body = try bodyJSON(server.requests[0])
-        XCTAssertEqual(body["status"] as? String, "suspended")
-        XCTAssertEqual(body["reason"] as? String, "lost phone")
-        XCTAssertEqual(result.status, .suspended)
-    }
-
-    func testRevokeAllWalletInstancesFailsOnMalformedResponse() async throws {
-        let server = MockHttpServer()
-        server.enqueue(#"{"ok":true}"#)
-        let client = BackendApiClient(baseUrl: "https://api.example.com", tenantId: "default", httpFn: server.httpFunction)
-        client.setAppToken("t")
-        do {
-            _ = try await client.revokeAllWalletInstances()
-            XCTFail("a reply without the revoked count must not read as zero revoked")
-        } catch SirosError.backendApi(_, let message, _) {
-            XCTAssertTrue(message.contains("revoked"))
-        }
-    }
-
-    func testRevokeAllWalletInstancesPostsAndReturnsCount() async throws {
-        let server = MockHttpServer()
-        server.enqueue(#"{"revoked":2}"#)
-        let client = BackendApiClient(baseUrl: "https://api.example.com", tenantId: "default", httpFn: server.httpFunction)
-        client.setAppToken("t")
-
-        let outcome = try await client.revokeAllWalletInstances(reason: "device stolen")
-
-        XCTAssertEqual(server.requests[0].method, "POST")
-        XCTAssertEqual(server.requests[0].path, "/user/session/instances/revoke-all")
-        XCTAssertEqual(try bodyJSON(server.requests[0])["reason"] as? String, "device stolen")
-        XCTAssertEqual(outcome, DeactivationOutcome(revoked: 2, complete: true))
-    }
-
-    // MARK: - 409 ERASURE_INCOMPLETE retry protocol (SID-AUTH-06)
-
-    /// No waiting between erasure retries in tests; the production default is
-    /// 1 s → 8 s (see `BackendApiClient.erasureRetryDelays`).
-    private func retryingClient(_ server: MockHttpServer) -> BackendApiClient {
-        let client = BackendApiClient(
-            baseUrl: "https://api.example.com",
-            tenantId: "default",
-            erasureRetryDelays: [0, 0, 0, 0],
-            httpFn: server.httpFunction
-        )
         client.setAppToken("t")
         return client
     }
 
-    /// The backend records the revocations before it erases, so a 409 means
-    /// "the status stands, re-run the erasure" - the client repeats the
-    /// identical request until it gets a 200. The repeat answers
-    /// `{"revoked": 0}` (nothing left to revoke), so the count reported to the
-    /// caller must be the one from the first answer, not the last.
-    func testRevokeAllRepeatsTheRequestUntilTheErasureCompletes() async throws {
-        let server = MockHttpServer()
-        server.enqueueFailure(code: 409, body: #"{"error":"ERASURE_INCOMPLETE","revoked":2}"#)
-        server.enqueue(#"{"revoked":0}"#)
-        let client = retryingClient(server)
-
-        let outcome = try await client.revokeAllWalletInstances(reason: "device stolen")
-
-        XCTAssertEqual(server.requests.count, 2)
-        // "repeating the identical request re-runs the erasure" - same body.
-        XCTAssertEqual(server.requests[0].path, server.requests[1].path)
-        XCTAssertEqual(server.requests[0].body, server.requests[1].body)
-        XCTAssertEqual(outcome, DeactivationOutcome(revoked: 2, complete: true))
+    private func delete(_ server: MockHttpServer) async throws -> AccountDeletionResponse {
+        try await deletingClient(server).deleteAccount(
+            challengeId: "ch-1", credential: ["id": "pk-1", "type": "public-key"], confirm: "DELETE"
+        )
     }
 
-    /// Five attempts, then stop: the wallet is deactivated either way, so the
-    /// caller is told the erasure is unfinished (residual data for an
-    /// administrator) rather than being handed an error for a change that did
-    /// take effect.
-    func testRevokeAllReportsIncompleteAfterTheRetryBudget() async throws {
+    func testDeleteAccountBeginPostsAndDecodesTheAssertionOptions() async throws {
         let server = MockHttpServer()
-        for _ in 0..<5 {
-            server.enqueueFailure(code: 409, body: #"{"error":"ERASURE_INCOMPLETE","revoked":2}"#)
+        server.enqueue(Self.beginBody)
+
+        let challenge = try await deletingClient(server).deleteAccountBegin()
+
+        XCTAssertEqual(server.requests[0].method, "POST")
+        XCTAssertEqual(server.requests[0].path, "/user/session/delete-begin")
+        XCTAssertEqual(challenge.challengeId, "ch-1")
+        XCTAssertEqual(challenge.rpId, "wallet.example.com")
+        XCTAssertEqual(challenge.challenge, Data([1, 2, 3]))
+        XCTAssertEqual(challenge.userVerification, "required")
+        XCTAssertEqual(challenge.allowCredentials.map(\.id), [Data("pk-1".utf8)])
+    }
+
+    func testDeleteAccountBeginRejectsAResponseWithoutAChallenge() async throws {
+        for body in [
+            #"{"publicKey":{"challenge":{"$b64u":"AQID"},"rpId":"x"}}"#,
+            #"{"challengeId":"c","publicKey":{"rpId":"x"}}"#,
+            #"{"challengeId":"c","publicKey":{"challenge":{"$b64u":"AQID"}}}"#,
+            #"{"challengeId":"c"}"#,
+        ] {
+            let server = MockHttpServer()
+            server.enqueue(body)
+            do {
+                _ = try await deletingClient(server).deleteAccountBegin()
+                XCTFail("must not accept \(body)")
+            } catch SirosError.backendApi(let code, _, _) {
+                XCTAssertEqual(code, 0)
+            }
         }
-        let client = retryingClient(server)
-
-        let outcome = try await client.revokeAllWalletInstances()
-
-        XCTAssertEqual(server.requests.count, 5)
-        XCTAssertEqual(outcome, DeactivationOutcome(revoked: 2, complete: false))
     }
 
-    /// The acting token's exemption from the lifecycle cut-off ends with the
-    /// key material. A 401 after a 409 is therefore the erasure having reached
-    /// the keys - the wallet is deactivated, which is exactly "complete".
-    func testRevokeAllTreatsA401AfterThe409AsACompletedErasure() async throws {
+    func testDeleteAccountSendsTheStepUpAssertionAndConfirmationAsJson() async throws {
         let server = MockHttpServer()
-        server.enqueueFailure(code: 409, body: #"{"error":"ERASURE_INCOMPLETE","revoked":3}"#)
-        server.enqueueFailure(code: 401, body: #"{"error":"unauthorized"}"#)
-        let client = retryingClient(server)
+        server.enqueue(#"{"result":"DELETED"}"#)
 
-        let outcome = try await client.revokeAllWalletInstances()
+        let response = try await delete(server)
 
-        XCTAssertEqual(server.requests.count, 2)
-        XCTAssertEqual(outcome, DeactivationOutcome(revoked: 3, complete: true))
+        XCTAssertEqual(response, .deleted)
+        XCTAssertEqual(server.requests[0].method, "DELETE")
+        XCTAssertEqual(server.requests[0].path, "/user/session")
+        let body = try bodyJSON(server.requests[0])
+        XCTAssertEqual(body["challengeId"] as? String, "ch-1")
+        XCTAssertEqual(body["confirm"] as? String, "DELETE")
+        XCTAssertEqual((body["credential"] as? [String: Any])?["id"] as? String, "pk-1")
+        XCTAssertEqual(server.requests[0].headers["Authorization"], "Bearer t")
     }
 
-    /// A 401 that was never preceded by a 409 is an ordinary auth failure.
-    func testRevokeAllStillFailsOnAPlain401() async throws {
+    func testDeleteAccountMaps202CleanupPending() async throws {
         let server = MockHttpServer()
-        server.enqueueFailure(code: 401, body: #"{"error":"unauthorized"}"#)
-        let client = retryingClient(server)
+        server.enqueue(#"{"error":"DELETION_CLEANUP_PENDING","result":"DELETED","message":"m"}"#)
+        let response = try await delete(server)
+        XCTAssertEqual(response, .cleanupPending)
+    }
 
+    func testDeleteAccountMaps202OperatorRequired() async throws {
+        let server = MockHttpServer()
+        server.enqueue(#"{"error":"DELETION_OPERATOR_REQUIRED","result":"PENDING","message":"m"}"#)
+        let response = try await delete(server)
+        XCTAssertEqual(response, .operatorRequired)
+    }
+
+    func testDeleteAccountMaps409IncompleteAndCarriesTheServerMessage() async throws {
+        let server = MockHttpServer()
+        server.enqueueFailure(code: 409, body: #"{"error":"DELETION_INCOMPLETE","message":"try again"}"#)
+        let response = try await delete(server)
+        XCTAssertEqual(response, .incomplete(message: "try again"))
+    }
+
+    func testDeleteAccountMapsTheStepUpAndConfirmationErrors() async throws {
+        let cases: [(Int, String, AccountDeletionResponse)] = [
+            (401, #"{"error":"STEP_UP_REQUIRED"}"#, .stepUpRequired),
+            (401, #"{"error":"STEP_UP_FAILED"}"#, .stepUpFailed),
+            (410, #"{"error":"STEP_UP_EXPIRED"}"#, .stepUpExpired),
+            (400, #"{"error":"CONFIRMATION_REQUIRED"}"#, .confirmationRequired),
+            (401, #"{"error":"Unauthorized"}"#, .sessionRejected),
+            (401, "", .sessionRejected),
+            (404, #"{"error":"User not found"}"#, .accountNotFound),
+        ]
+        for (code, body, expected) in cases {
+            let server = MockHttpServer()
+            server.enqueueFailure(code: code, body: body)
+            let response = try await delete(server)
+            XCTAssertEqual(response, expected, "\(code) \(body)")
+        }
+    }
+
+    /// Outside the contract the client throws instead of guessing: a 409 that
+    /// is not DELETION_INCOMPLETE, a plain 400, a 5xx, and a 2xx that names
+    /// neither outcome.
+    func testDeleteAccountThrowsForResponsesOutsideTheContract() async throws {
+        for (code, body) in [(409, #"{"error":"other"}"#), (400, #"{"error":"bad json"}"#), (500, "")] {
+            let server = MockHttpServer()
+            server.enqueueFailure(code: code, body: body)
+            do {
+                _ = try await delete(server)
+                XCTFail("\(code) must throw")
+            } catch SirosError.backendApi(let thrown, _, _) {
+                XCTAssertEqual(thrown, code)
+            }
+        }
+        let server = MockHttpServer()
+        server.enqueue("{}")
         do {
-            _ = try await client.revokeAllWalletInstances()
-            XCTFail("a 401 with no preceding ERASURE_INCOMPLETE must not read as a completed erasure")
+            _ = try await delete(server)
+            XCTFail("an unrecognised 2xx must not read as deleted")
         } catch SirosError.backendApi(let code, _, _) {
-            XCTAssertEqual(code, 401)
+            XCTAssertEqual(code, 0)
         }
-        XCTAssertEqual(server.requests.count, 1)
-    }
-
-    /// A 409 that is not ERASURE_INCOMPLETE (invalid transition) is not retried.
-    func testSetWalletInstanceStatusDoesNotRetryAnInvalidTransition() async throws {
-        let server = MockHttpServer()
-        server.enqueueFailure(code: 409, body: #"{"error":"invalid status transition"}"#)
-        let client = retryingClient(server)
-
-        do {
-            _ = try await client.setWalletInstanceStatus(instanceId: "jkt-1", status: .active)
-            XCTFail("an invalid transition must surface, not be retried")
-        } catch SirosError.backendApi(let code, _, _) {
-            XCTAssertEqual(code, 409)
-        }
-        XCTAssertEqual(server.requests.count, 1)
-    }
-
-    /// Revoking the last instance runs the same erasure cascade, so the status
-    /// write retries on the same budget and reports the status that was
-    /// recorded even when the cascade never finished.
-    func testSetWalletInstanceStatusRetriesTheErasureAndKeepsTheRecordedStatus() async throws {
-        let server = MockHttpServer()
-        for _ in 0..<5 {
-            server.enqueueFailure(code: 409, body: #"{"error":"ERASURE_INCOMPLETE","id":"jkt-1","status":"revoked"}"#)
-        }
-        let client = retryingClient(server)
-
-        let result = try await client.setWalletInstanceStatus(instanceId: "jkt-1", status: .revoked, reason: "stolen")
-
-        XCTAssertEqual(server.requests.count, 5)
-        XCTAssertEqual(result.id, "jkt-1")
-        XCTAssertEqual(result.status, .revoked)
     }
 
     func testUnauthenticatedRequestOmitsAuthorizationHeader() async throws {
@@ -549,6 +507,25 @@ final class BackendApiClientTests: XCTestCase {
         }
 
         XCTAssertEqual(rejectedCount, 0, "a 500 is a server problem, not evidence the token itself was rejected")
+    }
+
+    /// A step-up 401 says the assertion was bad, not the session token: three
+    /// of them must not trigger the forced logout a rejected token does,
+    /// while three plain 401s still must.
+    func testStepUp401sDoNotRegisterTokenRejectionButPlain401sDo() async throws {
+        for (body, expected) in [(#"{"error":"STEP_UP_FAILED"}"#, 0), (#"{"error":"STEP_UP_REQUIRED"}"#, 0), (#"{"error":"Unauthorized"}"#, 1)] {
+            let tokens = makeAuthTokens()
+            var rejectedCount = 0
+            tokens.onSessionRejected = { rejectedCount += 1 }
+            let client = BackendApiClient(baseUrl: "https://api.example.com", httpFn: { _, _, _, _ in
+                throw SirosError.backendApi(code: 401, message: "unauthorized", body: body)
+            })
+            client.setAuthTokens(tokens)
+            for _ in 0..<3 {
+                _ = try? await client.deleteAccount(challengeId: "c", credential: [:], confirm: "DELETE")
+            }
+            XCTAssertEqual(rejectedCount, expected, body)
+        }
     }
 }
 

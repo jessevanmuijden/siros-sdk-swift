@@ -186,68 +186,6 @@ public final class SirosWallet: @unchecked Sendable {
     /// reading this right after it is the reliable order.
     public var thisInstanceId: String? { instanceKeyThumbprint() }
 
-    /// Suspend, reactivate or revoke one of this user's wallet instances
-    /// (`PUT /user/session/instances/{id}/status`). Suspension is reversible
-    /// and only blocks that installation (login, attestation, sessions);
-    /// revocation is terminal, but - per the EUDI wallet-unit lifecycle, which
-    /// SIROS follows exactly - terminal *for that instance only*: the user's
-    /// other devices are untouched. Revoking the last non-revoked instance
-    /// deactivates the wallet - prefer `deactivateWallet(reason:)` for that,
-    /// which also clears local state.
-    ///
-    /// Any change away from `active` cuts off every bearer token issued before
-    /// it, including this session's (the acting token survives only for the
-    /// request that made the change, and may not mint new ones), so this
-    /// re-logs in once afterwards - see `WalletState.lifecycleBlocked`.
-    /// Suspending *this* device's own instance therefore ends in
-    /// `.lifecycleBlocked(reason: .suspended, ...)`, which is the truthful
-    /// state; confirm with the user before calling it for an instance whose
-    /// `isThisDevice` is true.
-    public func setWalletInstanceStatus(instanceId: String, status: WalletInstance.Status, reason: String? = nil) async throws -> WalletInstance {
-        guard let client = apiClient else { throw SirosError.auth(message: "Not logged in") }
-        let updated = try await client.setWalletInstanceStatus(instanceId: instanceId, status: status, reason: reason)
-        // Every status write records a cut-off, and the acting token's
-        // exemption from it does not reach POST /auth/token or an engine flow
-        // start - so this session is done either way. Re-login once instead of
-        // letting the next issuance or presentation discover it as a 401.
-        await reloginAfterLifecycleChange()
-        return updated
-    }
-
-    /// Deactivate this wallet: revoke every wallet instance of the user
-    /// (`POST /user/session/instances/revoke-all`). The backend erases the
-    /// wallet's private data and server-side credentials and refuses every
-    /// passkey of the user at login with `WALLET_REVOKED` at scope `wallet`
-    /// (which reaches other installations as
-    /// `WalletState.lifecycleBlocked(reason: .deactivated, ...)`); a new
-    /// enrollment is required afterwards. The local cached account is forgotten and the
-    /// wallet logged out, since the vault it decrypts no longer exists.
-    /// The local account is forgotten in both outcomes, since the revocations
-    /// stand even when the backend's erasure cascade did not finish.
-    ///
-    /// Unlike `setWalletInstanceStatus` this does not re-login: there is
-    /// nothing left to log in to.
-    ///
-    /// - Returns: how many instances the backend revoked and whether it
-    ///   confirmed the erasure (`DeactivationOutcome.complete`); an incomplete
-    ///   erasure leaves residual server-side data for an administrator.
-    @discardableResult
-    public func deactivateWallet(reason: String? = nil) async throws -> DeactivationOutcome {
-        guard let client = apiClient else { throw SirosError.auth(message: "Not logged in") }
-        let outcome = try await client.revokeAllWalletInstances(reason: reason)
-        if !outcome.complete {
-            #if canImport(os)
-            logger.warning("Wallet deactivated with an unfinished erasure: \(outcome.revoked) instance(s) revoked, residual server-side data must be cleaned up by an administrator; forgetting local account anyway")
-            #endif
-        }
-        if let active = accountRegistry.activeAccountId {
-            forgetAccount(accountId: active)
-        } else {
-            logout()
-        }
-        return outcome
-    }
-
     // MARK: - Configuration & dependencies
 
     // Not `private`: `SirosWallet+Issuance.swift`, `SirosWallet+Lifecycle.swift`
@@ -618,6 +556,9 @@ public final class SirosWallet: @unchecked Sendable {
     // Not `private`: `SirosWallet+Engine.swift`'s `connectViaWmp` needs it
     // too - same cross-file-extension-access reason as `keystore` above.
     var wmpPeer: WmpPeer?
+
+    /// Caller holds `lock`.
+    func resetPresentationHistoryLocked() { _presentationHistory = [] }
 
     /// Presentation history — most recent first.
     public var presentationHistory: [PresentationRecord] {

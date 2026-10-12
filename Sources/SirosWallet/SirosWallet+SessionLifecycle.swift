@@ -123,13 +123,6 @@ extension SirosWallet {
         }
     }
 
-    /// `reloginAfterCutOff(replacing:)` under the once-only guard.
-    func reloginAfterLifecycleChange() async {
-        guard let generation = beginSelfDrivenRelogin() else { return }
-        await reloginAfterCutOff(replacing: generation)
-        endSelfDrivenRelogin()
-    }
-
     /// Claims the right to run the SDK's own re-login, at most once per
     /// session. Refuses when one is already running, when one has already been
     /// run for this session generation (late 401s from requests issued before
@@ -197,7 +190,7 @@ extension SirosWallet {
     /// - `.deactivated` is the whole wallet: every instance revoked and the
     ///   data erased server-side, so the cached account decrypts a vault that
     ///   no longer exists and a new enrollment is the only way forward. That
-    ///   one is forgotten here, exactly as `deactivateWallet()` forgets it
+    ///   one is forgotten here, exactly as `forgetAccount(accountId:)` forgets it
     ///   when the user asks for the same thing from this device - but only
     ///   when `accountId` names it. An unidentified deactivation forgets
     ///   nothing: a stale entry on the login screen is recoverable, deleting
@@ -244,7 +237,7 @@ extension SirosWallet {
         // race the retry the app may make the moment this state is published.
         await authServerClient?.clearTokenCache()
         if let accountToForget {
-            // The removal `forgetAccount()`/`deactivateWallet()` perform, and
+            // The removal `forgetAccount()` performs, and
             // deliberately not the session teardown `forgetAccount()` decides
             // on afterwards: the session is already over (`endSessionLocally()`
             // above), and reaching `logout()` would send the

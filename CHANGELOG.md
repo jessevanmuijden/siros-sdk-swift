@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
+  deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
+  assertion (step-up, valid 2 minutes, single use) and the typed confirmation
+  `DELETE` authorise the backend to erase the account. The assertion comes from
+  the wallet's `AuthProvider`, or from the optional `stepUp` closure. The call
+  does not throw for expected outcomes: it returns `DeleteAccountResult`
+  (`deleted`, `cleanupPending`, `operatorRequired`, `retryNeeded(reason)`,
+  `failed(failure)`). Only the first three wipe local state - keystore
+  contents and key material, credentials, presentation records and history,
+  every account's session store and Keychain items, the account registry, the
+  trust and credential-status caches and the WSCD selection policy - and the
+  wipe carries on past a failing step, reporting each in `LocalWipeReport`.
+  A `409 DELETION_INCOMPLETE`, a failed, expired or missing step-up, a wrong
+  confirmation, a rejected token or an unknown account keep local state.
+  Stores the host app owns (transaction log, Digital Credentials API registry,
+  file caches) are the host's to clear. Backed by
+  `BackendApiClient.deleteAccountBegin()` and
+  `deleteAccount(challengeId:credential:confirm:)`, which return an
+  `AccountDeletionResponse` per backend outcome, and by
+  `WscdSelectionPolicy.clearAll()`. The sample app's Devices screen offers it
+  with a typed confirmation.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
@@ -54,6 +75,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `document_unreadable` are `verificationFailed`, any other code is
   `providerError` with the code kept, all with the backend's `error` text as
   the message instead of the raw JSON body. A body without a code is unchanged.
+
+### Removed
+- **Breaking: `SirosWallet.deactivateWallet(reason:)` and
+  `setWalletInstanceStatus(instanceId:status:reason:)`, with
+  `BackendApiClient.revokeAllWalletInstances(reason:)` and
+  `setWalletInstanceStatus(instanceId:status:reason:)`, `DeactivationOutcome`,
+  `errorErasureIncomplete` and the `erasureRetryDelays` initializer parameter.**
+  They called `POST /user/session/instances/revoke-all` and
+  `PUT /user/session/instances/{id}/status`, which the backend no longer has.
+  Use `deleteAccount(confirmation:stepUp:)`. `listWalletInstances()` stays.
 
 ### Deprecated
 - **`FaceTecCaptureDelegate`.** It is written against the FaceTec 9 API

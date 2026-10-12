@@ -5,17 +5,15 @@ import SirosAuth
 import SirosCredentials
 
 /// Settings → Devices: the wallet instances this user has in this tenant
-/// (SID-AUTH-06, go-wallet-backend#319), and the two things a user can do
-/// about them - suspend/reactivate/remove one, or deactivate the whole wallet.
+/// (SID-AUTH-06, go-wallet-backend#319), and the one thing a user can do about
+/// them: delete the account.
 ///
-/// A thin consumer, deliberately: every rule about what a status change costs
-/// (the token cut-off and the re-login that follows it, the erasure retry,
-/// what becomes of the local account) lives in the SDK. This view only renders
-/// what `listWalletInstances()` returned and calls the two facade methods.
+/// A thin consumer, deliberately: the step-up, the backend outcomes and the
+/// local wipe all live in `SirosWallet.deleteAccount`. This view only renders
+/// what `listWalletInstances()` returned and collects the typed confirmation.
 struct DevicesView: View {
     @EnvironmentObject var viewModel: WalletViewModel
-    @State private var pendingRemoval: WalletInstance?
-    @State private var showDeactivateSheet = false
+    @State private var showDeleteSheet = false
 
     var body: some View {
         NavigationStack {
@@ -29,7 +27,7 @@ struct DevicesView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(viewModel.walletInstances, id: \.id) { instance in
-                            DeviceRow(instance: instance, onRemove: { pendingRemoval = instance })
+                            DeviceRow(instance: instance)
                         }
                     }
                 } header: {
@@ -45,21 +43,14 @@ struct DevicesView: View {
                 }
 
                 Section {
-                    Button(role: .destructive, action: { showDeactivateSheet = true }) {
-                        Text(L10n.string("devices.deactivateButton"))
+                    Button(role: .destructive, action: { showDeleteSheet = true }) {
+                        Text(L10n.string("devices.deleteButton"))
                     }
-                    .disabled(viewModel.deactivating || viewModel.devicesBusyInstanceId != nil)
+                    .disabled(viewModel.deletingAccount)
                 } header: {
-                    Text(L10n.string("devices.deactivateTitle"))
+                    Text(L10n.string("devices.deleteTitle"))
                 } footer: {
-                    if let outcome = viewModel.deactivationOutcome {
-                        Text(outcome.complete
-                            ? L10n.string("devices.deactivateComplete", outcome.revoked)
-                            : L10n.string("devices.deactivateIncomplete", outcome.revoked))
-                            .foregroundStyle(outcome.complete ? Color.secondary : Color.red)
-                    } else {
-                        Text(L10n.string("devices.deactivateDescription"))
-                    }
+                    Text(L10n.string("devices.deleteDescription"))
                 }
             }
             .navigationTitle(L10n.string("devices.title"))
@@ -78,31 +69,8 @@ struct DevicesView: View {
                 }
             }
             .onAppear { viewModel.refreshDevices() }
-            // Revocation is terminal and removing the last instance
-            // deactivates the wallet, so it is the one per-row action that
-            // asks first - and the confirmation names the device.
-            .confirmationDialog(
-                L10n.string("devices.removeConfirmTitle"),
-                isPresented: Binding(
-                    get: { pendingRemoval != nil },
-                    set: { if !$0 { pendingRemoval = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                if let instance = pendingRemoval {
-                    Button(L10n.string("devices.remove"), role: .destructive) {
-                        viewModel.setWalletInstanceStatus(instanceId: instance.id, status: .revoked)
-                        pendingRemoval = nil
-                    }
-                }
-                Button(L10n.string("devices.cancel"), role: .cancel) { pendingRemoval = nil }
-            } message: {
-                if let instance = pendingRemoval {
-                    Text(L10n.string("devices.removeConfirmMessage", instance.deviceLabel))
-                }
-            }
-            .sheet(isPresented: $showDeactivateSheet) {
-                DeactivateWalletSheet()
+            .sheet(isPresented: $showDeleteSheet) {
+                DeleteAccountSheet()
             }
         }
     }
@@ -111,12 +79,6 @@ struct DevicesView: View {
 private struct DeviceRow: View {
     @EnvironmentObject var viewModel: WalletViewModel
     let instance: WalletInstance
-    let onRemove: () -> Void
-
-    private var busy: Bool { viewModel.devicesBusyInstanceId == instance.id }
-    private var actionsEnabled: Bool {
-        viewModel.devicesBusyInstanceId == nil && !viewModel.deactivating
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -141,94 +103,47 @@ private struct DeviceRow: View {
             if let reason = instance.statusReason, !reason.isEmpty {
                 LabeledContent(L10n.string("devices.statusReason"), value: reason).font(.caption)
             }
-
-            if busy {
-                ProgressView().padding(.top, 4)
-            } else {
-                HStack(spacing: 12) {
-                    switch instance.status {
-                    case .active:
-                        Button(L10n.string("devices.suspend")) {
-                            viewModel.setWalletInstanceStatus(instanceId: instance.id, status: .suspended)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!actionsEnabled)
-                    case .suspended:
-                        Button(L10n.string("devices.reactivate")) {
-                            viewModel.setWalletInstanceStatus(instanceId: instance.id, status: .active)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!actionsEnabled)
-                    case .revoked:
-                        // Terminal: nothing to offer but the record itself.
-                        EmptyView()
-                    }
-                    // Only for a status this SDK understands. `Status` is a
-                    // closed enum today, so `.active`/`.suspended` is the same
-                    // set as "not revoked" - written this way so a status a
-                    // newer backend introduces is not silently treated as
-                    // removable (the Kotlin port, whose status enum is
-                    // nullable, had exactly that gap).
-                    if instance.status == .active || instance.status == .suspended {
-                        Button(L10n.string("devices.remove"), role: .destructive, action: onRemove)
-                            .buttonStyle(.bordered)
-                            .disabled(!actionsEnabled)
-                    }
-                }
-                .padding(.top, 4)
-            }
-
-            // Suspending this device signs it out until someone else
-            // reactivates it - the SDK re-logs in after the write and lands in
-            // .lifecycleBlocked(.suspended). Say so before the tap, not after.
-            if instance.isThisDevice && instance.status == .active {
-                Text(L10n.string("devices.suspendSelfWarning"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .padding(.vertical, 4)
-        // The buttons must not each swallow the row's tap.
-        .buttonStyle(.borderless)
     }
 }
 
-/// The typed confirmation for deactivating the whole wallet, plus the optional
-/// reason the backend records on every revoked instance.
-private struct DeactivateWalletSheet: View {
+/// The typed confirmation for deleting the account. The SDK asks for the
+/// passkey assertion once this is confirmed.
+private struct DeleteAccountSheet: View {
     @EnvironmentObject var viewModel: WalletViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var typed = ""
-    @State private var reason = ""
 
-    private var confirmWord: String { L10n.string("devices.deactivateConfirmWord") }
+    private var confirmWord: String { "DELETE" }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    Text(L10n.string("devices.deactivateConfirmMessage", confirmWord))
+                    Text(L10n.string("devices.deleteConfirmMessage", confirmWord))
                         .font(.subheadline)
                     TextField(confirmWord, text: $typed)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.characters)
-                    TextField(L10n.string("devices.reasonOptional"), text: $reason)
+                }
+                if let error = viewModel.deleteAccountError {
+                    Section {
+                        Text(error).font(.subheadline).foregroundStyle(.red)
+                    }
                 }
                 Section {
                     Button(role: .destructive) {
-                        viewModel.deactivateWallet(
-                            reason: reason.trimmingCharacters(in: .whitespaces).isEmpty
-                                ? nil
-                                : reason.trimmingCharacters(in: .whitespaces)
-                        )
-                        dismiss()
+                        viewModel.deleteAccount(confirmation: typed)
                     } label: {
-                        Text(L10n.string("devices.deactivateButton"))
+                        Text(L10n.string("devices.deleteButton"))
                     }
-                    .disabled(typed.trimmingCharacters(in: .whitespaces).uppercased() != confirmWord.uppercased())
+                    // The SDK requires the exact word; the button says so
+                    // before the passkey prompt rather than after.
+                    .disabled(typed != confirmWord || viewModel.deletingAccount)
                 }
             }
-            .navigationTitle(L10n.string("devices.deactivateConfirmTitle"))
+            .navigationTitle(L10n.string("devices.deleteConfirmTitle"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
