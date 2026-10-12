@@ -135,6 +135,24 @@ public protocol KeystoreManager: AnyObject, Sendable {
         kid: String?
     ) async throws -> String
 
+    /// As above, for an EC TS12 payment-SCA presentation: the KB-JWT also
+    /// carries the claims `transactionData` derives (`transaction_data_hashes`,
+    /// its string `transaction_data_hashes_alg`, `jti`, `response_mode` and the
+    /// two-category `amr`). With `nil` this is exactly the plain overload and
+    /// the KB-JWT is byte-for-byte what it always was.
+    ///
+    /// The default implementation refuses a non-nil `transactionData`: a
+    /// keystore that has not been written to produce these claims must not
+    /// answer an SCA request with a presentation that lacks them.
+    func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
+        kid: String?
+    ) async throws -> String
+
     /// Build an mDoc DeviceResponse (ISO 18013-5) for OID4VP presentation.
     ///
     /// - Parameter kid: the key ID bound to this credential (see
@@ -496,5 +514,26 @@ extension KeystoreError: LocalizedError {
         case .invalidContainer(let msg): return "Invalid container: \(msg)"
         case .invalidParameter(let msg): return "Invalid parameter: \(msg)"
         }
+    }
+}
+
+extension KeystoreManager {
+    public func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
+        kid: String?
+    ) async throws -> String {
+        guard transactionData == nil else {
+            throw TransactionDataError(
+                .insufficientAuthenticationFactors,
+                detail: "this keystore cannot produce EC TS12 presentations"
+            )
+        }
+        return try await signVpToken(
+            credential: credential, disclosedClaims: disclosedClaims, nonce: nonce, audience: audience, kid: kid
+        )
     }
 }
