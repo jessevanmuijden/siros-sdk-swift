@@ -273,7 +273,7 @@ final class SirosWalletLifecycleTests: XCTestCase {
     /// `WALLET_REVOKED` at scope `wallet` is the one refusal that is terminal
     /// for the whole wallet: every instance is revoked and the data erased
     /// server-side, so the cached account decrypts a vault that no longer
-    /// exists. The SDK forgets it - the same thing `deactivateWallet()` does -
+    /// exists. The SDK forgets it, as `forgetAccount(accountId:)` does,
     /// and the blocked state it publishes no longer lists the account.
     func testDeactivatedRefusalForgetsTheCachedAccount()async {
         let registry = seededRegistry()
@@ -297,7 +297,7 @@ final class SirosWalletLifecycleTests: XCTestCase {
         XCTAssertEqual(accounts.count, 0, "a deactivated wallet leaves nothing to log back in to")
         XCTAssertEqual(
             registry.listLoginableAccounts().count, 0,
-            "the cached account is forgotten, exactly as deactivateWallet() forgets it"
+            "the cached account is forgotten, exactly as forgetAccount(accountId:) forgets it"
         )
         XCTAssertNil(registry.activeAccountId)
         XCTAssertEqual(listener.blocked?.reason, .deactivated)
