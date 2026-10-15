@@ -217,9 +217,13 @@ extension SirosWallet {
     // `SirosWallet+Lifecycle.swift`) - same cross-file-extension-access
     // reason as `keystore` above.
     func rollbackLocalCredential() {
-        if let local = authProvider as? LocalAuthProvider {
-            local.rollbackLastRegistration()
-        }
+        // Delegates to whatever `authProvider` can actually do - see
+        // `AuthProvider.rollbackLastRegistration()`'s doc comment. Used to be
+        // hardcoded to `LocalAuthProvider` specifically, which made the
+        // rollback path untestable with a plain test double (and silently a
+        // no-op for any future provider that could genuinely roll back but
+        // wasn't `LocalAuthProvider`).
+        authProvider.rollbackLastRegistration()
     }
 
     // MARK: - Private helpers
@@ -288,6 +292,13 @@ extension SirosWallet {
         guard let client else { return Data() }
         do {
             let response = try await client.getPrivateData()
+            // Persisted alongside the container it's paired with, so it
+            // survives this `BackendApiClient` instance (e.g. a fresh one
+            // after a session resume - see `BackendApiClient.privateDataEtag`'s
+            // doc comment) and a later conditional write (`addPasskey`'s
+            // `register-finish`) has a real precondition to send instead of
+            // silently omitting `If-Match`.
+            sessionStore.privateDataEtag = client.privateDataEtag
             if let pd = response["privateData"] {
                 if let pdDict = pd as? [String: Any], let b64u = pdDict["$b64u"] as? String {
                     let containerBytes = Self.b64UrlDecode(b64u) ?? Data()
@@ -346,9 +357,15 @@ extension SirosWallet {
     func persistAndSyncKeystore() async {
         guard keystore.isUnlocked else { return }
         do {
-            let container = try await keystore.exportEncryptedContainer()
-            sessionStore.privateDataJwe = String(data: container, encoding: .utf8)
-            try await syncPrivateDataToBackend()
+            // Shares `keystoreContainerLock` with `addPasskey()`'s prepare/
+            // finish/commit sequence - see that property's doc comment for
+            // why an export running in between finish's accept and its
+            // commit would otherwise push a container missing the new entry.
+            try await keystoreContainerLock.withLock {
+                let container = try await keystore.exportEncryptedContainer()
+                sessionStore.privateDataJwe = String(data: container, encoding: .utf8)
+                try await syncPrivateDataToBackend()
+            }
         } catch {
             #if canImport(os)
             logger.error("Failed to persist keystore: \(error.localizedDescription)")

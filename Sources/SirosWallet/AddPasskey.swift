@@ -41,4 +41,13 @@ public enum AddPasskeyResult: Sendable, Equatable {
     case insufficientScope(message: String?)
     /// The session token is revoked or expired; log in again.
     case sessionRevoked(message: String?)
+    /// The backend accepted the passkey for the account/session this call
+    /// started for, but the session has since moved on (a logout, or a
+    /// login/re-login - possibly to a different account - completed while
+    /// the backend round trip was in flight). The new passkey is real and
+    /// usable on the account it was added to, but this call deliberately did
+    /// NOT apply it to whatever account/keystore happens to be active now,
+    /// to avoid recording it under the wrong identity. Call `addPasskey`
+    /// again on that account's session if it still needs doing.
+    case sessionChanged(message: String?)
 }

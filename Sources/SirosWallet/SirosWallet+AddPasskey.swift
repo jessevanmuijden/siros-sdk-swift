@@ -38,6 +38,14 @@ extension SirosWallet {
         guard let client = currentAddPasskeyClient() else { throw SirosError.auth(message: "Not logged in") }
         guard keystore.isUnlocked else { return .walletLocked(message: nil) }
 
+        // Captured before the first `await`: if the session moves on (a
+        // logout, or a login/re-login - possibly to a DIFFERENT account -
+        // completing) before the backend accepts this enrolment, that
+        // accepted response must not be applied to whatever account/keystore
+        // happens to be active when it finally arrives. See the matching
+        // check right before the local writes below.
+        let startGeneration = currentSessionGeneration()
+
         let challenge: PasskeyEnrollmentChallenge
         switch try await client.passkeyRegisterBegin() {
         case let .ready(ready): challenge = ready
@@ -90,26 +98,85 @@ extension SirosWallet {
             throw error
         }
 
-        let outcome: AddPasskeyOutcome
+        // What one locked finish-then-commit attempt produced - see below.
+        enum FinishAndCommit {
+            /// The backend refused it (or left the account unchanged for any
+            /// other reason) - nothing was committed.
+            case refused(AddPasskeyOutcome)
+            /// The backend accepted it, but the session moved on (logout, or
+            /// a login/re-login - possibly to a different account) before the
+            /// commit below could run, so it was deliberately skipped rather
+            /// than applied to whatever keystore is active now.
+            case sessionChanged
+            /// The backend accepted it AND it is committed into the (still
+            /// correct) live keystore.
+            case committed(credentialId: String?)
+        }
+
+        let finishResult: FinishAndCommit
         do {
-            outcome = try await client.passkeyRegisterFinish(
-                challengeId: challenge.challengeId,
-                credential: created,
-                nickname: nickname,
-                privateData: prepared.container,
-                authorization: authorization
-            )
+            // One lock scope spanning finish AND commit - shared with
+            // `persistAndSyncKeystore()`, see `keystoreContainerLock`'s doc
+            // comment. Two separate `withLock` calls here (release the lock
+            // between finish's accept and the commit) would reopen exactly
+            // the race this exists to close: a `persistAndSyncKeystore()`
+            // slipping in between them would still export the container as
+            // it stood BEFORE the new entry and push it, erasing what this
+            // finish just had the backend accept.
+            finishResult = try await keystoreContainerLock.withLock {
+                let outcome = try await client.passkeyRegisterFinish(
+                    challengeId: challenge.challengeId,
+                    credential: created,
+                    nickname: nickname,
+                    privateData: prepared.container,
+                    authorization: authorization,
+                    // After a session resume, `client` is a fresh
+                    // `BackendApiClient` with no ETag of its own yet (see
+                    // `BackendApiClient.privateDataEtag`'s doc comment) -
+                    // fall back to the one persisted alongside the cached
+                    // container at the last successful read/write, so this
+                    // still carries a real precondition instead of silently
+                    // omitting `If-Match` and risking a stale-cache overwrite
+                    // of another device's changes.
+                    ifMatch: client.privateDataEtag ?? sessionStore.privateDataEtag
+                )
+                guard case let .added(credentialId) = outcome else { return .refused(outcome) }
+                // Checked here, still holding the lock, immediately before
+                // the one operation that mutates the (single, reused)
+                // keystore instance: a logout (or a login/re-login,
+                // possibly to a different account) completing while the
+                // backend round trip was in flight must not let this
+                // `commitPrfKey` append account A's entry to account B's
+                // now-unlocked keystore.
+                guard currentSessionGeneration() == startGeneration else { return .sessionChanged }
+                try await keystore.commitPrfKey(prepared)
+                return .committed(credentialId: credentialId)
+            }
         } catch {
             rollbackLocalCredential()
             throw error
         }
-        guard case let .added(credentialId) = outcome else { rollbackLocalCredential(); return Self.addPasskeyRefusal(outcome) }
 
-        try await keystore.commitPrfKey(prepared)
-        sessionStore.privateDataJwe = String(data: prepared.container, encoding: .utf8)
-        sessionStore.privateDataEtag = client.privateDataEtag
-        recordAddedPasskey(created.credentialId, prfSalt: prfSalt, nickname: nickname)
-        return .added(credentialId: credentialId)
+        switch finishResult {
+        case let .refused(outcome):
+            rollbackLocalCredential()
+            return Self.addPasskeyRefusal(outcome)
+        case .sessionChanged:
+            return .sessionChanged(message: nil)
+        case let .committed(credentialId):
+            // Re-checked once more, now that the lock is released: the
+            // commit above is done either way, but the account-cache writes
+            // below are about THIS session, not the keystore, and must not
+            // mislabel whatever account is active now if a switch landed in
+            // the narrow gap since the check inside the lock.
+            guard currentSessionGeneration() == startGeneration else {
+                return .sessionChanged(message: nil)
+            }
+            sessionStore.privateDataJwe = String(data: prepared.container, encoding: .utf8)
+            sessionStore.privateDataEtag = client.privateDataEtag
+            recordAddedPasskey(created.credentialId, prfSalt: prfSalt, nickname: nickname)
+            return .added(credentialId: credentialId)
+        }
     }
 
     private func currentAddPasskeyClient() -> BackendApiClient? {

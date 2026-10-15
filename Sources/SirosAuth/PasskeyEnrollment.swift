@@ -65,6 +65,16 @@ public struct PasskeyEnrollmentChallenge: Sendable {
                 userVerification: $0["userVerification"] as? String ?? "preferred"
             )
         }
+        // The credentials this registration must not recreate - see
+        // `RegisterOptions.excludeCredentials`'s doc comment. Malformed
+        // entries are skipped rather than failing the whole challenge: an
+        // exclusion list that can't be fully honoured is still better applied
+        // partially than discarded outright (the backend remains the source
+        // of truth and will itself reject a replayed/invalid registration).
+        let excludeCredentials: [AllowCredential] = (create["excludeCredentials"] as? [[String: Any]] ?? []).compactMap { entry in
+            guard let id = entry["id"] as? String else { return nil }
+            return AllowCredential(id: WebAuthnAuthClient.base64UrlDecode(id), type: entry["type"] as? String ?? "public-key")
+        }
 
         var authorization: AuthenticateOptions?
         if let raw = json["authorization"] {
@@ -101,7 +111,8 @@ public struct PasskeyEnrollmentChallenge: Sendable {
                 userDisplayName: user["displayName"] as? String ?? userName,
                 challenge: challenge,
                 attestation: create["attestation"] as? String ?? "none",
-                authenticatorSelection: selection
+                authenticatorSelection: selection,
+                excludeCredentials: excludeCredentials.isEmpty ? nil : excludeCredentials
             ),
             authorization: authorization
         )

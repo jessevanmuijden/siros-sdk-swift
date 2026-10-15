@@ -208,14 +208,58 @@ final class PasskeyEnrollmentClientTests: XCTestCase {
         XCTAssertEqual(client.privateDataEtag, "etag-8", "the response's new ETag is kept")
     }
 
-    func testAConflictCarriesTheBackendsCurrentEtag() async throws {
+    func testAConflictCarriesTheBackendsCurrentEtagWithoutReplacingTheWritePrecondition() async throws {
         let server = ResponseServer([HttpResponse(status: 412, data: Data(), headers: ["x-private-data-etag": "etag-9"])])
         let client = BackendApiClient(baseUrl: "https://api.example.com", responseFn: server.fn)
         let outcome = try await client.passkeyRegisterFinish(
             challengeId: "c", credential: attestation, nickname: "n", privateData: nil, authorization: nil, ifMatch: "old"
         )
         XCTAssertEqual(outcome, .privateDataConflict(currentEtag: "etag-9"))
-        XCTAssertEqual(client.privateDataEtag, "etag-9")
+        // The conflict's reported version is informational, kept apart from
+        // the write precondition - see `conflictPrivateDataEtag`'s doc
+        // comment. `privateDataEtag` was never set by anything here (no
+        // successful read/write happened), so it stays nil, NOT "etag-9".
+        XCTAssertNil(client.privateDataEtag)
+        XCTAssertEqual(client.conflictPrivateDataEtag, "etag-9")
         XCTAssertEqual(server.headers[0]["X-Private-Data-If-Match"], "old")
+    }
+
+    /// Regression for the bug this fixes: a 412 must not silently become the
+    /// default write precondition, or a caller that naively retries the SAME
+    /// (still stale) enrollment would send its v1-based `privateData` with an
+    /// `If-Match` that now happens to match the server's newer (v2) state -
+    /// overwriting whatever changed it (e.g. another device's PRF entries)
+    /// with stale data. Demonstrated here: after the conflict,
+    /// `privateDataEtag` is still "v1" (the version actually paired with the
+    /// loaded container), so a naive retry (no explicit `ifMatch`) sends
+    /// `If-Match: v1` again - which the backend would (correctly) still
+    /// refuse as a conflict against its real v2 state, rather than accepting
+    /// it because the client had already adopted v2 as its own precondition.
+    func testConflictThenNaiveRetryDoesNotSilentlyAdoptTheConflictingEtag() async throws {
+        let server = ResponseServer([
+            HttpResponse(status: 200, data: Data(#"{"privateData":"x"}"#.utf8), headers: ["X-Private-Data-ETag": "v1"]),
+            HttpResponse(status: 412, data: Data(), headers: ["x-private-data-etag": "v2"]),
+            HttpResponse(status: 412, data: Data(), headers: ["x-private-data-etag": "v2"]),
+        ])
+        let client = BackendApiClient(baseUrl: "https://api.example.com", responseFn: server.fn)
+
+        // The enrolment prepared its container against v1.
+        _ = try await client.getPrivateData()
+        XCTAssertEqual(client.privateDataEtag, "v1")
+
+        let firstAttempt = try await client.passkeyRegisterFinish(
+            challengeId: "c", credential: attestation, nickname: "n", privateData: Data([1]), authorization: nil
+        )
+        XCTAssertEqual(firstAttempt, .privateDataConflict(currentEtag: "v2"))
+        // Still v1: the conflict must not have replaced the write precondition.
+        XCTAssertEqual(client.privateDataEtag, "v1")
+
+        // A naive retry (no explicit ifMatch, no re-fetch/reconciliation)
+        // sends the same v1-based data - with If-Match: v1 again, not v2.
+        let retry = try await client.passkeyRegisterFinish(
+            challengeId: "c", credential: attestation, nickname: "n", privateData: Data([1]), authorization: nil
+        )
+        XCTAssertEqual(server.headers[2]["X-Private-Data-If-Match"], "v1", "must not have adopted the conflicting v2 etag")
+        XCTAssertEqual(retry, .privateDataConflict(currentEtag: "v2"), "the backend still refuses it - no silent overwrite")
     }
 }

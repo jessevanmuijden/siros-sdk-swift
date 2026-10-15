@@ -63,6 +63,7 @@ public final class BackendApiClient: @unchecked Sendable {
     private let lock = NSLock()
     private var _appToken: String?
     private var _privateDataEtag: String?
+    private var _conflictPrivateDataEtag: String?
 
     /// Create a client with a custom HTTP function (for testing).
     public init(
@@ -104,6 +105,26 @@ public final class BackendApiClient: @unchecked Sendable {
     public var privateDataEtag: String? {
         lock.lock(); defer { lock.unlock() }
         return _privateDataEtag
+    }
+
+    /// The `X-Private-Data-ETag` a `412` response most recently reported as
+    /// the backend's CURRENT version - informational only.
+    ///
+    /// Deliberately never folded into `privateDataEtag`: that value is the
+    /// precondition `passkeyRegisterFinish` (and any other conditional write)
+    /// defaults `ifMatch` to, which must stay paired with whatever container
+    /// this client actually has loaded. A `412` means the opposite - the
+    /// loaded container is stale - so recording its reported version there
+    /// would let a caller's naive retry of the SAME (still v1-based) write
+    /// carry an `If-Match` that now matches the server's current (v2) state
+    /// and sail through, silently overwriting whatever changed it (e.g.
+    /// another device's PRF entries) with stale data. A caller that wants to
+    /// retry must explicitly re-fetch private data first (which advances
+    /// `privateDataEtag` through the normal success path) and reconcile its
+    /// locally prepared changes against the newer container.
+    public var conflictPrivateDataEtag: String? {
+        lock.lock(); defer { lock.unlock() }
+        return _conflictPrivateDataEtag
     }
 
     #if !os(Linux)
@@ -554,7 +575,7 @@ public final class BackendApiClient: @unchecked Sendable {
             let message = error.serverMessage
             switch (code, error.apiErrorCode) {
             case (404, _): return .retryNeeded(message: message)
-            case (412, _): return .privateDataConflict(currentEtag: privateDataEtag)
+            case (412, _): return .privateDataConflict(currentEtag: conflictPrivateDataEtag)
             case (400, _), (403, _):
                 return .registrationRejected(status: code, message: error.apiErrorCode ?? message)
             case (401, errorEnrollmentAuthorizationRequired): return .authorizationRequired(message: message)
@@ -619,7 +640,15 @@ public final class BackendApiClient: @unchecked Sendable {
         }
         let response = try await httpFn(method, url, headers, body)
         if let etag = response.headers["x-private-data-etag"] {
-            recordPrivateDataEtag(etag)
+            // Only a response that actually carries loaded/written private
+            // data advances the write precondition - see
+            // `conflictPrivateDataEtag`'s doc comment for why a 412's etag
+            // must NOT land here.
+            if (200..<300).contains(response.status) {
+                recordPrivateDataEtag(etag)
+            } else if response.status == 412 {
+                recordConflictPrivateDataEtag(etag)
+            }
         }
         if (200..<300).contains(response.status) { return response.data }
         let error = SirosError.backendApi(
@@ -646,6 +675,12 @@ public final class BackendApiClient: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         _privateDataEtag = etag
+    }
+
+    private func recordConflictPrivateDataEtag(_ etag: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        _conflictPrivateDataEtag = etag
     }
 
     private func currentAppToken() -> String? {

@@ -91,6 +91,21 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// the backend stored it.
     func commitPrfKey(_ prepared: PreparedPrfKey) async throws
 
+    /// Give the ORIGINAL (first-time-setup) PRF entry its real credential ID,
+    /// once one exists to give it - see `JweKeystore.setCredentialId`'s doc
+    /// comment for why that entry is created with an empty ID in the first
+    /// place and what goes wrong (a second passkey's HKDF salt masquerading
+    /// as the original's on resume) if this is never called.
+    ///
+    /// A genuine protocol REQUIREMENT, not merely a defaulted extension
+    /// method - same reason as `unlock(prfOutput:encryptedContainer:hkdfSalt:
+    /// hkdfInfo:prfSalt:)` above: `SirosWallet` calls this through a
+    /// `KeystoreManager` existential, where a conformer's own non-protocol
+    /// method is invisible. Default-implemented as a no-op below for a
+    /// keystore with no such concept (e.g. `WscdKeystoreAdapter`, which
+    /// doesn't support `preparePrfKey` either).
+    func setCredentialId(_ credentialId: Data)
+
     /// Generate a new keypair and return the key ID.
     func generateKey(algorithm: String) async throws -> String
 
@@ -374,6 +389,9 @@ public extension KeystoreManager {
     func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
         throw KeystoreError.invalidParameter("This keystore cannot add a passkey to its container")
     }
+
+    /// Default: nothing to do. See the protocol requirement's doc comment.
+    func setCredentialId(_ credentialId: Data) {}
 
     /// Default for a conformer written before the `prfSalt` parameter
     /// existed: forwards unchanged, so a first-time-setup container it

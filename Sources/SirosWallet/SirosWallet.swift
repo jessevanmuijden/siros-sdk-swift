@@ -205,6 +205,23 @@ public final class SirosWallet: @unchecked Sendable {
     // convention.
     let keystore: KeystoreManager
 
+    /// Serializes operations that export, modify, or push the keystore's
+    /// encrypted container to the backend - `persistAndSyncKeystore()` and
+    /// `addPasskey()`'s prepare/finish/commit sequence, specifically - so
+    /// they cannot interleave.
+    ///
+    /// Without this, `addPasskey()` can accept a new PRF entry from the
+    /// backend (its `register-finish` succeeds) while the entry is not yet
+    /// `commitPrfKey`'d into the live container: a concurrent
+    /// `persistAndSyncKeystore()` (from an unrelated issuance, presentation,
+    /// or credential deletion running at the same time) would export the
+    /// container as it stood BEFORE the commit and push it unconditionally -
+    /// silently erasing the just-accepted passkey entry if that push lands on
+    /// the server after `addPasskey`'s own write. Not `private`: needed from
+    /// `SirosWallet+Lifecycle.swift` and `SirosWallet+AddPasskey.swift`, same
+    /// cross-file-extension-access reason as `keystore` above.
+    let keystoreContainerLock = AsyncLock()
+
     /// WSCD hardware-key lifecycle (enroll/rotate/destroy) and
     /// additional-plugin registration (FIDO2 rawSign, R2PS remote HSM) -
     /// `nil` unless `keystore` is WSCD-backed (see `WscdKeystoreAdapter`).
@@ -973,6 +990,19 @@ public final class SirosWallet: @unchecked Sendable {
                 hkdfInfo: hkdfInfo,
                 prfSalt: prfSalt
             )
+            // The first-time-setup container `unlock` just created has its
+            // PRF entry's `credentialId` empty (it has no credential to put
+            // there yet - see `JweKeystore.unlock`'s first-use branch).
+            // Without this, the ORIGINAL passkey's own entry can never be
+            // found by credential ID again (`ownPrfKeyInfo`/`setCredentialId`'s
+            // doc comment): after an `addPasskey()` adds a second passkey and
+            // logs in with it, the session's cached HKDF salt becomes the
+            // SECOND passkey's; resuming and unlocking with the ORIGINAL
+            // passkey would then find no entry matching its real credential
+            // ID, fall back to the session's (second passkey's) salt, and
+            // fail to decrypt. `setCredentialId` is a no-op once the entry
+            // already has one, so this is safe to call unconditionally here.
+            keystore.setCredentialId(result.credentialId)
 
             let encryptedContainer = try await keystore.exportEncryptedContainer()
 

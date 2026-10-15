@@ -18,6 +18,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         private(set) var assertions: [AuthenticateOptions] = []
         private(set) var registrations: [RegisterOptions] = []
         private(set) var order: [String] = []
+        private(set) var rollbackCalls = 0
         var assertionFailure: Error?
         var registerFailure: Error?
         var prf: PrfOutput? = PrfOutput(first: Data(repeating: 0x42, count: 32))
@@ -38,13 +39,42 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             )
         }
         func getPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput { try prfCeremony.get() }
+        func rollbackLastRegistration() {
+            lock.lock(); rollbackCalls += 1; lock.unlock()
+        }
+    }
+
+    /// A one-shot async gate: `wait()` suspends until `open()` is called
+    /// (from anywhere, possibly never, possibly before `wait()` is even
+    /// reached). Used to force a deterministic interleaving between
+    /// `addPasskey()`'s in-flight `register-finish` and a concurrent
+    /// operation the test wants to run while it is still pending.
+    private final actor Gate {
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func open() {
+            opened = true
+            let pending = waiters
+            waiters = []
+            for w in pending { w.resume() }
+        }
     }
 
     private final class RecordingKeystore: KeystoreManager, @unchecked Sendable {
         var isUnlocked = true
         var prepareError: Error?
+        private let opLock = NSLock()
         private(set) var prepared: [(credentialId: Data, prfOutput: Data, prfSalt: Data, hkdfSalt: Data, hkdfInfo: Data)] = []
         private(set) var committed: [Data] = []
+        /// Records "commit"/"export" in the order the keystore actually saw
+        /// them - what `testADelayedFinishDoesNotLetAConcurrentSyncEraseTheNewEntry`
+        /// checks: a concurrent `persistAndSyncKeystore()` must never export
+        /// BEFORE an in-flight `addPasskey()`'s accepted enrolment commits.
+        private(set) var operationOrder: [String] = []
         func unlock(prfOutput: Data, encryptedContainer: Data, hkdfSalt: Data, hkdfInfo: Data) async throws {}
         func lock() { isUnlocked = false }
         func preparePrfKey(
@@ -54,13 +84,18 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             prepared.append((credentialId, prfOutput, prfSalt, hkdfSalt, hkdfInfo))
             return PreparedPrfKey(container: Data("container-for-new-pk".utf8), credentialId: credentialId)
         }
-        func commitPrfKey(_ prepared: PreparedPrfKey) async throws { committed.append(prepared.credentialId) }
+        func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+            opLock.lock(); committed.append(prepared.credentialId); operationOrder.append("commit"); opLock.unlock()
+        }
         func generateKey(algorithm: String) async throws -> String { "key" }
         func sign(keyId: String, payload: Data, algorithm: String) async throws -> Data { Data() }
         func generateProof(audience: String, nonce: String, freshKey: Bool) async throws -> String { "" }
         func signPresentation(nonce: String, audience: String, credentialIds: [Int64], kid: String?) async throws -> String { "" }
         func signVpToken(credential: String, disclosedClaims: [String]?, nonce: String, audience: String, kid: String?) async throws -> String { "" }
-        func exportEncryptedContainer() async throws -> Data { Data("exported".utf8) }
+        func exportEncryptedContainer() async throws -> Data {
+            opLock.lock(); operationOrder.append("export"); opLock.unlock()
+            return Data("exported".utf8)
+        }
         func listKeys() -> [KeyInfo] { [] }
         func saveCredential(id: Int64, json: String) async throws {}
         func getCredential(id: Int64) async throws -> String? { nil }
@@ -81,6 +116,13 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         static let authorization = #""authorization":{"publicKey":{"rpId":"wallet.example.com","challenge":{"$b64u":"BAUG"},"allowCredentials":[{"type":"public-key","id":{"$b64u":"cGstMQ"}}],"userVerification":"required"}}"#
         var begin: Result<String, Error> = .success(#"{"username":"alice","challengeId":"ch-1",\#(create),\#(authorization)}"#)
         var finish: Result<String, Error> = .success(#"{"credentialId":"bmV3LXBr"}"#)
+        /// When set, `register-finish` and `private-data` POSTs wait for it
+        /// before returning - lets a test force an exact interleaving with a
+        /// concurrent operation instead of racing on timing.
+        var finishGate: Gate?
+        /// Opened the moment a `register-finish` request is actually sent,
+        /// so a test can wait for "the finish is in flight" without a guess.
+        let finishStarted = Gate()
 
         func failFinish(_ code: Int, _ body: String) {
             finish = .failure(SirosError.backendApi(code: code, message: "failed", body: body))
@@ -88,11 +130,16 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
 
         var httpFn: @Sendable (String, URL, [String: String], Data?) async throws -> Data {
             { [self] method, url, headers, body in
-                lock.lock(); defer { lock.unlock() }
+                lock.lock()
                 calls.append(Call(
                     method: method, path: url.path, headers: headers,
                     body: body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
                 ))
+                lock.unlock()
+                if url.path.hasSuffix("register-finish") {
+                    await finishStarted.open()
+                    await finishGate?.wait()
+                }
                 return Data(try (url.path.hasSuffix("register-begin") ? begin : finish).get().utf8)
             }
         }
@@ -251,6 +298,10 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             let result = try await f.wallet.addPasskey(nickname: "n")
             XCTAssertEqual(result, expected, "\(code) \(body)")
             XCTAssertTrue(f.keystore.committed.isEmpty, "keystore untouched: \(code)")
+            // Regression: the platform credential `authProvider.register`
+            // already created must be rolled back on every refusal - not
+            // just believed to be, by a test double that can't tell.
+            XCTAssertEqual(f.auth.rollbackCalls, 1, "must roll back the created credential: \(code) \(body)")
             assertUnchanged(f)
         }
     }
@@ -265,6 +316,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             XCTAssertEqual(code, 500)
         } catch { XCTFail("\(error)") }
         XCTAssertTrue(f.keystore.committed.isEmpty)
+        XCTAssertEqual(f.auth.rollbackCalls, 1, "a transport failure on finish must still roll back the created credential")
         assertUnchanged(f)
     }
 
@@ -280,6 +332,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
                 XCTAssertEqual(result, expected)
             }
             XCTAssertTrue(f.auth.assertions.isEmpty && f.auth.registrations.isEmpty)
+            XCTAssertEqual(f.auth.rollbackCalls, 0, "nothing was ever created, so there is nothing to roll back")
             assertUnchanged(f)
         }
     }
@@ -315,6 +368,12 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         guard case .prfUnsupported = result else { return XCTFail("got \(result)") }
         XCTAssertEqual(f.server.calls.count, 1, "a passkey that cannot unlock the data must not be enrolled")
         XCTAssertTrue(f.keystore.prepared.isEmpty)
+        // Regression: the platform credential was already created (the PRF
+        // ceremony's own separate assertion retry - `resolvePrfOutput`'s
+        // fallback to `getPrfOutput` - is what actually failed here, not the
+        // creation itself), so it must be rolled back rather than left
+        // orphaned on the device.
+        XCTAssertEqual(f.auth.rollbackCalls, 1, "an authenticator that cannot produce PRF must not leave an orphaned credential")
         assertUnchanged(f)
     }
 
@@ -327,6 +386,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             XCTFail("must throw")
         } catch is Boom {} catch { XCTFail("\(error)") }
         XCTAssertEqual(f.server.calls.count, 1)
+        XCTAssertEqual(f.auth.rollbackCalls, 1, "a local keystore failure must still roll back the created credential")
         assertUnchanged(f)
     }
 
@@ -425,6 +485,84 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         XCTAssertEqual(resolved.hkdfInfo, Data("second info".utf8))
     }
 
+    // MARK: - The original passkey's entry may be anonymous (review finding)
+
+    /// Regression: `register()` used to leave the ORIGINAL passkey's PRF
+    /// entry with an empty credential id (it never called
+    /// `keystore.setCredentialId` - see that method's doc comment and
+    /// `JweKeystore.setCredentialId`'s). After logging in with a SECOND
+    /// (added) passkey, the session caches that passkey's HKDF salt; resuming
+    /// and unlocking with the ORIGINAL passkey must still find its own entry
+    /// by the verified-anonymous-entry fallback, not silently reuse the
+    /// second passkey's salt from the session store and fail to decrypt (or
+    /// decrypt with the wrong key).
+    func testUnlockingWithTheOriginalPasskeyFindsItsAnonymousEntryRatherThanTheSessionsSecondPasskeySalt() async throws {
+        let f = makeFixture()
+        let originalCredentialId = Data("pk-1".utf8)
+        let secondCredentialId = Data("pk-2".utf8)
+        let originalSalt = Data(repeating: 0x11, count: 32)
+        let secondSalt = Data(repeating: 0x22, count: 32)
+        // Shaped the way a pre-fix `register()` left it: an ANONYMOUS first
+        // entry (empty credential id), exactly like `JweKeystore.unlock`'s
+        // first-time-setup branch without the follow-up `setCredentialId`.
+        let container = try twoPasskeyContainer(
+            first: Data(), second: secondCredentialId, firstSalt: originalSalt, secondSalt: secondSalt
+        )
+        // The registry's FIRST passkey is the original one - what verifies
+        // the anonymous entry actually belongs to THIS credential, rather
+        // than guessing.
+        let account = CachedAccount(
+            userId: "user-1", tenantId: "default", displayName: "user-1", backendUrl: "https://wallet.example.invalid",
+            passkeys: [
+                CachedPasskey(credentialId: SirosWallet.b64UrlEncode(originalCredentialId), prfSalt: originalSalt.base64EncodedString()),
+                CachedPasskey(credentialId: SirosWallet.b64UrlEncode(secondCredentialId), prfSalt: secondSalt.base64EncodedString()),
+            ]
+        )
+        // The session caches the SECOND passkey's salt, as after a login
+        // with it - what the bug would otherwise silently fall back to.
+        f.sessionStore.hkdfSalt = secondSalt.base64EncodedString()
+        f.sessionStore.hkdfInfo = Data("second info".utf8).base64EncodedString()
+        let assertion = SirosWallet.PasskeyAssertion(
+            challengeId: "c", credential: [:], prfOutput: PrfOutput(first: Data([1])), prfSalt: Data([9]),
+            cachedAccount: account, credentialId: originalCredentialId
+        )
+
+        let resolved = try await f.wallet.resolveUnlockKeystorePrf(assertion: assertion, storedContainer: container)
+
+        XCTAssertEqual(resolved.hkdfSalt, originalSalt, "must use the original passkey's own (anonymous) entry, not the session's second-passkey salt")
+        XCTAssertEqual(resolved.hkdfInfo, Data("first info".utf8))
+    }
+
+    /// Same fallback, on the login path (`resolveLoginPrf`).
+    func testLoginWithTheOriginalPasskeyFindsItsAnonymousEntryRatherThanTheSessionsSecondPasskeySalt() async throws {
+        let f = makeFixture()
+        let originalCredentialId = Data("pk-1".utf8)
+        let secondCredentialId = Data("pk-2".utf8)
+        let originalSalt = Data(repeating: 0x11, count: 32)
+        let secondSalt = Data(repeating: 0x22, count: 32)
+        let container = try twoPasskeyContainer(
+            first: Data(), second: secondCredentialId, firstSalt: originalSalt, secondSalt: secondSalt
+        )
+        let account = CachedAccount(
+            userId: "user-1", tenantId: "default", displayName: "user-1", backendUrl: "https://wallet.example.invalid",
+            passkeys: [
+                CachedPasskey(credentialId: SirosWallet.b64UrlEncode(originalCredentialId), prfSalt: originalSalt.base64EncodedString()),
+                CachedPasskey(credentialId: SirosWallet.b64UrlEncode(secondCredentialId), prfSalt: secondSalt.base64EncodedString()),
+            ]
+        )
+        f.sessionStore.hkdfSalt = secondSalt.base64EncodedString()
+        f.sessionStore.hkdfInfo = Data("second info".utf8).base64EncodedString()
+        let assertion = SirosWallet.PasskeyAssertion(
+            challengeId: "c", credential: [:], prfOutput: PrfOutput(first: Data([1])), prfSalt: Data([9]),
+            cachedAccount: account, credentialId: originalCredentialId
+        )
+
+        let resolved = try await f.wallet.resolveLoginPrf(assertion: assertion, privateData: container, cachedAccount: account)
+
+        XCTAssertEqual(resolved.hkdfSalt, originalSalt)
+        XCTAssertEqual(resolved.hkdfInfo, Data("first info".utf8))
+    }
+
     func testAContainerWithoutAnEntryForThePasskeyFallsBackToTheSessionParameters() async throws {
         let f = makeFixture()
         let assertion = SirosWallet.PasskeyAssertion(
@@ -433,5 +571,116 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         )
         let resolved = try await f.wallet.resolveLoginPrf(assertion: assertion, privateData: Data(), cachedAccount: nil)
         XCTAssertEqual(resolved.hkdfSalt, Self.hkdfSalt)
+    }
+
+    // MARK: - Concurrency (review findings)
+
+    /// Regression: a concurrent `persistAndSyncKeystore()` (an unrelated
+    /// issuance/presentation/deletion) must never export the container
+    /// BEFORE an in-flight `addPasskey()`'s accepted enrolment commits its
+    /// new PRF entry - otherwise the export reflects the pre-commit state
+    /// and, if it then wins the race to the server, silently erases the
+    /// entry the backend just accepted.
+    func testADelayedFinishDoesNotLetAConcurrentKeystoreSyncExportBeforeCommit() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        f.server.finishGate = gate
+
+        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
+        await f.server.finishStarted.wait()
+
+        // Start the concurrent sync while finish is still pending. Without
+        // `keystoreContainerLock` there is nothing else for it to wait on,
+        // so it would run its export immediately; give it real wall-clock
+        // time to do so before releasing finish, so a missing lock shows up
+        // deterministically rather than by a timing accident.
+        async let syncTask: Void = f.wallet.persistAndSyncKeystore()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await gate.open()
+
+        let result = try await addTask.value
+        _ = try await syncTask
+        guard case .added = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(
+            f.keystore.operationOrder.first, "commit",
+            "a concurrent sync must not export before the accepted enrolment is committed: \(f.keystore.operationOrder)"
+        )
+    }
+
+    /// Regression: after a session resume, the `BackendApiClient` is fresh
+    /// and has no ETag of its own (see `BackendApiClient.privateDataEtag`'s
+    /// doc comment) - `addPasskey` must fall back to the one persisted
+    /// alongside the cached container (`sessionStore.privateDataEtag`)
+    /// rather than silently omitting `If-Match` and risking a stale-cache
+    /// overwrite of another device's changes.
+    func testResumeAfterRestartUsesTheStoredPrivateDataEtagAsThePrecondition() async throws {
+        let f = makeFixture()
+        f.sessionStore.privateDataEtag = "etag-from-before-restart"
+        // A fresh client, as `resumeSession()`/`unlockKeystore()` build -
+        // it has learnt nothing yet.
+        let freshClient = BackendApiClient(baseUrl: "https://wallet.example.invalid", httpFn: f.server.httpFn)
+        freshClient.setAppToken("t")
+        f.wallet.apiClient = freshClient
+
+        let result = try await f.wallet.addPasskey(nickname: "Laptop")
+
+        guard case .added = result else { return XCTFail("got \(result)") }
+        let finishCall = f.server.calls[1]
+        XCTAssertEqual(finishCall.headers["X-Private-Data-If-Match"], "etag-from-before-restart")
+    }
+
+    /// Regression: if the session moves on (a logout, or a login/re-login -
+    /// possibly to a DIFFERENT account) while this enrolment's backend round
+    /// trip is still in flight, the accepted response must be discarded
+    /// rather than applied to whatever account/keystore happens to be active
+    /// when it arrives - otherwise `commitPrfKey` would append the
+    /// originating account's entry to the new session's now-unlocked
+    /// keystore, and the cache writes would record it under the wrong
+    /// identity.
+    func testASessionSwitchWhileFinishIsInFlightDiscardsTheResultWithoutCorruptingTheNewSession() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        f.server.finishGate = gate
+
+        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
+        await f.server.finishStarted.wait()
+
+        // Simulate a logout (of the account this call started for) while
+        // the backend round trip is still pending.
+        f.wallet.bumpSessionGeneration()
+        await gate.open()
+
+        let result = try await addTask.value
+        guard case .sessionChanged = result else { return XCTFail("got \(result)") }
+        // The backend DID accept it, but nothing local was touched: the
+        // single, reused keystore instance was not mutated, and the
+        // account cache still shows only the original passkey.
+        XCTAssertTrue(f.keystore.committed.isEmpty, "must not commit into the keystore of a session that moved on")
+        assertUnchanged(f)
+    }
+
+    // MARK: - excludeCredentials (review finding)
+
+    /// Regression: the backend's `excludeCredentials` must actually reach the
+    /// authenticator, so an authenticator that would otherwise replace an
+    /// existing discoverable credential for the same RP/user is told not to.
+    func testExcludeCredentialsFromTheBeginResponseReachTheRegistrationRequest() async throws {
+        let f = makeFixture()
+        f.server.begin = .success(
+            #"""
+            {"username":"alice","challengeId":"ch-1","createOptions":{"publicKey":{
+                "rp":{"id":"wallet.example.com","name":"Wallet"},
+                "user":{"id":{"$b64u":"dXNlcg"},"name":"alice","displayName":"Alice"},
+                "challenge":{"$b64u":"AQID"},
+                "excludeCredentials":[{"type":"public-key","id":{"$b64u":"cGstMQ"}}]
+            }},\#(Server.authorization)}
+            """#
+        )
+
+        let result = try await f.wallet.addPasskey(nickname: "Laptop")
+
+        guard case .added = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(f.auth.registrations.count, 1)
+        XCTAssertEqual(f.auth.registrations[0].excludeCredentials?.map(\.id), [Data("pk-1".utf8)])
     }
 }

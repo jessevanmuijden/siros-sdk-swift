@@ -160,6 +160,17 @@ extension SirosWallet {
         }
     }
 
+    /// The current session generation - see ``SirosWallet/sessionGeneration``'s
+    /// doc comment. A caller that captures this before its own first `await`
+    /// and compares it again right before applying a result locally (e.g.
+    /// `addPasskey`) can tell whether the session it started for is still the
+    /// one now active, rather than one a logout or a login/re-login to a
+    /// different account has since replaced.
+    func currentSessionGeneration() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return sessionGeneration
+    }
+
     /// Ends the current session generation and returns the new one. Call
     /// whenever a session ends or is replaced.
     @discardableResult
