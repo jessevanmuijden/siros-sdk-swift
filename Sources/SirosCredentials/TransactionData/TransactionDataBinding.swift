@@ -41,15 +41,12 @@ public struct TransactionDataBinding: Sendable, Equatable {
     public let hashAlgorithm: String
     /// The OID4VP `response_mode` of the request.
     public let responseMode: String
-    /// Factors applied for THIS operation.
-    public let factors: [AuthenticationFactor]
 
-    /// `package` access on purpose: a binding signs its `factors` into the `amr` claim, so only the SDK's own pipeline (which takes them from a verified provider) may build one; an application cannot mint an SCA claim by constructing it.
-    package init(rawEntries: [String], hashAlgorithm: String, responseMode: String, factors: [AuthenticationFactor]) {
+    /// `package` access on purpose: only the SDK's own pipeline builds a binding from a validated request. It holds no authentication factors: the `amr` is supplied by the signing operation (`kbJwtClaims(factors:)`), so an application cannot mint an SCA claim by constructing one.
+    package init(rawEntries: [String], hashAlgorithm: String, responseMode: String) {
         self.rawEntries = rawEntries
         self.hashAlgorithm = hashAlgorithm
         self.responseMode = responseMode
-        self.factors = factors
     }
 
     /// The KB-JWT claims TS12 adds. Throws rather than produce a claim set a
@@ -57,9 +54,11 @@ public struct TransactionDataBinding: Sendable, Equatable {
     /// fewer than two distinct factor categories, or a factor method TS12
     /// does not define.
     ///
+    /// - Parameter factors: the factors the signing operation reported for the
+    ///   very sign that will carry these claims, mapped 1:1 into the `amr`.
     /// - Parameter jti: a fresh, cryptographically random value; defaults to a
     ///   new random UUID. A parameter only so tests can pin it.
-    public func kbJwtClaims(jti: String = UUID().uuidString.lowercased()) throws -> [String: Any] {
+    public func kbJwtClaims(factors: [AuthenticationFactor], jti: String = UUID().uuidString.lowercased()) throws -> [String: Any] {
         guard !rawEntries.isEmpty else { throw TransactionDataError(.invalidEntry, detail: "no transaction_data entries to bind") }
         var hashes: [String] = []
         for raw in rawEntries {

@@ -100,12 +100,10 @@ final class TransactionDataPipelineTests: XCTestCase {
         XCTAssertEqual(result.entries[0].raw, e)
         XCTAssertEqual(result.entries[0].type, payment)
         XCTAssertEqual(result.entries[0].acceptableHashAlgorithms, ["sha-256"])
-        let binding = try XCTUnwrap(result.binding(forQueryId: "pay", factors: [
-            AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "key_in_remote_wscd"),
-        ]))
+        let binding = try XCTUnwrap(result.binding(forQueryId: "pay"))
         XCTAssertEqual(binding.rawEntries, [e])
         XCTAssertEqual(binding.responseMode, "dc_api")
-        let claims = try binding.kbJwtClaims(jti: "j")
+        let claims = try binding.kbJwtClaims(factors: [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "key_in_remote_wscd")], jti: "j")
         XCTAssertEqual(claims["transaction_data_hashes"] as? [String], [TransactionDataHashing.hash(raw: e, algorithm: "sha-256")!])
     }
 
@@ -413,7 +411,7 @@ final class TransactionDataPipelineTests: XCTestCase {
         XCTAssertEqual(r.entries[0].acceptableHashAlgorithms, ["sha-256"], "absent means sha-256")
         let validated = try await TransactionDataPipeline(source: source())
             .validate(request([.init(raw: entry(extra: #""transaction_data_hashes_alg":["sha-1","sha-384","sha-256"]"#))]))
-        let binding = try XCTUnwrap(validated.binding(forQueryId: "pay", factors: []))
+        let binding = try XCTUnwrap(validated.binding(forQueryId: "pay"))
         XCTAssertEqual(binding.hashAlgorithm, "sha-384", "the first listed algorithm that is supported")
     }
 
@@ -431,32 +429,31 @@ final class TransactionDataPipelineTests: XCTestCase {
         let e2 = entry(ids: #"["pay","other"]"#, extra: #""transaction_data_hashes_alg":["sha-256","sha-384"]"#)
         let e3 = entry(ids: #"["other"]"#)
         let result = try await TransactionDataPipeline(source: source()).validate(request([.init(raw: e1), .init(raw: e2), .init(raw: e3)], credentials: creds))
-        let pay = try XCTUnwrap(result.binding(forQueryId: "pay", factors: []))
+        let pay = try XCTUnwrap(result.binding(forQueryId: "pay"))
         XCTAssertEqual(pay.rawEntries, [e1, e2], "verifier order, only entries naming this credential")
         XCTAssertEqual(pay.hashAlgorithm, "sha-256", "the only algorithm every bound entry accepts")
-        let other = try XCTUnwrap(result.binding(forQueryId: "other", factors: []))
+        let other = try XCTUnwrap(result.binding(forQueryId: "other"))
         XCTAssertEqual(other.rawEntries, [e2, e3])
-        XCTAssertNil(try result.binding(forQueryId: "none", factors: []))
+        XCTAssertNil(try result.binding(forQueryId: "none"))
     }
 
     func testBindingWithNoCommonAlgorithmIsRefused() async throws {
         let e1 = entry(extra: #""transaction_data_hashes_alg":["sha-512"]"#)
         let e2 = entry(extra: #""transaction_data_hashes_alg":["sha-384"]"#)
         let result = try await TransactionDataPipeline(source: source()).validate(request([.init(raw: e1), .init(raw: e2)]))
-        XCTAssertThrowsError(try result.binding(forQueryId: "pay", factors: [])) {
+        XCTAssertThrowsError(try result.binding(forQueryId: "pay")) {
             XCTAssertEqual(($0 as? TransactionDataError)?.reason, .unsupportedHashAlgorithm)
         }
     }
 
     // MARK: - KB-JWT claims
 
-    private func binding(factors: [AuthenticationFactor], alg: String = "sha-256", entries: [String] = ["abc"]) -> TransactionDataBinding {
-        TransactionDataBinding(rawEntries: entries, hashAlgorithm: alg, responseMode: "direct_post.jwt", factors: factors)
+    private func binding(alg: String = "sha-256", entries: [String] = ["abc"]) -> TransactionDataBinding {
+        TransactionDataBinding(rawEntries: entries, hashAlgorithm: alg, responseMode: "direct_post.jwt")
     }
 
     func testClaimsMatchTheVerifierContract() throws {
-        let b = binding(factors: [AuthenticationFactor(.knowledge, "pin_6_or_more_digits"), AuthenticationFactor(.inherence, "fingerprint_device")])
-        let c = try b.kbJwtClaims()
+        let c = try binding().kbJwtClaims(factors: [AuthenticationFactor(.knowledge, "pin_6_or_more_digits"), AuthenticationFactor(.inherence, "fingerprint_device")])
         XCTAssertEqual(c["transaction_data_hashes_alg"] as? String, "sha-256", "a string, not an array")
         XCTAssertEqual(c["response_mode"] as? String, "direct_post.jwt")
         XCTAssertEqual((c["transaction_data_hashes"] as? [String])?.count, 1)
@@ -466,8 +463,9 @@ final class TransactionDataPipelineTests: XCTestCase {
     }
 
     func testJtiIsFreshEveryTime() throws {
-        let b = binding(factors: [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "other")])
-        let jtis = try (0..<50).map { _ in try XCTUnwrap(b.kbJwtClaims()["jti"] as? String) }
+        let b = binding()
+        let f = [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "other")]
+        let jtis = try (0..<50).map { _ in try XCTUnwrap(b.kbJwtClaims(factors: f)["jti"] as? String) }
         XCTAssertEqual(Set(jtis).count, 50)
     }
 
@@ -478,25 +476,24 @@ final class TransactionDataPipelineTests: XCTestCase {
             [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.knowledge, "pattern")],
         ]
         for factors in cases {
-            XCTAssertThrowsError(try binding(factors: factors).kbJwtClaims()) {
+            XCTAssertThrowsError(try binding().kbJwtClaims(factors: factors)) {
                 XCTAssertEqual(($0 as? TransactionDataError)?.reason, .insufficientAuthenticationFactors)
             }
         }
     }
 
     func testFactorOutsideTheVocabularyIsRefused() {
-        let b = binding(factors: [AuthenticationFactor(.knowledge, "pwd"), AuthenticationFactor(.possession, "hwk")])
-        XCTAssertThrowsError(try b.kbJwtClaims()) {
+        XCTAssertThrowsError(try binding().kbJwtClaims(factors: [AuthenticationFactor(.knowledge, "pwd"), AuthenticationFactor(.possession, "hwk")])) {
             XCTAssertEqual(($0 as? TransactionDataError)?.reason, .insufficientAuthenticationFactors)
         }
     }
 
     func testBindingWithUnsupportedAlgorithmOrNoEntriesIsRefused() {
         let f = [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "other")]
-        XCTAssertThrowsError(try binding(factors: f, alg: "sha-1").kbJwtClaims()) {
+        XCTAssertThrowsError(try binding(alg: "sha-1").kbJwtClaims(factors: f)) {
             XCTAssertEqual(($0 as? TransactionDataError)?.reason, .unsupportedHashAlgorithm)
         }
-        XCTAssertThrowsError(try binding(factors: f, entries: []).kbJwtClaims()) {
+        XCTAssertThrowsError(try binding(entries: []).kbJwtClaims(factors: f)) {
             XCTAssertEqual(($0 as? TransactionDataError)?.reason, .invalidEntry)
         }
     }

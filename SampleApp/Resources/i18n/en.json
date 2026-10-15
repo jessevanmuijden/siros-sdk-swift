@@ -381,8 +381,7 @@
     "unsignedWarningBody": "This request is not signed, so its origin could not be verified. Only continue if you trust the party that asked you.",
     "unsignedAcknowledge": "I understand and want to continue",
     "confirmAll": "Confirm all",
-    "attributesTitle": "Also shared with this request",
-    "biometricReason": "Confirm the transaction"
+    "attributesTitle": "Also shared with this request"
   },
   "transactionLog": {
     "title": "Transaction Log",

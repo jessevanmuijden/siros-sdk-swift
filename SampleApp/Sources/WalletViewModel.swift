@@ -1232,7 +1232,6 @@ final class WalletViewModel: ObservableObject {
         )
         wallet?.credentialConsumptionPolicy = credentialConsumptionPolicy
         wallet?.transactionConsentHandler = transactionConsentBridge
-        wallet?.authenticationFactorsProvider = SampleAuthenticationFactors.provider()
         wallet?.setEventListener(self)
         observeState()
     }

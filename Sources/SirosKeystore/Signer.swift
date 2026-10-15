@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+import SirosCredentials
 
 /// A minimal signing interface for raw key operations.
 ///
@@ -50,6 +51,71 @@ public protocol Signer: AnyObject, Sendable {
     /// methods, and AMR values. The `amr` field reflects the authentication
     /// methods used in the most recent `sign()` operation.
     func securityProperties(keyId: String) async throws -> SignerSecurityProperties
+
+    /// Whether the key's plugin can reach two TS12 authentication categories
+    /// for a sign, without prompting anyone. Asked BEFORE the user is shown a
+    /// transaction. The default (a signer that does not report TS12 factors)
+    /// answers "cannot".
+    func authenticationCapability(keyId: String) async throws -> SignerFactorCapability
+
+    /// Sign the KB-JWT of an EC TS12 payment-SCA presentation and report the
+    /// authentication factors applied BY THIS SIGN.
+    ///
+    /// The factors are part of the signed payload (the `amr` claim), so the
+    /// signer first establishes them, hands them to `payload` to build the
+    /// bytes to sign, signs with a fresh user authentication, and refuses
+    /// unless the sign itself reports exactly those factors. Nothing is taken
+    /// from an earlier operation. The default refuses.
+    ///
+    /// - Parameter payload: builds the data to sign from the factors that will
+    ///   be applied; called at most once per sign.
+    func signForSca(keyId: String, payload: @escaping ([AuthenticationFactor]) throws -> Data) async throws -> SignerScaOutcome
+}
+
+public extension Signer {
+    func authenticationCapability(keyId: String) async throws -> SignerFactorCapability {
+        .cannot("this signer does not report TS12 authentication factors")
+    }
+
+    func signForSca(keyId: String, payload: @escaping ([AuthenticationFactor]) throws -> Data) async throws -> SignerScaOutcome {
+        throw TransactionDataError(.insufficientAuthenticationFactors, detail: "this signer cannot report the authentication factors of a sign")
+    }
+}
+
+/// Side-effect-free answer to "can this key reach two TS12 categories?".
+public struct SignerFactorCapability: Sendable, Equatable {
+    /// Two categories are reachable with the plugin's own means (it prompts for a PIN, say).
+    public let canReachTwoCategories: Bool
+    /// Only a host-verified factor could supply the second category. The SDK
+    /// does not use one for an SCA sign (a fresh authentication cannot be
+    /// combined with it), so this counts as "cannot".
+    public let requiresHostVerifiedFactor: Bool
+    public let reason: String?
+
+    public init(canReachTwoCategories: Bool, requiresHostVerifiedFactor: Bool = false, reason: String? = nil) {
+        self.canReachTwoCategories = canReachTwoCategories
+        self.requiresHostVerifiedFactor = requiresHostVerifiedFactor
+        self.reason = reason
+    }
+
+    public static func cannot(_ reason: String) -> SignerFactorCapability {
+        SignerFactorCapability(canReachTwoCategories: false, reason: reason)
+    }
+}
+
+/// A signature and what was signed and applied to produce it.
+public struct SignerScaOutcome: Sendable, Equatable {
+    public let signature: Data
+    /// The exact bytes that were signed (the KB-JWT signing input).
+    public let signedData: Data
+    /// The factors the sign reported, equal to those the payload was built from.
+    public let factors: [AuthenticationFactor]
+
+    public init(signature: Data, signedData: Data, factors: [AuthenticationFactor]) {
+        self.signature = signature
+        self.signedData = signedData
+        self.factors = factors
+    }
 }
 
 /// Result of a key migration operation.

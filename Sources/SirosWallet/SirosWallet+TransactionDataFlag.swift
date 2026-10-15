@@ -28,14 +28,6 @@ extension SirosWallet {
     /// Whether a consent handler is registered.
     var transactionConsentHandlerRegistered: Bool { transactionConsentHandler != nil }
 
-    /// Supplies the authentication factors applied for a presentation (TS12
-    /// `amr`). The default is conservative and cannot satisfy SCA on its own;
-    /// see ``InterimAuthenticationFactorsProvider``.
-    public var authenticationFactorsProvider: any AuthenticationFactorsProvider {
-        get { lock.lock(); defer { lock.unlock() }; return authenticationFactorsProviderStorage }
-        set { lock.lock(); authenticationFactorsProviderStorage = newValue; lock.unlock() }
-    }
-
     /// Preferred language for transaction labels (BCP 47). Safe to change at any time.
     public var transactionDataLocale: String {
         get { lock.lock(); defer { lock.unlock() }; return transactionDataLocaleStorage }

@@ -3,7 +3,7 @@
 import XCTest
 import SirosAuth
 import SirosCredentials
-import SirosKeystore
+@testable import SirosKeystore
 import SirosTransport
 @testable import SirosWallet
 
@@ -17,9 +17,24 @@ private final class NoAuth: AuthProvider, @unchecked Sendable {
     func getPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput { throw E() }
 }
 
-/// A `Signer` that signs nothing real: the tests inspect the KB-JWT claims.
+/// A `Signer` that signs nothing real: the tests inspect the KB-JWT claims. Its SCA sign runs the
+/// production `ScaSignFlow` against a scripted plugin (R2PS, a 6-digit PIN typed, factors reported).
 private final class ZeroSigner: Signer, @unchecked Sendable {
     private let key = P256.Signing.PrivateKey()
+    var capability = SignerFactorCapability(canReachTwoCategories: true)
+    /// Thrown by the SCA sign before anything is signed (the user backing out of the PIN prompt, say).
+    var scaError: Error?
+    var applied = [AuthenticationFactor(.possession, "key_in_remote_wscd"), AuthenticationFactor(.knowledge, "pin_6_or_more_digits")]
+    func authenticationCapability(keyId: String) async throws -> SignerFactorCapability { capability }
+    func signForSca(keyId: String, payload: @escaping ([AuthenticationFactor]) throws -> Data) async throws -> SignerScaOutcome {
+        try ScaSignFlow.run(
+            pluginId: "r2ps", capability: capability, promptPin: { if let e = self.scaError { throw e }; return Data("123456".utf8) }, payload: payload,
+            sign: { [applied] _, _ in
+                ScaSignReport(signature: Data(repeating: 2, count: 64), factors: applied,
+                              satisfiesTwoCategories: Set(applied.map(\.category)).count >= 2, shortfall: nil)
+            }
+        )
+    }
     func generateKey(algorithm: String) async throws -> String { "k1" }
     func sign(keyId: String, data: Data) async throws -> Data { Data(repeating: 1, count: 64) }
     func listKeys() async throws -> [SignerKeyInfo] { [SignerKeyInfo(keyId: "k1", algorithm: "ES256")] }
@@ -53,6 +68,8 @@ private final class Events: @unchecked Sendable {
 /// sees a locked keystore and skips container persistence.
 private final class SigningKeystore: KeystoreManager, @unchecked Sendable {
     let adapter: WscdKeystoreAdapter
+    let signer = ZeroSigner()
+    private(set) var capabilityQueries: [String] = []
     private(set) var plainCalls = 0
     private(set) var scaCalls = 0
     var events: Events?
@@ -65,7 +82,7 @@ private final class SigningKeystore: KeystoreManager, @unchecked Sendable {
     struct SigningFailed: Error {}
 
     init() async throws {
-        adapter = WscdKeystoreAdapter(signer: ZeroSigner())
+        adapter = WscdKeystoreAdapter(signer: signer)
         try await adapter.unlock(prfOutput: Data(), encryptedContainer: Data(), hkdfSalt: Data(), hkdfInfo: Data())
     }
 
@@ -97,6 +114,10 @@ private final class SigningKeystore: KeystoreManager, @unchecked Sendable {
                                       encryptionPublicJwkThumbprint: String?, kid: String?) async throws -> Data { throw NotImplemented() }
     var duringExport: (@Sendable () -> Void)?
     func exportEncryptedContainer() async throws -> Data { duringExport?(); return Data() }
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability {
+        capabilityQueries.append(keyId)
+        return await adapter.scaAuthenticationCapability(keyId: keyId)
+    }
     func listKeys() -> [KeyInfo] { keys }
     func saveCredential(id: Int64, json: String) async throws {}
     func getCredential(id: Int64) async throws -> String? { nil }
@@ -138,11 +159,6 @@ private final class ErrorListener: WalletEventListener, @unchecked Sendable {
     func onCredentialSelectionRequired(request: PresentationRequest) async -> [Int64] { [] }
     func onFlowError(flowId: String, errorMessage: String, redirectUri: String?) { lock.lock(); _errors.append(errorMessage); lock.unlock() }
     func onTransactionLogFailure() { lock.lock(); _logFailures += 1; lock.unlock() }
-}
-
-private struct Factors: AuthenticationFactorsProvider {
-    var factors = [AuthenticationFactor(.knowledge, "pin_6_or_more_digits"), AuthenticationFactor(.possession, "key_in_remote_wscd")]
-    func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] { factors }
 }
 
 /// A request in, a KB-JWT out, checked against the verifier contract, once
@@ -199,7 +215,6 @@ final class TransactionDataEndToEndTests: XCTestCase {
         keystore.events = events
         wallet.setEventListener(listener)
         if handler { wallet.transactionConsentHandler = consent }
-        wallet.authenticationFactorsProvider = Factors()
         wallet.transactionDataLocale = "en-GB"
         wallet.snapshotTransactionDataEnablement()
         wallet.snapshotWmpSessionEnablement()
@@ -361,10 +376,10 @@ final class TransactionDataEndToEndTests: XCTestCase {
 
     func testEngineRefusesInsufficientFactors() async throws {
         let f = try await fixture()
-        f.wallet.authenticationFactorsProvider = InterimAuthenticationFactorsProvider()
+        f.keystore.signer.capability = .cannot("the plugin has no second factor")
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
-        XCTAssertNil(sender.sent.first?.vpToken, "the default provider cannot establish two factors")
+        XCTAssertNil(sender.sent.first?.vpToken, "the key cannot reach two categories")
         XCTAssertEqual(f.keystore.scaCalls, 0)
         XCTAssertTrue(f.consent.requests.isEmpty, "refused before the user was shown anything")
     }
@@ -453,17 +468,42 @@ final class TransactionDataEndToEndTests: XCTestCase {
         XCTAssertEqual(rec.all, [labelsUrl])
     }
 
-    func testAFactorsProviderThatThrowsIsARefusalAndIsLogged() async throws {
-        struct Boom: Error {}
-        struct Throwing: AuthenticationFactorsProvider {
-            func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] { throw Boom() }
-        }
+    /// A sign that applied something other than what the claim says is a refusal, never a token.
+    func testASignThatAppliedDifferentFactorsIsARefusalAndIsLogged() async throws {
         let f = try await fixture()
-        f.wallet.authenticationFactorsProvider = Throwing()
-        do { _ = try await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams()); XCTFail() }
+        f.keystore.signer.applied = [AuthenticationFactor(.possession, "key_in_remote_wscd"), AuthenticationFactor(.knowledge, "pin_less_than_6_digits")]
+        do { _ = try await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams()); XCTFail("must not produce a token") }
         catch SirosError.transactionData(let e) { XCTAssertEqual(e.reason, .insufficientAuthenticationFactors) }
         let log = await f.wallet.transactionLog()
+        XCTAssertEqual(log.first?.outcome, .refused)
         XCTAssertEqual(log.first?.reason, "insufficientAuthenticationFactors")
+    }
+
+    /// The user backing out of the PIN prompt declines the transaction: the engine is answered at once and no error is shown.
+    func testEngineAnswersAtOnceWhenTheUserCancelsThePin() async throws {
+        let f = try await fixture()
+        f.keystore.signer.scaError = TransactionDataError(.declined, detail: "the user cancelled the authentication")
+        let sender = Sender()
+        await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
+        XCTAssertEqual(sender.sent.count, 1, "one immediate response")
+        XCTAssertNil(sender.sent.first?.vpToken)
+        XCTAssertTrue(f.listener.errors.isEmpty, "a decline is not presented as an error")
+        let log = await f.wallet.transactionLog()
+        XCTAssertEqual(log.first?.outcome, .declined, "cancelling the PIN prompt is logged as a decline")
+        XCTAssertNil(log.first?.reason)
+    }
+
+    /// The engine is answered at once when the sign itself refuses, not left to wait out its timeout.
+    func testEngineAnswersAtOnceWhenTheSignAppliedDifferentFactors() async throws {
+        let f = try await fixture()
+        f.keystore.signer.applied = [AuthenticationFactor(.possession, "key_in_remote_wscd"), AuthenticationFactor(.knowledge, "pin_less_than_6_digits")]
+        let sender = Sender()
+        await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
+        XCTAssertEqual(sender.sent.count, 1, "one immediate response")
+        XCTAssertNil(sender.sent.first?.vpToken)
+        let log = await f.wallet.transactionLog()
+        XCTAssertEqual(log.first?.outcome, .refused)
+        XCTAssertEqual(log.first?.reason, "insufficientAuthenticationFactors", "the real reason, not signingFailed")
     }
 
     func testTheDefaultLogIsNotCarriedToTheNextAccount() async throws {
@@ -509,20 +549,11 @@ final class TransactionDataEndToEndTests: XCTestCase {
         XCTAssertEqual(rec.all.count, 1, "no non-https reference reached the getter")
     }
 
-    func testThePluginIdOfTheSigningKeyReachesTheFactorsProvider() async throws {
-        final class Capture: AuthenticationFactorsProvider, @unchecked Sendable {
-            private let lock = NSLock(); private var seen: [AuthenticationFactorContext] = []
-            var contexts: [AuthenticationFactorContext] { lock.lock(); defer { lock.unlock() }; return seen }
-            func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] {
-                lock.lock(); seen.append(context); lock.unlock()
-                return [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "key_in_remote_wscd")]
-            }
-        }
+    /// The pre-consent probe asks the WSCD about the key that will sign, once per bound credential.
+    func testTheCapabilityOfTheSigningKeyIsAskedBeforeConsent() async throws {
         let f = try await fixture()
-        let capture = Capture()
-        f.wallet.authenticationFactorsProvider = capture
         _ = try await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams())
-        XCTAssertEqual(capture.contexts.first?.pluginId, "r2ps")
+        XCTAssertEqual(f.keystore.capabilityQueries, ["k1"])
     }
 
     // MARK: consent comes first, and what is signed is what was shown
@@ -541,10 +572,10 @@ final class TransactionDataEndToEndTests: XCTestCase {
         XCTAssertEqual(dc.events.all, ["consent", "sign"], "DC API")
     }
 
-    func testNothingIsSignedAndTheUserIsNotAskedWithTheDefaultFactorsProvider() async throws {
+    func testNothingIsSignedAndTheUserIsNotAskedWhenTheKeyCannotReachTwoCategories() async throws {
         for transport in ["engine", "wmp", "dcapi"] {
             let f = try await fixture()
-            f.wallet.authenticationFactorsProvider = InterimAuthenticationFactorsProvider()
+            f.keystore.signer.capability = .cannot("no second factor")
             switch transport {
             case "engine": await f.wallet.handleSignRequest(engine: Sender(), msg: try engineMessage())
             case "wmp": _ = try? await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams())

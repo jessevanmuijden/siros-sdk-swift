@@ -55,10 +55,11 @@ final class TransactionDataGoldenVectorTests: XCTestCase {
         let binding = TransactionDataBinding(
             rawEntries: all.map(\.raw),
             hashAlgorithm: "sha-384",
-            responseMode: "dc_api",
-            factors: [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "key_in_local_native_wscd")]
+            responseMode: "dc_api"
         )
-        let claims = try binding.kbJwtClaims(jti: "j")
+        let claims = try binding.kbJwtClaims(
+            factors: [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "key_in_local_native_wscd")], jti: "j"
+        )
         XCTAssertEqual(claims["transaction_data_hashes"] as? [String], all.map { $0.hashes["sha-384"]! })
     }
 

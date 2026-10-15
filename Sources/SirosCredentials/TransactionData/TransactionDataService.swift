@@ -11,8 +11,8 @@ public struct TransactionDataContext: Sendable {
     public var locale: String
     /// Display name per DCQL query id.
     public var credentialNames: [String: String]
-    /// Key facts per DCQL query id, for the authentication factors.
-    public var factorContexts: [String: AuthenticationFactorContext]
+    /// The signing key per DCQL query id, for the pre-consent authentication probe.
+    public var keyIds: [String: String]
     /// The claims that will be disclosed per DCQL query id, shown with the transaction.
     public var disclosedClaims: [String: [String]]
     /// Whether every credential of the request must be bound to a transaction
@@ -23,14 +23,14 @@ public struct TransactionDataContext: Sendable {
     public var additionalAttributes: [TransactionConsentAttributes]
 
     public init(verifier: String, requestSigned: Bool? = nil, locale: String,
-                credentialNames: [String: String] = [:], factorContexts: [String: AuthenticationFactorContext] = [:],
+                credentialNames: [String: String] = [:], keyIds: [String: String] = [:],
                 disclosedClaims: [String: [String]] = [:], requireEveryCredentialBound: Bool = false) {
         self.additionalAttributes = []
         self.verifier = verifier
         self.requestSigned = requestSigned
         self.locale = locale
         self.credentialNames = credentialNames
-        self.factorContexts = factorContexts
+        self.keyIds = keyIds
         self.disclosedClaims = disclosedClaims
         self.requireEveryCredentialBound = requireEveryCredentialBound
     }
@@ -57,6 +57,15 @@ public final class TransactionDataPlan: @unchecked Sendable {
     ///
     /// - Parameter refusal: the reason to record when `signed` is false;
     ///   `signingFailed` when not given.
+    /// Records signing that ended in `error`: a user's cancellation of the authentication is a
+    /// decline, any other TS12 refusal keeps its own reason, anything else is `signingFailed`.
+    public func complete(failedWith error: Error) async {
+        var refusal: TransactionDataError.Reason?
+        if let e = error as? TransactionDataError { refusal = e.reason }
+        else if case SirosError.transactionData(let e) = error { refusal = e.reason }
+        await complete(signed: false, refusal: refusal)
+    }
+
     public func complete(signed: Bool, refusal: TransactionDataError.Reason? = nil) async {
         lock.lock()
         let first = !completed
@@ -68,13 +77,13 @@ public final class TransactionDataPlan: @unchecked Sendable {
 
 /// Runs the EC TS12 sequence for one request (contract section 4): validate,
 /// check that two factor categories are even possible, build the consent
-/// model, ask the user, establish the factors, build the per-credential
+/// model, ask the user, build the per-credential
 /// bindings and log the outcome. Nothing is signed by this type; a thrown
 /// error means NOTHING may be signed.
 public final class TransactionDataService: @unchecked Sendable {
     private let source: any TransactionMetadataSource
     private let consentHandler: (any TransactionConsentHandler)?
-    private let factorsProvider: any AuthenticationFactorsProvider
+    private let authentication: any ScaAuthenticationCapability
     private let log: any TransactionLogStore
     private let consentTimeout: TimeInterval
     private let fetchTimeout: TimeInterval
@@ -88,7 +97,7 @@ public final class TransactionDataService: @unchecked Sendable {
     public init(
         source: any TransactionMetadataSource,
         consentHandler: (any TransactionConsentHandler)?,
-        factorsProvider: any AuthenticationFactorsProvider = InterimAuthenticationFactorsProvider(),
+        authentication: any ScaAuthenticationCapability = NoScaAuthentication(),
         log: any TransactionLogStore,
         consentTimeout: TimeInterval = TransactionDataService.defaultConsentTimeout,
         fetchTimeout: TimeInterval = 10,
@@ -96,7 +105,7 @@ public final class TransactionDataService: @unchecked Sendable {
     ) {
         self.source = source
         self.consentHandler = consentHandler
-        self.factorsProvider = factorsProvider
+        self.authentication = authentication
         self.log = log
         self.consentTimeout = consentTimeout
         self.fetchTimeout = fetchTimeout
@@ -120,8 +129,7 @@ public final class TransactionDataService: @unchecked Sendable {
 
             // Refuse BEFORE showing anything when two factor categories cannot be established.
             for credential in request.credentials where boundQueryIds.contains(credential.queryId) {
-                let factorContext = context.factorContexts[credential.queryId] ?? AuthenticationFactorContext()
-                guard await factorsProvider.canEstablishTwoCategories(for: factorContext) else {
+                guard await authentication.canEstablishTwoCategories(keyId: context.keyIds[credential.queryId]) else {
                     throw TransactionDataError(.insufficientAuthenticationFactors, detail: "two authentication factor categories cannot be established")
                 }
             }
@@ -155,21 +163,13 @@ public final class TransactionDataService: @unchecked Sendable {
             try Task.checkCancellation()
             guard answer else { throw TransactionDataError(.declined) }
 
-            // 9. Bindings with the factors applied for this operation.
+            // 9. Bindings. They carry NO authentication factors: those are reported by the signing
+            // operation itself and written into the `amr` by the keystore (see ScaAuthenticationCapability).
             var bindings: [String: TransactionDataBinding] = [:]
             // Only credentials the transaction is bound to: an unrelated one in a
-            // combined presentation must not trigger another authentication or refuse the binding.
+            // combined presentation must not refuse the binding.
             for credential in request.credentials where boundQueryIds.contains(credential.queryId) {
-                let factors: [AuthenticationFactor]
-                do {
-                    factors = try await factorsProvider.factors(for: context.factorContexts[credential.queryId] ?? AuthenticationFactorContext())
-                } catch {
-                    // A host-supplied provider may throw; that is a refusal like any other.
-                    throw TransactionDataError(.insufficientAuthenticationFactors, detail: "the factors provider failed")
-                }
-                if let binding = try validated.binding(forQueryId: credential.queryId, factors: factors) {
-                    // Refuse now, before anything is signed.
-                    _ = try binding.kbJwtClaims()
+                if let binding = try validated.binding(forQueryId: credential.queryId) {
                     bindings[credential.queryId] = binding
                 }
             }
@@ -179,7 +179,8 @@ public final class TransactionDataService: @unchecked Sendable {
             return TransactionDataPlan(bindings: bindings) { [log, onLogFailure] signed, reason in
                 let records = TransactionLogEntry.records(
                     rawEntries: raws, verifier: verifier, credentialLabel: label,
-                    outcome: signed ? .consented : .refused, reason: signed ? nil : (reason ?? "signingFailed")
+                    outcome: signed ? .consented : (reason == TransactionDataError.Reason.declined.rawValue ? .declined : .refused),
+                    reason: signed || reason == TransactionDataError.Reason.declined.rawValue ? nil : (reason ?? "signingFailed")
                 )
                 do { try await log.append(records) } catch { onLogFailure?(error) }
             }

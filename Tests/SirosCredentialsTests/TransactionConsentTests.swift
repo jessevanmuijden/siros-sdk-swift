@@ -37,15 +37,22 @@ private final class Handler: TransactionConsentHandler, @unchecked Sendable {
     }
 }
 
-private struct FixedFactors: AuthenticationFactorsProvider {
-    var factors: [AuthenticationFactor]
-    func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] { factors }
+/// A capability probe with a fixed answer that records which keys it was asked about.
+private final class FixedCapability: ScaAuthenticationCapability, @unchecked Sendable {
+    let can: Bool
+    private let lock = NSLock()
+    private var asked: [String?] = []
+    var queries: [String?] { lock.lock(); defer { lock.unlock() }; return asked }
+    init(can: Bool) { self.can = can }
+    func canEstablishTwoCategories(keyId: String?) async -> Bool {
+        lock.lock(); asked.append(keyId); lock.unlock()
+        return can
+    }
 }
 
 /// Display model, consent handling and logging (TS12 v1.0.1 3.1, 3.3, 5.3).
 final class TransactionConsentTests: XCTestCase {
     private let vct = "https://pay.example/card"
-    private let twoFactors = [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "key_in_remote_wscd")]
 
     private func raw(_ json: String) -> String {
         Data(json.utf8).base64EncodedString()
@@ -113,11 +120,11 @@ final class TransactionConsentTests: XCTestCase {
     }
 
     private func service(
-        _ source: Source, handler: Handler?, factors: [AuthenticationFactor]? = nil, log: InMemoryTransactionLogStore = InMemoryTransactionLogStore(),
+        _ source: Source, handler: Handler?, canEstablish: Bool = true, log: InMemoryTransactionLogStore = InMemoryTransactionLogStore(),
         timeout: TimeInterval = 5
     ) -> TransactionDataService {
         TransactionDataService(
-            source: source, consentHandler: handler, factorsProvider: FixedFactors(factors: factors ?? twoFactors),
+            source: source, consentHandler: handler, authentication: FixedCapability(can: canEstablish),
             log: log, consentTimeout: timeout, fetchTimeout: 2
         )
     }
@@ -239,18 +246,6 @@ final class TransactionConsentTests: XCTestCase {
         let h2 = Handler(.yes)
         _ = try await service(source(), handler: h2).process(request([trailing]), context: context())
         XCTAssertEqual(h2.seen.first?.entries.first?.fields.first?.value, "10.50")
-    }
-
-    func testAThrowingFactorsProviderIsARefusalAndIsLogged() async throws {
-        struct Boom: Error {}
-        struct Throwing: AuthenticationFactorsProvider {
-            func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] { throw Boom() }
-        }
-        let log = InMemoryTransactionLogStore()
-        let svc = TransactionDataService(source: source(), consentHandler: Handler(.yes), factorsProvider: Throwing(), log: log, consentTimeout: 5, fetchTimeout: 2)
-        await expectRefusal(.insufficientAuthenticationFactors, svc)
-        let entry = try await firstLog(log)
-        XCTAssertEqual(entry.reason, "insufficientAuthenticationFactors")
     }
 
     // MARK: text safety
@@ -517,7 +512,7 @@ final class TransactionConsentTests: XCTestCase {
         s.resources["https://pay.example/l.json"] = Data(labels.utf8)
         s.delayNanos = 190_000_000      // each below the 0.2 s per-fetch timeout, together above 0.3 s
         let svc = TransactionDataService(
-            source: s, consentHandler: Handler(.yes), factorsProvider: FixedFactors(factors: twoFactors),
+            source: s, consentHandler: Handler(.yes), authentication: FixedCapability(can: true),
             log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 0.2
         )
         await expectRefusal(.metadataUnavailable, svc, request())
@@ -607,7 +602,6 @@ final class TransactionConsentTests: XCTestCase {
         let plan = try await service(source(), handler: Handler(.yes), log: log).process(r, context: context())
         let b = try XCTUnwrap(plan.bindings["pay"])
         XCTAssertEqual(b.rawEntries, [r.entries[0].raw])
-        XCTAssertEqual(b.factors, twoFactors)
         let before = await log.entries()
         XCTAssertTrue(before.isEmpty, "consent is recorded only once signing succeeded")
         await plan.complete(signed: true)
@@ -630,44 +624,20 @@ final class TransactionConsentTests: XCTestCase {
     func testInsufficientFactorsRefuseBeforeConsentAndAreLogged() async throws {
         let log = InMemoryTransactionLogStore()
         let h = Handler(.yes)
-        let svc = service(source(), handler: h, factors: [AuthenticationFactor(.possession, "key_in_remote_wscd")], log: log)
+        let svc = service(source(), handler: h, canEstablish: false, log: log)
         await expectRefusal(.insufficientAuthenticationFactors, svc)
         XCTAssertTrue(h.seen.isEmpty, "the user was never asked to confirm something that cannot succeed")
         let entry = try await firstLog(log)
         XCTAssertEqual(entry.reason, "insufficientAuthenticationFactors")
     }
 
-    func testTheDefaultInterimProviderRefusesBeforeConsent() async {
+    /// Without a capability probe the wallet cannot satisfy SCA: refused before consent.
+    func testTheDefaultCapabilityRefusesBeforeConsent() async {
         let h = Handler(.yes)
-        let svc = TransactionDataService(source: source(), consentHandler: h, factorsProvider: InterimAuthenticationFactorsProvider(),
+        let svc = TransactionDataService(source: source(), consentHandler: h,
                                          log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 2)
         await expectRefusal(.insufficientAuthenticationFactors, svc)
         XCTAssertTrue(h.seen.isEmpty)
-    }
-
-    /// A provider that can only produce factors by running a verification overrides the probe.
-    func testAProviderMayOverrideTheProbe() async throws {
-        struct Lazy: AuthenticationFactorsProvider {
-            func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] {
-                [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "other")]
-            }
-            func canEstablishTwoCategories(for context: AuthenticationFactorContext) async -> Bool { true }
-        }
-        let h = Handler(.yes)
-        let svc = TransactionDataService(source: source(), consentHandler: h, factorsProvider: Lazy(), log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 2)
-        _ = try await svc.process(request(), context: context())
-        XCTAssertEqual(h.seen.count, 1)
-    }
-
-    /// A provider that says yes to the probe but then yields too little is still refused after consent.
-    func testFactorsThatFallShortAfterConsentAreStillRefused() async throws {
-        struct Optimistic: AuthenticationFactorsProvider {
-            func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] { [AuthenticationFactor(.possession, "other")] }
-            func canEstablishTwoCategories(for context: AuthenticationFactorContext) async -> Bool { true }
-        }
-        let log = InMemoryTransactionLogStore()
-        let svc = TransactionDataService(source: source(), consentHandler: Handler(.yes), factorsProvider: Optimistic(), log: log, consentTimeout: 5, fetchTimeout: 2)
-        await expectRefusal(.insufficientAuthenticationFactors, svc)
     }
 
     func testSigningFailureIsLoggedAsRefusedNotConsented() async throws {
@@ -710,7 +680,7 @@ final class TransactionConsentTests: XCTestCase {
         final class Cancelling: TransactionConsentHandler, @unchecked Sendable {
             func confirm(_ request: TransactionConsentRequest) async throws -> Bool { throw CancellationError() }
         }
-        let svc = TransactionDataService(source: source(), consentHandler: Cancelling(), factorsProvider: FixedFactors(factors: twoFactors),
+        let svc = TransactionDataService(source: source(), consentHandler: Cancelling(), authentication: FixedCapability(can: true),
                                          log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 2)
         await expectRefusal(.declined, svc)
     }
@@ -742,7 +712,7 @@ final class TransactionConsentTests: XCTestCase {
         }
         final class Counter: @unchecked Sendable { var n = 0 }
         let counter = Counter()
-        let svc = TransactionDataService(source: source(), consentHandler: Handler(.yes), factorsProvider: FixedFactors(factors: twoFactors),
+        let svc = TransactionDataService(source: source(), consentHandler: Handler(.yes), authentication: FixedCapability(can: true),
                                          log: Failing(), consentTimeout: 5, fetchTimeout: 2, onLogFailure: { _ in counter.n += 1 })
         let plan = try await svc.process(request(), context: context())
         await plan.complete(signed: true)
@@ -801,81 +771,30 @@ final class TransactionConsentTests: XCTestCase {
         XCTAssertEqual(ids, ["4", "3", "2"])
     }
 
-    // MARK: - Factors provider
+    // MARK: - Capability probe
 
-    func testInterimProviderDerivesOnlyJustifiablePossession() async throws {
-        let p = InterimAuthenticationFactorsProvider()
-        let remote = try await p.factors(for: AuthenticationFactorContext(keyStorage: ["remote_hsm"]))
-        XCTAssertEqual(remote, [AuthenticationFactor(.possession, "key_in_remote_wscd")])
-        let r2ps = try await p.factors(for: AuthenticationFactorContext(keyStorage: ["hardware"], pluginId: "r2ps"))
-        XCTAssertEqual(r2ps, [AuthenticationFactor(.possession, "key_in_remote_wscd")])
-        let fido = try await p.factors(for: AuthenticationFactorContext(keyStorage: ["hardware"], pluginId: "fido2"))
-        XCTAssertEqual(fido, [AuthenticationFactor(.possession, "key_in_local_external_wscd")])
-        for context in [AuthenticationFactorContext(keyStorage: ["software"], pluginId: "softkey"),
-                        AuthenticationFactorContext(keyStorage: ["hardware"]),
-                        AuthenticationFactorContext(keyStorage: ["trusted_execution"]), AuthenticationFactorContext()] {
-            let none = try await p.factors(for: context)
-            XCTAssertTrue(none.isEmpty, "\(context)")
-        }
-    }
-
-    func testInterimProviderAloneCannotSatisfySca() async throws {
-        let p = InterimAuthenticationFactorsProvider()
-        let f = try await p.factors(for: AuthenticationFactorContext(keyStorage: ["remote_hsm"]))
-        XCTAssertLessThan(Set(f.map(\.category)).count, 2)
-    }
-
-    func testHostSuppliedVerificationIsAddedWithoutDuplicates() async throws {
-        let p = InterimAuthenticationFactorsProvider(verifiedThisOperation: { _ in
-            [AuthenticationFactor(.possession, "key_in_remote_wscd"), AuthenticationFactor(.inherence, "face_device")]
-        })
-        let f = try await p.factors(for: AuthenticationFactorContext(keyStorage: ["remote_hsm"]))
-        XCTAssertEqual(f, [AuthenticationFactor(.possession, "key_in_remote_wscd"), AuthenticationFactor(.inherence, "face_device")])
-    }
-
-    /// The pre-consent probe never runs the host's verification (which may prompt the user).
-    func testTheProbeDoesNotRunTheVerificationClosure() async throws {
-        final class Counter: @unchecked Sendable { var n = 0 }
-        let counter = Counter()
-        let p = InterimAuthenticationFactorsProvider(
-            verifiedThisOperation: { _ in counter.n += 1; return [AuthenticationFactor(.inherence, "face_device")] },
-            canVerifyAnotherCategory: { _ in true }
-        )
-        let context = AuthenticationFactorContext(keyStorage: ["remote_hsm"])
-        let can = await p.canEstablishTwoCategories(for: context)
-        XCTAssertTrue(can)
-        XCTAssertEqual(counter.n, 0, "the probe has no side effects")
-        let factors = try await p.factors(for: context)
-        XCTAssertEqual(counter.n, 1)
-        XCTAssertEqual(Set(factors.map(\.category)), [.possession, .inherence])
-        // Without a possession factor the probe is false whatever the host could verify.
-        let none = await p.canEstablishTwoCategories(for: AuthenticationFactorContext(keyStorage: ["software"], pluginId: "softkey"))
-        XCTAssertFalse(none)
-        let defaultProbe = await InterimAuthenticationFactorsProvider().canEstablishTwoCategories(for: context)
-        XCTAssertFalse(defaultProbe)
-    }
-
-    /// An unrelated credential in a combined presentation is never asked for factors.
-    func testFactorsAreOnlyEstablishedForBoundCredentials() async throws {
-        final class Spy: AuthenticationFactorsProvider, @unchecked Sendable {
-            private let lock = NSLock(); private var asked: [String?] = []
-            var queries: [String?] { lock.lock(); defer { lock.unlock() }; return asked }
-            func factors(for context: AuthenticationFactorContext) async throws -> [AuthenticationFactor] {
-                lock.lock(); asked.append(context.keyId); lock.unlock()
-                if context.keyId == "unrelated" { throw NSError(domain: "x", code: 1) }
-                return [AuthenticationFactor(.knowledge, "other"), AuthenticationFactor(.possession, "other")]
-            }
-        }
+    /// Only the credentials the transaction is bound to are probed, each by its own key.
+    func testOnlyBoundCredentialsAreProbed() async throws {
         var req = request()
         req.credentials.append(TransactionDataCredential(queryId: "age", format: "mso_mdoc", vct: nil))
-        let spy = Spy()
-        let svc = TransactionDataService(source: source(), consentHandler: Handler(.yes), factorsProvider: spy, log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 2)
-        let ctx = TransactionDataContext(verifier: "v", locale: "en", factorContexts: [
-            "pay": AuthenticationFactorContext(keyId: "bound"), "age": AuthenticationFactorContext(keyId: "unrelated"),
-        ])
+        let probe = FixedCapability(can: true)
+        let svc = TransactionDataService(source: source(), consentHandler: Handler(.yes), authentication: probe,
+                                         log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 2)
+        let ctx = TransactionDataContext(verifier: "v", locale: "en", keyIds: ["pay": "bound", "age": "unrelated"])
         let plan = try await svc.process(req, context: ctx)
         XCTAssertEqual(Set(plan.bindings.keys), ["pay"])
-        XCTAssertFalse(spy.queries.contains("unrelated"), "the unbound credential was never asked")
+        XCTAssertEqual(probe.queries, ["bound"], "the unbound credential's key was never probed")
+    }
+
+    /// A credential whose key is unknown is probed with no key and refused.
+    func testAnUnknownKeyIsRefusedBeforeConsent() async {
+        let h = Handler(.yes)
+        let probe = FixedCapability(can: false)
+        let svc = TransactionDataService(source: source(), consentHandler: h, authentication: probe,
+                                         log: InMemoryTransactionLogStore(), consentTimeout: 5, fetchTimeout: 2)
+        await expectRefusal(.insufficientAuthenticationFactors, svc)
+        XCTAssertEqual(probe.queries.count, 1)
+        XCTAssertTrue(h.seen.isEmpty)
     }
 
     func testLoggedFieldsAreCappedByScalarsNotCharacters() {

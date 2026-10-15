@@ -381,8 +381,7 @@
     "unsignedWarningTitle": "Osignerad förfrågan",
     "unsignedWarningBody": "Den här förfrågan är inte signerad, så dess ursprung kunde inte verifieras. Fortsätt bara om du litar på den som ber dig.",
     "unsignedAcknowledge": "Jag förstår och vill fortsätta",
-    "attributesTitle": "Delas också med denna förfrågan",
-    "biometricReason": "Bekräfta transaktionen"
+    "attributesTitle": "Delas också med denna förfrågan"
   },
   "transactionLog": {
     "title": "Transaktionslogg",

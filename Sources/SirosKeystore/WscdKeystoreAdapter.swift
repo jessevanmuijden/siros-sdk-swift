@@ -546,15 +546,27 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
             "sd_hash": sdHash,
         ]
 
+        let baseClaims = kbClaimsDict
         if let binding = transactionData {
-            // EC TS12 (section 3.6): hashes over the verifier's raw strings,
-            // a string algorithm, a fresh jti, the request's response_mode and
-            // the two-category amr. Throws instead of producing claims a
-            // verifier would have to reject. This replaces the RFC 8176
-            // `amr` below: TS12 requires the object form.
-            for (name, value) in try binding.kbJwtClaims() { kbClaimsDict[name] = value }
-        } else if let props = try? await signer.securityProperties(keyId: key.keyId),
-                  !props.amr.isEmpty {
+            // EC TS12 (section 3.6): hashes over the verifier's raw strings, a string algorithm,
+            // a fresh jti, the request's response_mode and the two-category amr. The factors are
+            // those the signing operation itself reports (see `Signer.signForSca`): the claim
+            // set is built from them inside the sign and the token is refused unless the sign
+            // applied exactly what it claims. This replaces the RFC 8176 `amr` of a plain
+            // presentation: TS12 requires the object form.
+            let header = kbHeader
+            let outcome = try await signer.signForSca(keyId: key.keyId) { factors in
+                var claims = baseClaims
+                for (name, value) in try binding.kbJwtClaims(factors: factors) { claims[name] = value }
+                return Data("\(header).\(JwtHelpers.jsonBase64Url(claims))".utf8)
+            }
+            guard let signingInput = String(data: outcome.signedData, encoding: .utf8) else {
+                throw KeystoreError.cryptoError("the signed KB-JWT input is not text")
+            }
+            return sdJwtPresentation + "\(signingInput).\(EncryptedContainer.base64UrlEncode(outcome.signature))"
+        }
+        if let props = try? await signer.securityProperties(keyId: key.keyId),
+           !props.amr.isEmpty {
             // Include amr from WSCD security properties (E7)
             kbClaimsDict["amr"] = props.amr
         }
@@ -700,6 +712,28 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// Return the security properties for a key, or nil if unavailable.
     public func securityProperties(keyId: String) async -> SignerSecurityProperties? {
         return try? await signer.securityProperties(keyId: keyId)
+    }
+
+    /// Asked by the wallet before the user is shown a transaction. A failure to
+    /// obtain the answer is "cannot" (fail closed).
+    public func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability {
+        do {
+            // The manager's probe can answer positively for a key it does not hold (it may route an unknown id to
+            // the default plugin), which would fail only after consent: the key must exist, under this exact id,
+            // which is also what the SCA sign requires.
+            guard try await signer.listKeys().contains(where: { $0.keyId == keyId }) else {
+                return .cannot("the signing key is not held by this keystore")
+            }
+            let capability = try await signer.authenticationCapability(keyId: keyId)
+            // A factor only the host could supply is not usable: an SCA sign requires a fresh
+            // authentication, which the manager refuses for the plugins that need one.
+            guard capability.canReachTwoCategories, !capability.requiresHostVerifiedFactor else {
+                return .cannot(capability.reason ?? "the key cannot reach two authentication categories")
+            }
+            return capability
+        } catch {
+            return .cannot("the key's authentication capability could not be determined")
+        }
     }
 
     // MARK: - Credential storage (PRF-protected via credentialsKeystore)

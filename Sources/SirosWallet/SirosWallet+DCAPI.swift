@@ -95,7 +95,7 @@ extension SirosWallet {
             }
             : nil
         do { if scaPlan != nil { try requireSameAccount(accountGeneration) } } catch {
-            if !(error is CancellationError) { await scaPlan?.plan.complete(signed: false) }
+            if !(error is CancellationError) { await scaPlan?.plan.complete(failedWith: error) }
             throw error
         }
 
@@ -124,7 +124,7 @@ extension SirosWallet {
                 encryptionJwk: encryptionJwk
             )
         } catch {
-            if !(error is CancellationError) { await scaPlan?.plan.complete(signed: false) }
+            if !(error is CancellationError) { await scaPlan?.plan.complete(failedWith: error) }
             throw error
         }
         // The user's consent is recorded now that the presentation exists.
@@ -478,7 +478,7 @@ extension SirosWallet {
             return Self.b64UrlEncode(deviceResponse)
         } else {
             if let transactionData {
-                return try await keystore.signVpToken(
+                return try await signTransactionVpToken(
                     credential: cred.raw,
                     disclosedClaims: disclosedClaims,
                     nonce: request.nonce,

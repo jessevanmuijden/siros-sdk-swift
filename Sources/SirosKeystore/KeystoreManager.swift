@@ -265,6 +265,11 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// above. Returns nil if not available.
     func securityProperties(keyId: String) async -> SignerSecurityProperties?
 
+    /// Whether the key can reach two TS12 authentication categories for an SCA
+    /// sign (never prompts). Asked before the user is shown a transaction. The
+    /// default answers "cannot": a keystore must opt in to SCA.
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability
+
     /// Return the attestation certificate chain for a key, if available -
     /// see `Signer.attestationChain`. Returns nil if attestation is not
     /// available; only a WSCD-backed keystore with a hardware-attesting
@@ -394,6 +399,9 @@ public extension KeystoreManager {
         return try await generateProof(audience: audience, nonce: nonce, freshKey: freshKey)
     }
 
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability {
+        .cannot("this keystore does not report TS12 authentication factors")
+    }
     func securityProperties() async -> SignerSecurityProperties? { nil }
     func securityProperties(keyId: String) async -> SignerSecurityProperties? { nil }
     func attestationChain(keyId: String) async throws -> AttestationChain? { nil }

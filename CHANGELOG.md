@@ -55,6 +55,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `providerError` with the code kept, all with the backend's `error` text as
   the message instead of the raw JSON body. A body without a code is unchanged.
 
+### Changed
+- **EC TS12 payment SCA: the `amr` now comes from the WSCD manager's own sign.**
+  `siros-wscd-manager` XCFramework 0.9.1 -> 0.10.0 (vendored bindings
+  regenerated). Before the user is shown a transaction the wallet asks the
+  key's WSCD plugin (`authenticationCapability`, never prompts) whether two
+  authentication categories are reachable and refuses up front otherwise. The
+  SCA sign then asks the user for the PIN, claims in the signed KB-JWT exactly
+  the factors that sign will apply (possession from the plugin, the knowledge
+  class measured from that PIN) and signs through `signWithFactors` with
+  `requireFreshUserAuthentication`; the presentation is discarded unless the
+  sign itself reports exactly those factors. Only R2PS (OPAQUE) and FIDO2 (raw
+  transport) keys can sign an SCA presentation; softkey, R2PS WebAuthn and
+  UV-performing transports are refused (`insufficientAuthenticationFactors`).
+  Non-SCA signing is unchanged. **Breaking (unreleased TS12 API):**
+  `SirosWallet.authenticationFactorsProvider`, `AuthenticationFactorsProvider`
+  and `InterimAuthenticationFactorsProvider` are removed (the SDK no longer
+  derives factors from the key's storage kind or accepts host-asserted ones),
+  `TransactionDataBinding` carries no factors (`kbJwtClaims(factors:)` takes the
+  sign's), and `Signer` gains `authenticationCapability(keyId:)` and
+  `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
+  provider is gone.
+
 ### Deprecated
 - **`FaceTecCaptureDelegate`.** It is written against the FaceTec 9 API
   (`createSessionVC` and the face-scan/ID-scan processors), which FaceTec 10

@@ -64,7 +64,6 @@ public final class SirosWallet: @unchecked Sendable {
     var transactionDataEnabledValue: Bool
     var transactionConsentHandlerStorage: (any TransactionConsentHandler)?
     var transactionLogStoreStorage: (any TransactionLogStore)?
-    var authenticationFactorsProviderStorage: any AuthenticationFactorsProvider = InterimAuthenticationFactorsProvider()
     // Enablement records per flow / WMP session, consent flows in progress, log-store bookkeeping.
     var legacyFlowSnapshotQueue: [(effective: Bool, at: Date)] = []
     var legacyFlowSnapshots: [String: Bool] = [:]
