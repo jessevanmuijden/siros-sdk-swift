@@ -151,7 +151,17 @@ private struct AddPasskeySheet: View {
                     } label: {
                         Text(L10n.string("devices.addPasskeyButton"))
                     }
-                    .disabled(viewModel.addingPasskey)
+                    // `SirosWallet.addPasskey` rejects a blank name before
+                    // making any request (1-256 characters) - the field is
+                    // required, not optional (review finding: the copy used
+                    // to say otherwise), so submitting with it empty or
+                    // over-length must not even be possible rather than
+                    // always dismissing with an error.
+                    .disabled(
+                        viewModel.addingPasskey
+                            || nickname.trimmingCharacters(in: .whitespaces).isEmpty
+                            || nickname.trimmingCharacters(in: .whitespaces).count > 256
+                    )
                 }
             }
             .navigationTitle(L10n.string("devices.addPasskeyTitle"))

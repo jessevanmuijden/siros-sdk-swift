@@ -365,7 +365,7 @@
     "addPasskeyDescription": "Adds another passkey to this account. An existing passkey must approve it, and the new one can open your wallet data on its own.",
     "addPasskeyButton": "Add passkey",
     "addPasskeyMessage": "Approve with a passkey you already have, then create the new one.",
-    "addPasskeyNickname": "Name (optional)",
+    "addPasskeyNickname": "Name",
     "addPasskeyDone": "Passkey added: %1$@",
     "addPasskeyAuthorizationFailed": "The approval from your existing passkey was not accepted. Try again.",
     "addPasskeyConflict": "Your wallet data changed on another device. Try again.",
@@ -375,7 +375,8 @@
     "addPasskeyAuthorizationAborted": "The approval did not complete: %1$@",
     "addPasskeyRegistrationAborted": "The new passkey was not created: %1$@",
     "addPasskeyNoPrf": "This passkey cannot protect your wallet data, so it was not added: %1$@",
-    "addPasskeyRefused": "This authenticator is not allowed. %1$@"
+    "addPasskeyRefused": "This authenticator is not allowed. %1$@",
+    "addPasskeySessionChanged": "The passkey was added, but to a different sign-in than the one now active. Log in to that account to use it."
   },
   "walletBlocked": {
     "suspendedTitle": "This device is suspended",
