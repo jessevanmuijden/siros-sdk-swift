@@ -124,7 +124,10 @@
     "diagnosticMessagesDescription": "Visa den råa backend-stegtoken tillsammans med den vänliga förloppsetiketten under ett flöde.",
     "photoIdOnboardingToggle": "PhotoID-registrering",
     "photoIdOnboardingDescription": "Visa en genväg \"Skaffa ditt PhotoID\" på hemskärmen när denna klient erbjuder identitetsverifierat PhotoID-utfärdande",
-    "interopProfiles": "Interop-profiler"
+    "interopProfiles": "Interop-profiler",
+    "transactionDataToggle": "Betalningsbekräftelse (EC TS12)",
+    "transactionDataDescription": "Tillåt betalnings- och inloggningsbekräftelser som visar transaktionen innan du godkänner den. Gäller förfrågningar som startas efter att du ändrat inställningen; med WMP gäller den nästa anslutning (logga ut och in igen). Kräver en annan nyckel än en mjukvarunyckel och biometrisk verifiering.",
+    "transactionLogButton": "Transaktionslogg"
   },
   "wscd": {
     "title": "WSCA Utvecklare",
@@ -367,5 +370,51 @@
     "enrollAgain": "Registrera igen",
     "deactivatedTitle": "Den här plånboken avaktiverades",
     "deactivatedMessage": "Alla enheter togs bort och plånbokens data raderades på servern. Registrera dig igen för att börja om."
+  },
+  "transactionConsent": {
+    "title": "Bekräfta transaktion",
+    "verifier": "Begärd av: %1$@",
+    "credential": "Använder: %1$@",
+    "confirm": "Bekräfta",
+    "confirmAll": "Bekräfta alla",
+    "cancel": "Avbryt",
+    "unsignedWarningTitle": "Osignerad förfrågan",
+    "unsignedWarningBody": "Den här förfrågan är inte signerad, så dess ursprung kunde inte verifieras. Fortsätt bara om du litar på den som ber dig.",
+    "unsignedAcknowledge": "Jag förstår och vill fortsätta",
+    "attributesTitle": "Delas också med denna förfrågan",
+    "biometricReason": "Bekräfta transaktionen"
+  },
+  "transactionLog": {
+    "title": "Transaktionslogg",
+    "empty": "Inga transaktioner har registrerats",
+    "unknownType": "Okänd transaktion",
+    "transactionId": "Transaktions-ID: %1$@",
+    "reason": "Nekad: %1$@",
+    "outcome": {
+      "consented": "Bekräftad",
+      "declined": "Avböjd",
+      "refused": "Nekad"
+    },
+    "entity": {
+      "payee": "Betalningsmottagare",
+      "pisp": "Betaltjänstleverantör för betalningsinitiering",
+      "service": "Tjänst",
+      "aisp": "Leverantör av kontoinformationstjänster"
+    },
+    "reasons": {
+      "disabled": "Betalningsbekräftelse är avstängd.",
+      "invalidEntry": "Transaktionsförfrågan var felaktig.",
+      "inconsistentWithOrchestrator": "Transaktionen stämde inte med det som tjänsten vidarebefordrade.",
+      "unsupportedFormat": "Den här typen av legitimation kan inte bekräfta transaktioner.",
+      "notScaAttestation": "Legitimationen är inte en legitimation för betalningsbekräftelse.",
+      "unsupportedType": "Transaktionstypen stöds inte av legitimationen.",
+      "schemaViolation": "Transaktionsuppgifterna var inte giltiga.",
+      "metadataUnavailable": "Informationen som behövs för att visa transaktionen var inte tillgänglig.",
+      "unsupportedHashAlgorithm": "Den begärda säkerhetsalgoritmen stöds inte.",
+      "insufficientAuthenticationFactors": "Två olika sätt att bekräfta att det är du kunde inte fastställas.",
+      "noConsentHandler": "Appen kan inte visa transaktionen.",
+      "declined": "Du avböjde transaktionen.",
+      "signingFailed": "Bekräftelsen ledde inte till någon presentation."
+    }
   }
 }

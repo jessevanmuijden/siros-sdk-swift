@@ -124,6 +124,9 @@
     "diagnosticMessagesDescription": "Show the raw backend step token alongside the friendly progress label during a flow.",
     "photoIdOnboardingToggle": "PhotoID Onboarding",
     "photoIdOnboardingDescription": "Show a \"Get your PhotoID\" shortcut on Home when this tenant offers identity-verified PhotoID issuance",
+    "transactionDataToggle": "Payment confirmation (EC TS12)",
+    "transactionDataDescription": "Allow payment and login confirmations that show you the transaction before you approve it. Applies to requests started after you change it; with the WMP transport, to the next connection (sign out and in again). Needs a key other than a software key, and biometric verification.",
+    "transactionLogButton": "Transaction Log",
     "interopProfiles": "Interop profiles"
   },
   "wscd": {
@@ -367,5 +370,51 @@
     "enrollAgain": "Enroll again",
     "deactivatedTitle": "This wallet was deactivated",
     "deactivatedMessage": "Every device was removed and the wallet's data was erased on the server. Enroll again to start over."
+  },
+  "transactionConsent": {
+    "title": "Confirm Transaction",
+    "verifier": "Requested by: %1$@",
+    "credential": "Using: %1$@",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "unsignedWarningTitle": "Unsigned request",
+    "unsignedWarningBody": "This request is not signed, so its origin could not be verified. Only continue if you trust the party that asked you.",
+    "unsignedAcknowledge": "I understand and want to continue",
+    "confirmAll": "Confirm all",
+    "attributesTitle": "Also shared with this request",
+    "biometricReason": "Confirm the transaction"
+  },
+  "transactionLog": {
+    "title": "Transaction Log",
+    "empty": "No transactions recorded",
+    "unknownType": "Unknown transaction",
+    "transactionId": "Transaction ID: %1$@",
+    "reason": "Refused: %1$@",
+    "outcome": {
+      "consented": "Confirmed",
+      "declined": "Declined",
+      "refused": "Refused"
+    },
+    "entity": {
+      "payee": "Payee",
+      "pisp": "Payment initiation provider",
+      "service": "Service",
+      "aisp": "Account information provider"
+    },
+    "reasons": {
+      "disabled": "Payment confirmation is switched off.",
+      "invalidEntry": "The transaction request was malformed.",
+      "inconsistentWithOrchestrator": "The transaction did not match what the service relayed.",
+      "unsupportedFormat": "This kind of credential cannot confirm transactions.",
+      "notScaAttestation": "This credential is not a payment confirmation credential.",
+      "unsupportedType": "This transaction type is not supported by the credential.",
+      "schemaViolation": "The transaction details were not valid.",
+      "metadataUnavailable": "The information needed to show the transaction was not available.",
+      "unsupportedHashAlgorithm": "The requested security algorithm is not supported.",
+      "insufficientAuthenticationFactors": "Two different ways of confirming it is you could not be established.",
+      "noConsentHandler": "This app cannot show the transaction.",
+      "declined": "You declined the transaction.",
+      "signingFailed": "Your confirmation did not lead to a presentation."
+    }
   }
 }

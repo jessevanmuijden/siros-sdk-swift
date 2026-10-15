@@ -62,6 +62,14 @@ final class WalletViewModel: ObservableObject {
     @Published var useWmpProtocol: Bool {
         didSet { UserDefaults.standard.set(useWmpProtocol, forKey: "siros_use_wmp_protocol") }
     }
+    /// EC TS12 switch: persisted, applied to the live wallet. Default off.
+    @Published var transactionDataEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(transactionDataEnabled, forKey: Self.transactionDataEnabledKey)
+            wallet?.transactionDataEnabled = transactionDataEnabled
+        }
+    }
+    static let transactionDataEnabledKey = "siros_transaction_data_enabled"
     @Published var showCredentialDetails: Bool {
         didSet { UserDefaults.standard.set(showCredentialDetails, forKey: "siros_show_credential_details") }
     }
@@ -202,6 +210,17 @@ final class WalletViewModel: ObservableObject {
     /// `.sheet(item:)` in `ContentView`, mirroring `pendingPresentation`'s
     /// pattern above.
     @Published var pendingWscdChoice: PendingWscdChoice?
+    /// Non-nil while a transaction prompt awaits the user (TS12).
+    @Published var pendingTransactionConsent: PendingTransactionConsent?
+    @Published var showTransactionLog = false
+    @Published var transactionLog: [TransactionLogEntry] = []
+    var transactionLogGeneration = 0
+    /// Test hook: called when a log load has finished, whether it published or discarded its result.
+    var transactionLogLoadFinished: (() -> Void)?
+    /// Test hook: called after each wallet state update has been applied (the first is the initial `.disconnected`).
+    var walletStateApplied: (() -> Void)?
+    var transactionConsentBox: TransactionConsentContinuationBox?
+    private lazy var transactionConsentBridge = TransactionConsentBridge(viewModel: self)
     /// Non-nil while a FIDO2 ClientPin prompt (see `SampleAppAuthProvider.requestPin`)
     /// is awaiting the user's PIN - drives `Fido2PinEntryView` via
     /// `.sheet(item:)` in `ContentView`, mirroring `pendingWscdChoice`'s
@@ -362,6 +381,7 @@ final class WalletViewModel: ObservableObject {
         self.backendUrl = backendUrl
         self.tenantId = tenantId
         self.useWmpProtocol = defaults.bool(forKey: "siros_use_wmp_protocol")
+        self.transactionDataEnabled = defaults.bool(forKey: Self.transactionDataEnabledKey)
         if let storedShowDetails = defaults.object(forKey: "siros_show_credential_details") as? Bool {
             self.showCredentialDetails = storedShowDetails
         } else {
@@ -462,6 +482,7 @@ final class WalletViewModel: ObservableObject {
         showActivate = false
         showWscaDeveloper = false
         showIDVPreparation = false
+        resetTransactionDataState()
         resetDevicesNavigation()
     }
 
@@ -1082,7 +1103,8 @@ final class WalletViewModel: ObservableObject {
     }
     #endif
 
-    private func rebuildWalletIfNeeded() {
+    /// Internal (not private) so the unit tests can build the wallet without a real login.
+    func rebuildWalletIfNeeded() {
         // Rebuild if wallet doesn't exist or is in Disconnected/Error state
         let needsRebuild: Bool
         if wallet == nil {
@@ -1177,6 +1199,7 @@ final class WalletViewModel: ObservableObject {
             tenantId: tenantId,
             redirectUri: "\(redirectScheme)://callback",
             useWmpProtocol: useWmpProtocol,
+            transactionDataEnabled: transactionDataEnabled,
             availableKeystores: resolvedAvailableKeystores,
             defaultWscdMapping: resolvedDefaultWscdMapping,
             requestWscdChoice: resolvedRequestWscdChoice,
@@ -1208,6 +1231,8 @@ final class WalletViewModel: ObservableObject {
             keystore: keystore
         )
         wallet?.credentialConsumptionPolicy = credentialConsumptionPolicy
+        wallet?.transactionConsentHandler = transactionConsentBridge
+        wallet?.authenticationFactorsProvider = SampleAuthenticationFactors.provider()
         wallet?.setEventListener(self)
         observeState()
     }
@@ -1224,6 +1249,7 @@ final class WalletViewModel: ObservableObject {
     }
 
     private func updateState(_ state: WalletState) {
+        defer { walletStateApplied?() }
         // Every call here is a real state update from the engine (or a
         // reconnect/logout) - whatever the QR-scan/deep-link handoff was
         // waiting on has now either progressed (flowActive), failed
@@ -1233,6 +1259,7 @@ final class WalletViewModel: ObservableObject {
         switch state {
         case .disconnected(let accounts):
             walletState = .disconnected
+            resetTransactionDataState()
             credentials = []
             resetCredentialStatuses()
             displayName = nil
@@ -1258,6 +1285,7 @@ final class WalletViewModel: ObservableObject {
             lastFlowType = flowType
         case .lifecycleBlocked(let reason, let message, let accounts):
             walletState = .lifecycleBlocked(reason: reason, message: message)
+            resetTransactionDataState()   // the SDK ended the session before publishing this state
             credentials = []
             displayName = nil
             userId = nil
