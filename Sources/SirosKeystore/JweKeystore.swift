@@ -581,6 +581,60 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
     public func exportEncryptedContainer() async throws -> Data {
         mutex.lock()
         defer { mutex.unlock() }
+        return try exportContainerLocked(extraPrfKey: nil)
+    }
+
+    public func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        mutex.lock()
+        defer { mutex.unlock() }
+        try requireUnlocked()
+        guard !credentialId.isEmpty else { throw KeystoreError.invalidParameter("Empty credential id") }
+        guard let meta = containerMetadata, let mainKeyInfo = meta.mainKey, let mainKey = _mainKey else {
+            throw KeystoreError.containerMissing("No container metadata")
+        }
+        guard !meta.prfKeys.contains(where: { $0.credentialId == credentialId }) else {
+            throw KeystoreError.invalidParameter("A PRF key for this credential already exists")
+        }
+        let prfKey = EncryptedContainer.derivePrfKey(prfOutput: prfOutput, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)
+        let encapsulation = try EncryptedContainer.wrapMainKey(prfKey: prfKey, mainKey: mainKey, mainKeyInfo: mainKeyInfo)
+        let entry = PrfKeyInfo(
+            credentialId: credentialId,
+            transports: nil,
+            prfSalt: prfSalt,
+            hkdfSalt: hkdfSalt,
+            hkdfInfo: hkdfInfo,
+            algorithm: AesGcmKeyAlgorithm(name: "AES-GCM", length: 256),
+            keypair: encapsulation.keypair,
+            unwrapKey: encapsulation.unwrapKey
+        )
+        return PreparedPrfKey(
+            container: try exportContainerLocked(extraPrfKey: entry), credentialId: credentialId, entry: entry
+        )
+    }
+
+    public func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        mutex.lock()
+        defer { mutex.unlock() }
+        try requireUnlocked()
+        guard var meta = containerMetadata else { throw KeystoreError.containerMissing("No container metadata") }
+        guard let entry = prepared.entry else {
+            throw KeystoreError.invalidParameter("Not a PRF key prepared by this keystore")
+        }
+        if !meta.prfKeys.contains(where: { $0.credentialId == entry.credentialId }) {
+            meta.prfKeys.append(entry)
+            containerMetadata = meta
+        }
+    }
+
+    /// `exportEncryptedContainer`'s body; the caller holds `mutex`.
+    /// `extraPrfKey` is serialized but not retained.
+    private func exportContainerLocked(extraPrfKey: PrfKeyInfo?) throws -> Data {
         try requireUnlocked()
 
         // swiftlint:disable:next force_unwrapping
@@ -595,6 +649,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         meta.jwe = jweString
         containerMetadata = meta
 
+        if let extraPrfKey { meta.prfKeys.append(extraPrfKey) }
         return try EncryptedContainer.serialize(meta)
     }
 
@@ -1429,6 +1484,14 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         throw KeystoreError.cryptoError("CryptoKit not available on this platform")
     }
     public func lock() {}
+    public func preparePrfKey(
+        credentialId: Data, prfOutput: Data, prfSalt: Data, hkdfSalt: Data, hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        throw KeystoreError.cryptoError("CryptoKit not available on this platform")
+    }
+    public func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        throw KeystoreError.cryptoError("CryptoKit not available on this platform")
+    }
     public func generateKey(algorithm: String = "ES256") async throws -> String {
         throw KeystoreError.cryptoError("CryptoKit not available on this platform")
     }

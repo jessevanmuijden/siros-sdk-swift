@@ -360,7 +360,22 @@
     "deleteNoPasskey": "Kontot har ingen passkey att bekräfta med och kan därför inte raderas från plånboken.",
     "deleteNotPermitted": "Den här sessionen får inte radera kontot.",
     "deleteAccountNotFound": "Servern känner inte till kontot.",
-    "deleteRequestFailed": "Begäran misslyckades: %1$@"
+    "deleteRequestFailed": "Begäran misslyckades: %1$@",
+    "addPasskeyTitle": "Lägg till en passkey",
+    "addPasskeyDescription": "Lägger till ytterligare en passkey på kontot. En befintlig passkey måste godkänna det, och den nya kan öppna dina plånboksdata på egen hand.",
+    "addPasskeyButton": "Lägg till passkey",
+    "addPasskeyMessage": "Godkänn med en passkey du redan har och skapa sedan den nya.",
+    "addPasskeyNickname": "Namn (valfritt)",
+    "addPasskeyDone": "Passkey tillagd: %1$@",
+    "addPasskeyAuthorizationFailed": "Godkännandet från din befintliga passkey godtogs inte. Försök igen.",
+    "addPasskeyConflict": "Dina plånboksdata ändrades på en annan enhet. Försök igen.",
+    "addPasskeyExpired": "Begäran har gått ut. Försök igen.",
+    "addPasskeyLocked": "Lås upp plånboken först och lägg sedan till passkey.",
+    "addPasskeyNotPermitted": "Den här sessionen får inte lägga till en passkey.",
+    "addPasskeyAuthorizationAborted": "Godkännandet slutfördes inte: %1$@",
+    "addPasskeyRegistrationAborted": "Den nya passkey skapades inte: %1$@",
+    "addPasskeyNoPrf": "Den här passkey kan inte skydda dina plånboksdata och lades därför inte till: %1$@",
+    "addPasskeyRefused": "Den här autentiseraren är inte tillåten. %1$@"
   },
   "walletBlocked": {
     "suspendedTitle": "Den här enheten är pausad",

@@ -104,6 +104,25 @@ credential offer. Refusals arrive as typed `IDVError`s. See
 [docs/IDENTITY-VERIFICATION.md](docs/IDENTITY-VERIFICATION.md) for the
 facetec-api contract the provider keeps and the error-code table.
 
+### Adding a passkey
+
+```swift
+switch try await wallet.addPasskey(nickname: "Laptop") {
+case .added:
+    break  // the new passkey can now unlock the wallet's data too
+case .authorizationRequired, .authorizationFailed, .retryNeeded, .privateDataConflict:
+    break  // nothing changed; call again (the backend's challenge was spent)
+case .authorizerUnavailable, .passkeyCreationUnavailable, .prfUnsupported,
+     .registrationRejected, .walletLocked, .insufficientScope, .sessionRevoked:
+    break  // nothing changed
+}
+```
+
+An existing passkey authorises the addition (from the wallet's `AuthProvider`,
+or the optional `authorizer:` closure); an account with no passkey needs none.
+The keystore must be unlocked: the new passkey is given its own key to the
+container, sent with it.
+
 ### Deleting the account
 
 ```swift

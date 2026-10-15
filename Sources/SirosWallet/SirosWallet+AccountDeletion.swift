@@ -88,7 +88,7 @@ extension SirosWallet {
         resetIssuanceGuards()
     }
 
-    private static func assertionCredential(_ result: AuthenticateResult) -> [String: Any] {
+    static func assertionCredential(_ result: AuthenticateResult) -> [String: Any] {
         var response: [String: Any] = [
             "authenticatorData": b64UrlEncode(result.authenticatorData),
             "clientDataJSON": b64UrlEncode(result.clientDataJSON),

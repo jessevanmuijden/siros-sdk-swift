@@ -236,7 +236,7 @@ extension SirosWallet {
         let client = BackendApiClient(
             baseUrl: config.backendUrl,
             tenantId: config.tenantId,
-            httpFn: Self.defaultHttpFn
+            responseFn: UrlSessionTransport.send
         )
         client.setAppToken(session.appToken)
         lock.lock(); apiClient = client; lock.unlock()
@@ -250,7 +250,7 @@ extension SirosWallet {
         let client = BackendApiClient(
             baseUrl: config.backendUrl,
             tenantId: config.tenantId,
-            httpFn: Self.defaultHttpFn
+            responseFn: UrlSessionTransport.send
         )
         client.setAuthTokens(tokens)
         lock.lock(); apiClient = client; lock.unlock()

@@ -527,6 +527,32 @@ final class BackendApiClientTests: XCTestCase {
             XCTAssertEqual(rejectedCount, expected, body)
         }
     }
+
+    /// Same for the add-passkey `register-finish`: a refused authorising
+    /// assertion is not a rejected session token.
+    func testEnrollmentAuthorization401sDoNotRegisterTokenRejectionButPlain401sDo() async throws {
+        for (body, expected) in [
+            (#"{"error":"ENROLLMENT_AUTHORIZATION_FAILED"}"#, 0),
+            (#"{"error":"ENROLLMENT_AUTHORIZATION_REQUIRED"}"#, 0),
+            (#"{"error":"Unauthorized"}"#, 1),
+        ] {
+            let tokens = makeAuthTokens()
+            var rejectedCount = 0
+            tokens.onSessionRejected = { rejectedCount += 1 }
+            let client = BackendApiClient(baseUrl: "https://api.example.com", httpFn: { _, _, _, _ in
+                throw SirosError.backendApi(code: 401, message: "unauthorized", body: body)
+            })
+            client.setAuthTokens(tokens)
+            for _ in 0..<3 {
+                _ = try? await client.passkeyRegisterFinish(
+                    challengeId: "c",
+                    credential: RegisterResult(credentialId: Data([1]), attestationObject: Data(), clientDataJSON: Data()),
+                    nickname: "n", privateData: nil, authorization: nil
+                )
+            }
+            XCTAssertEqual(rejectedCount, expected, body)
+        }
+    }
 }
 
 private extension Data {

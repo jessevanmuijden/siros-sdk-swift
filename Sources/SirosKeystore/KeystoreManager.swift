@@ -61,6 +61,36 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// Lock the keystore, clearing key material from memory.
     func lock()
 
+    /// Wrap this unlocked keystore's main key for an additional passkey (the
+    /// web wallet's `keystore.addPrf`) without changing anything yet.
+    ///
+    /// Returns the container that includes the new passkey's PRF entry, to be
+    /// sent to the backend. Only once the backend accepted it is
+    /// `commitPrfKey(_:)` called, so a refused enrolment leaves the keystore as
+    /// it was. The main key and the wallet state are unchanged: the other
+    /// passkeys keep working. `hkdfSalt` is the new entry's own; a login with
+    /// that passkey must derive with it (it is the entry the keystore picks by
+    /// HKDF salt).
+    ///
+    /// A genuine requirement, not a defaulted convenience: a keystore that
+    /// cannot do this must say so rather than let an enrolment succeed with a
+    /// container the new passkey cannot open (the default throws).
+    ///
+    /// - Throws: `KeystoreError.locked`, or `.invalidParameter` when the
+    ///   container already has an entry for `credentialId` or this keystore
+    ///   cannot add one.
+    func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey
+
+    /// Make the `prepared` PRF entry part of this keystore's container, once
+    /// the backend stored it.
+    func commitPrfKey(_ prepared: PreparedPrfKey) async throws
+
     /// Generate a new keypair and return the key ID.
     func generateKey(algorithm: String) async throws -> String
 
@@ -330,6 +360,21 @@ public extension KeystoreManager {
         try await generateProof(audience: audience, nonce: nonce, freshKey: false)
     }
 
+    /// Default: this keystore cannot add a passkey to its container.
+    func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        throw KeystoreError.invalidParameter("This keystore cannot add a passkey to its container")
+    }
+
+    func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        throw KeystoreError.invalidParameter("This keystore cannot add a passkey to its container")
+    }
+
     /// Default for a conformer written before the `prfSalt` parameter
     /// existed: forwards unchanged, so a first-time-setup container it
     /// creates still gets *some* `PrfKeyInfo.prfSalt` (whatever its own
@@ -473,6 +518,29 @@ public struct KeyInfo: Sendable, Equatable {
         self.keyId = keyId
         self.algorithm = algorithm
         self.createdAt = createdAt
+    }
+}
+
+/// A container carrying a new passkey's PRF entry that has not been committed
+/// to the keystore yet; see `KeystoreManager.preparePrfKey`.
+public struct PreparedPrfKey: Sendable {
+    /// The serialized container to store on the backend.
+    public let container: Data
+    /// The credential the entry is for.
+    public let credentialId: Data
+    /// The entry itself; nil for a keystore that has its own way to commit.
+    let entry: PrfKeyInfo?
+
+    public init(container: Data, credentialId: Data) {
+        self.container = container
+        self.credentialId = credentialId
+        self.entry = nil
+    }
+
+    init(container: Data, credentialId: Data, entry: PrfKeyInfo) {
+        self.container = container
+        self.credentialId = credentialId
+        self.entry = entry
     }
 }
 

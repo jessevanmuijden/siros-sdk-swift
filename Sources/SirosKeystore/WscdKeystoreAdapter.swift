@@ -175,6 +175,24 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         credentialsKeystore.lock()
     }
 
+    /// Forwarded to `credentialsKeystore`, which owns the PRF-protected
+    /// container (as `exportEncryptedContainer` is).
+    public func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        try await credentialsKeystore.preparePrfKey(
+            credentialId: credentialId, prfOutput: prfOutput, prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo
+        )
+    }
+
+    public func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        try await credentialsKeystore.commitPrfKey(prepared)
+    }
+
     /// The persisted (privatedata-synced) copy of every hardware-backed WSCD
     /// plugin's key metadata - see `JweKeystore.exportWscdCredentials`'s doc
     /// comment. Read this after `unlock` to restore a previously-enrolled

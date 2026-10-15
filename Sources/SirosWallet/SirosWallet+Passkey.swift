@@ -315,6 +315,14 @@ extension SirosWallet {
         }
     }
 
+    /// The `PrfKeyInfo` entry of `credentialId` in `privateData`, or nil when the
+    /// container is empty, unreadable or has no entry for it.
+    func ownPrfKeyInfo(credentialId: Data, in privateData: Data) -> PrfKeyInfo? {
+        guard !privateData.isEmpty, !credentialId.isEmpty,
+              let container = try? EncryptedContainer.parse(privateData) else { return nil }
+        return container.prfKeys.first { $0.credentialId == credentialId }
+    }
+
     /// The pure lookup half of `recoverPrfFromPrivateData` - parses
     /// `privateData` and finds the `PrfKeyInfo` entry for `credentialId`, with
     /// no authenticator ceremony involved. Split out so it's directly
@@ -356,10 +364,17 @@ extension SirosWallet {
         cachedAccount: CachedAccount?
     ) async throws -> LoginPrfResolution {
         if let knownPrfOutput = assertion.prfOutput, let knownPrfSalt = assertion.prfSalt {
-            let hkdfSalt = sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
+            // An account with several passkeys has one PRF entry (with its own
+            // HKDF salt) per passkey, and the keystore picks the entry by that
+            // salt; the session store and the account cache only hold the
+            // first passkey's. The entry of the passkey that just logged in wins.
+            let own = ownPrfKeyInfo(credentialId: assertion.credentialId, in: privateData)
+            let hkdfSalt = own?.hkdfSalt
+                ?? sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
                 ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfSalt) }
                 ?? Self.randomBytes(32)
-            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) }
+            let hkdfInfo = own?.hkdfInfo
+                ?? sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) }
                 ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfInfo) }
                 ?? Data(Self.hkdfInfo.utf8)
             return LoginPrfResolution(
@@ -434,10 +449,12 @@ extension SirosWallet {
         storedContainer: Data
     ) async throws -> UnlockKeystorePrfResolution {
         if let knownPrfOutput = assertion.prfOutput {
-            guard let hkdfSalt = sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
+            // See `resolveLoginPrf`: the logging-in passkey's own entry wins.
+            let own = ownPrfKeyInfo(credentialId: assertion.credentialId, in: storedContainer)
+            guard let hkdfSalt = own?.hkdfSalt ?? sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
                 throw SirosError.keystore(message: "Missing HKDF salt")
             }
-            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) } ?? Data(Self.hkdfInfo.utf8)
+            let hkdfInfo = own?.hkdfInfo ?? sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) } ?? Data(Self.hkdfInfo.utf8)
             return UnlockKeystorePrfResolution(prfOutput: knownPrfOutput, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo, recoveredSalt: nil)
         }
         let recovered = try await recoverPrfFromPrivateData(

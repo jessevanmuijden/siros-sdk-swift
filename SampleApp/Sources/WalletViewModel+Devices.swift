@@ -14,6 +14,8 @@ extension WalletViewModel {
 
     func openDevices() {
         deleteAccountError = nil
+        addPasskeyError = nil
+        addPasskeyDone = nil
         showDevices = true
     }
 
@@ -38,6 +40,51 @@ extension WalletViewModel {
             devicesError = error.localizedDescription
         }
         devicesLoading = false
+    }
+
+    /// Add a passkey to the account: the SDK asks an existing passkey to
+    /// authorise it, creates the new one and gives it its own key to the
+    /// wallet's data. The outcome is shown on the Devices screen.
+    func addPasskey(nickname: String) {
+        Task { @MainActor in
+            guard let wallet else { return }
+            addingPasskey = true
+            addPasskeyError = nil
+            addPasskeyDone = nil
+            let result: AddPasskeyResult
+            do {
+                result = try await wallet.addPasskey(nickname: nickname)
+            } catch {
+                addingPasskey = false
+                addPasskeyError = L10n.string("devices.deleteRequestFailed", error.localizedDescription)
+                return
+            }
+            addingPasskey = false
+            switch result {
+            case .added:
+                addPasskeyDone = L10n.string("devices.addPasskeyDone", nickname)
+            case .authorizationRequired, .authorizationFailed:
+                addPasskeyError = L10n.string("devices.addPasskeyAuthorizationFailed")
+            case .privateDataConflict:
+                addPasskeyError = L10n.string("devices.addPasskeyConflict")
+            case .retryNeeded:
+                addPasskeyError = L10n.string("devices.addPasskeyExpired")
+            case .walletLocked:
+                addPasskeyError = L10n.string("devices.addPasskeyLocked")
+            case .insufficientScope:
+                addPasskeyError = L10n.string("devices.addPasskeyNotPermitted")
+            case .sessionRevoked:
+                addPasskeyError = L10n.string("devices.deleteNotLoggedIn")
+            case let .authorizerUnavailable(message):
+                addPasskeyError = L10n.string("devices.addPasskeyAuthorizationAborted", message ?? "")
+            case let .passkeyCreationUnavailable(message):
+                addPasskeyError = L10n.string("devices.addPasskeyRegistrationAborted", message ?? "")
+            case let .prfUnsupported(message):
+                addPasskeyError = L10n.string("devices.addPasskeyNoPrf", message ?? "")
+            case let .registrationRejected(message):
+                addPasskeyError = L10n.string("devices.addPasskeyRefused", message ?? "")
+            }
+        }
     }
 
     /// Delete the account: the SDK asks for a passkey assertion (step-up),

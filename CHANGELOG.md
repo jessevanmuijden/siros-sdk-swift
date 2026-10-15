@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`SirosWallet.addPasskey(nickname:authorizer:)`: add a passkey to the
+  signed-in account (go-wallet-backend#352, backend PR #453; same shapes as
+  siros-sdk-kotlin's).** An account that has a passkey needs one of them to
+  authorise the addition: `authorizer` (default: the wallet's `AuthProvider`)
+  answers the backend's `authorization` options and is asked first, so declining
+  creates nothing; then the new passkey is created and both go in one
+  `register-finish`. The new passkey gets its own PRF entry (own HKDF salt) in
+  the keystore container, sent as `privateData`; the keystore must be unlocked.
+  Returns `AddPasskeyResult` (`added`, `authorizationRequired`,
+  `authorizationFailed`, `authorizerUnavailable`, `passkeyCreationUnavailable`,
+  `prfUnsupported`, `retryNeeded`, `privateDataConflict`, `registrationRejected`,
+  `walletLocked`, `insufficientScope`, `sessionRevoked`) and throws only for no
+  session, a bad nickname, transport failures and responses outside the
+  contract. The keystore and the local account cache change only when the
+  backend answered `added`; a refused attempt consumes the backend's challenge,
+  so a retry is a new call. Backed by `BackendApiClient.passkeyRegisterBegin()`
+  (`AddPasskeyBegin`) and `passkeyRegisterFinish(...)` (`AddPasskeyOutcome`),
+  which sends `X-Private-Data-If-Match` from `privateDataEtag` - the client now
+  keeps the `X-Private-Data-ETag` of every response when built on the new
+  `HttpResponseFunction` transport (`UrlSessionTransport.send`, used by the
+  wallet) - and by the new `KeystoreManager` requirements
+  `preparePrfKey(...)` / `commitPrfKey(_:)` (the web wallet's `addPrf`; default:
+  throws; implemented by `JweKeystore` and `WscdKeystoreAdapter`). The sample
+  app's Devices screen offers "Add passkey".
+- **Fix: a second passkey could not log in.** `login()` and `unlockKeystore()`
+  derived the PRF key with the account-level HKDF salt/info from the session
+  store, which are the first passkey's, while the keystore picks the container's
+  PRF entry by that salt. They now use the HKDF parameters of the logging-in
+  passkey's own entry in the private data container.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
   assertion (step-up, valid 2 minutes, single use) and the typed confirmation
