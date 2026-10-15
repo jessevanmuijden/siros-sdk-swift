@@ -303,6 +303,20 @@ public struct TransactionDataPipeline: Sendable {
         )
     }
 
+    /// The DCQL query ids the entries name in `credential_ids`, decoded best-effort: an entry
+    /// that cannot be decoded names nothing here (the pipeline refuses it later). Used to tell
+    /// transaction-bound queries from unbound ones before validation.
+    public static func boundQueryIds(rawEntries: [String]) -> Set<String> {
+        var ids = Set<String>()
+        for raw in rawEntries where !raw.isEmpty && raw.utf8.count <= 64 * 1024 {
+            guard let bytes = TransactionDataHashing.base64UrlDecode(raw),
+                  let object = (try? StrictJSON.parse(bytes))?.objectValue,
+                  let list = object["credential_ids"]?.arrayValue else { continue }
+            for id in list.compactMap(\.stringValue) { ids.insert(id) }
+        }
+        return ids
+    }
+
     private func decode(_ raw: String) throws -> [String: JSONValue] {
         guard !raw.isEmpty, raw.utf8.count <= maxRawEntryBytes else {
             throw TransactionDataError(.invalidEntry, detail: "raw entry is empty or too large")

@@ -143,6 +143,10 @@ public protocol WalletEventListener: AnyObject, Sendable {
     /// threshold per `SirosWallet.recordPresentation` call - not repeated on
     /// every recomposition.
     func onCredentialNearExpiry(credential: StoredCredential, eligibleRemaining: Int, threshold: Int)
+
+    /// A transaction-log record (EC TS12 section 5.3) could not be made
+    /// durable. The record is still held for the running session.
+    func onTransactionLogFailure()
 }
 
 /// Default implementations for optional callbacks.
@@ -162,4 +166,7 @@ public extension WalletEventListener {
     }
     func onCredentialRenewedWithAttributeDiff(credential: StoredCredential, diff: CredentialAttributeDiff) {}
     func onCredentialNearExpiry(credential: StoredCredential, eligibleRemaining: Int, threshold: Int) {}
+    func onTransactionLogFailure() {
+        // No-op by default: implementers override to tell the user a record was not stored.
+    }
 }

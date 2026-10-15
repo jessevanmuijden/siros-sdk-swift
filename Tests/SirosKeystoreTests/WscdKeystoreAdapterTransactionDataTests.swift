@@ -67,7 +67,7 @@ final class WscdKeystoreAdapterTransactionDataTests: XCTestCase {
         let signer = CountingSigner()
         let a = try await adapter(signer)
         let binding = TransactionDataBinding(rawEntries: raws, hashAlgorithm: "sha-256", responseMode: "direct_post.jwt", factors: twoFactors)
-        let vp = try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n1", audience: "aud1", transactionData: binding, kid: nil)
+        let vp = try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n1", audience: "aud1", transactionData: binding, kid: "k1")
         let c = try kbClaims(vp)
         XCTAssertEqual(c["transaction_data_hashes"] as? [String], sha256, "hashes over the raw strings, verifier order")
         XCTAssertEqual(c["transaction_data_hashes_alg"] as? String, "sha-256")
@@ -79,7 +79,7 @@ final class WscdKeystoreAdapterTransactionDataTests: XCTestCase {
         XCTAssertEqual(c["nonce"] as? String, "n1")
         XCTAssertNotNil(c["iat"])
         XCTAssertNotNil(c["sd_hash"])
-        let again = try kbClaims(try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n1", audience: "aud1", transactionData: binding, kid: nil))
+        let again = try kbClaims(try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n1", audience: "aud1", transactionData: binding, kid: "k1"))
         XCTAssertNotEqual(c["jti"] as? String, again["jti"] as? String, "jti is fresh per presentation")
     }
 
@@ -97,10 +97,26 @@ final class WscdKeystoreAdapterTransactionDataTests: XCTestCase {
         XCTAssertNil(try kbClaims(plain)["transaction_data_hashes"])
     }
 
+    /// Factors were established for one key; if the credential's binding selects another, nothing is signed.
+    func testAKeyMismatchBetweenFactorsAndSigningRefusesBeforeSigning() async throws {
+        let signer = CountingSigner()
+        let a = try await adapter(signer)
+        let binding = TransactionDataBinding(rawEntries: raws, hashAlgorithm: "sha-256", responseMode: "dc_api", factors: twoFactors)
+        do {
+            _ = try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: binding, kid: "k2")
+            XCTFail("expected a refusal")
+        } catch is KeystoreError {}
+        XCTAssertEqual(signer.signCount, 0)
+        do {
+            _ = try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: binding, kid: nil)
+            XCTFail("expected a refusal without a named key")
+        } catch is KeystoreError {}
+    }
+
     func testScaWithSha384() async throws {
         let a = try await adapter(CountingSigner())
         let binding = TransactionDataBinding(rawEntries: raws, hashAlgorithm: "sha-384", responseMode: "dc_api", factors: twoFactors)
-        let c = try kbClaims(try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: binding, kid: nil))
+        let c = try kbClaims(try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: binding, kid: "k1"))
         XCTAssertEqual(c["transaction_data_hashes"] as? [String], sha384)
         XCTAssertEqual(c["transaction_data_hashes_alg"] as? String, "sha-384")
     }
@@ -111,7 +127,7 @@ final class WscdKeystoreAdapterTransactionDataTests: XCTestCase {
         let one = TransactionDataBinding(rawEntries: raws, hashAlgorithm: "sha-256", responseMode: "dc_api",
                                          factors: [AuthenticationFactor(.possession, "key_in_remote_wscd")])
         do {
-            _ = try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: one, kid: nil)
+            _ = try await a.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: one, kid: "k1")
             XCTFail("must refuse")
         } catch let e as TransactionDataError {
             XCTAssertEqual(e.reason, .insufficientAuthenticationFactors)
@@ -141,7 +157,7 @@ final class WscdKeystoreAdapterTransactionDataTests: XCTestCase {
         let keystore: KeystoreManager = JweKeystore()
         let binding = TransactionDataBinding(rawEntries: raws, hashAlgorithm: "sha-256", responseMode: "dc_api", factors: twoFactors)
         do {
-            _ = try await keystore.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: binding, kid: nil)
+            _ = try await keystore.signVpToken(credential: credential, disclosedClaims: nil, nonce: "n", audience: "a", transactionData: binding, kid: "k1")
             XCTFail("must refuse")
         } catch let e as TransactionDataError {
             XCTAssertEqual(e.reason, .insufficientAuthenticationFactors)

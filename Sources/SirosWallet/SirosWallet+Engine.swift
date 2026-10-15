@@ -133,18 +133,21 @@ extension SirosWallet {
                 // Terminal path for this issuance over the WMP transport too -
                 // see `resetIssuanceGuards()`.
                 self?.resetIssuanceGuards()
+                self?.cancelTransactionTasks(flowId: flowId)
                 self?.eventListener?.onFlowComplete(flowId: flowId, redirectUri: nil)
             },
             onError: { [weak self] flowId, code, message in
                 self?.resetIssuanceGuards()
+                self?.cancelTransactionTasks(flowId: flowId)
                 self?.eventListener?.onFlowError(flowId: flowId, errorMessage: "\(code ?? ""): \(message ?? "")", redirectUri: nil)
             }
         ))
         peer.use(profile)
         // Offered per session: a flag flip applies from the next session.
+        let offerTransactionData = snapshotWmpSessionEnablement()
         try await peer.connect(
             authToken: appToken,
-            capabilitiesOffered: transactionDataWmpCapabilities
+            capabilitiesOffered: TransactionDataDeclaration.wmpCapabilitiesOffered(enabled: offerTransactionData)
         )
         lock.lock(); wmpPeer = peer; lock.unlock()
 
@@ -325,15 +328,17 @@ extension SirosWallet {
             return SignSubFlowResult(proofs: proofs)
 
         case "sign_presentation":
-            // EC TS12 is not processed yet (it needs the pipeline of a later
-            // change): refuse before anything else rather than answer without
-            // the hashes and without showing the user the transaction.
-            try Self.refuseTransactionData(params.transactionDataMember)
             // Same defense-in-depth audience check as the legacy engine
             // transport's handleSignRequest - this transport previously
             // skipped it entirely, so a WMP-relayed sign_presentation was
             // never checked against the trust result computed for this flow.
-            try validateAudience(flowId: flowId, audience: params.audience)
+            let evaluated = try validateAudience(flowId: flowId, audience: params.audience)
+            if params.transactionDataMember.requestsTransactionHandling {
+                // Tracked per flow: a flow error, logout or peer teardown cancels it. The verifier
+                // shown and logged is the evaluated identity, not the protocol audience.
+                let verifier = Self.transactionVerifierLabel(trust: evaluated, fallback: params.audience)
+                return try await trackedTransaction(flowId: flowId) { try await self.wmpTransactionPresentation(flowId: flowId, params: params, verifier: verifier) }
+            }
             // NOTE (pre-existing, separate gap - not addressed by this
             // change): unlike the legacy engine transport's
             // SignRequestParams, WMP's SignSubFlowParams carries no
@@ -632,7 +637,35 @@ extension SirosWallet {
         let signTask = Task { [weak self] in
             guard let self else { return }
             for await msg in engine.signRequests() {
-                await self.handleSignRequest(engine: engine, msg: msg)
+                if msg.action == "sign_presentation", msg.params.transactionDataMember.requestsTransactionHandling {
+                    // A transaction waits for the user. That must not hold up the
+                    // engine's other requests (issuance proofs, client auth,
+                    // attestation), which are handled in order on this loop.
+                    // The lock is held across creation AND registration, so the task's own
+                    // removal (it takes the same lock) can never run before it is registered.
+                    //
+                    // The flow's start record is claimed HERE, on this serial collector, so
+                    // records are consumed in message-arrival order whatever order the
+                    // spawned tasks happen to run in.
+                    // A collector cancelled by a teardown does not go on to start work for the old request,
+                    // and the registration below is checked against the teardown epoch captured first.
+                    guard !Task.isCancelled else { break }
+                    let epoch = self.currentTaskEpoch()
+                    _ = self.transactionDataActive(forFlow: msg.flowId, viaWmp: false)
+                    let id = UUID()
+                    self.lock.lock()
+                    let task = Task { [weak self] in
+                        await self?.handleSignRequest(engine: engine, msg: msg)
+                        self?.lock.lock(); self?.transactionTasks.removeValue(forKey: id); self?.lock.unlock()
+                    }
+                    if self.transactionTaskEpoch == epoch { self.transactionTasks[id] = (flowId: msg.flowId, cancel: { task.cancel() }) } else { task.cancel() }
+                    // A flow that ended between the claim above and this registration has had its record
+                    // removed by the terminal handler (which found nothing to cancel): cancel the task now.
+                    if self.legacyFlowSnapshots[msg.flowId] == nil { task.cancel() }
+                    self.lock.unlock()
+                } else {
+                    await self.handleSignRequest(engine: engine, msg: msg)
+                }
             }
         }
         // Match requests → credential matching
@@ -694,16 +727,31 @@ extension SirosWallet {
                 engine.sendSignResponse(flowId: msg.flowId, proofs: proofs, messageId: msg.messageId)
 
             case "sign_presentation":
-                try Self.refuseTransactionData(msg.params.transactionDataMember)
+                // Claim this flow's enablement record whether or not it carries a
+                // transaction, so a plain presentation does not leave it behind.
+                _ = transactionDataActive(forFlow: msg.flowId, viaWmp: false)
                 let nonce = msg.params.nonce ?? ""
                 let audience = msg.params.audience ?? ""
                 let credsToInclude = msg.params.credentialsToInclude
 
                 // Validate audience matches trusted verifier identity
-                try validateAudience(flowId: msg.flowId, audience: audience)
+                let evaluated = try validateAudience(flowId: msg.flowId, audience: audience)
+
+                let allCredsForTransaction = await credentialStore.getAll()
+                // Empty for every request without `transaction_data`; refuses
+                // before anything is signed when the request carries it but
+                // cannot be honoured.
+                let scaPlan = try await orchestratedTransactionPlan(
+                    transactionData: msg.params.transactionDataMember, responseMode: msg.params.responseMode,
+                    refs: credsToInclude, allCreds: allCredsForTransaction,
+                    flowId: msg.flowId, viaWmp: false,
+                    context: ScaRequestContext(
+                        verifier: Self.transactionVerifierLabel(trust: evaluated, fallback: audience), nonce: nonce, audience: audience
+                    )
+                )
 
                 if let credsToInclude, !credsToInclude.isEmpty {
-                    let allCreds = await credentialStore.getAll()
+                    let allCreds = allCredsForTransaction
                     // Cached by handleCredentialSelection ("credential_selection"
                     // step - the real, live path for redirect-flow/haip-vp://
                     // presentations) or handleMatchRequest (legacy match_request
@@ -714,7 +762,10 @@ extension SirosWallet {
                     let storedMatchResults = pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
                     lock.unlock()
                     var vpParts: [String] = []
+                    do {
                     for ref in credsToInclude {
+                        // A flow that ended (or a logout) while the user decided must not sign.
+                        try Task.checkCancellation()
                         // ref.credentialId is the WMP wire-protocol identifier
                         // (String) - parse it back to the numeric
                         // StoredCredential.id it refers to.
@@ -728,11 +779,24 @@ extension SirosWallet {
                             matchResult: matchResult,
                             nonce: nonce,
                             audience: audience,
-                            msg: msg
+                            msg: msg,
+                            transactionData: ref.credentialQueryId.flatMap { scaPlan?.bindings[$0] },
+                            transactionKid: scaPlan?.kid(for: ref.credentialQueryId, fallback: nil)
                         ))
+                    }
+                    // A signer need not observe cancellation: recheck after the FINAL signing await,
+                    // so an ended flow's token is never sent and its consent never recorded.
+                    try Task.checkCancellation()
+                    } catch {
+                        // A cancelled request is not a signing failure and is not logged as one.
+                        if !Task.isCancelled && !(error is CancellationError) { await Self.shielded { await scaPlan?.plan.complete(signed: false) } }
+                        throw error
                     }
                     let vpToken = vpParts.joined(separator: "\n")
                     engine.sendSignResponse(flowId: msg.flowId, vpToken: vpToken, messageId: msg.messageId)
+                    // The record of a presentation that was sent must be written even if the flow's
+                    // completion cancels this task meanwhile.
+                    await Self.shielded { await scaPlan?.plan.complete(signed: true) }
                 } else {
                     let vpToken = try await keystore.signPresentation(
                         nonce: nonce, audience: audience, credentialIds: [], kid: nil
@@ -785,29 +849,25 @@ extension SirosWallet {
                 engine.sendSignResponse(flowId: msg.flowId, messageId: msg.messageId)
             }
         } catch {
+            // Cancelled by logout/destroy or because the flow already ended: the
+            // owner of the cancellation has reset the state, so reporting a
+            // failure here would race a teardown or re-login.
+            if Task.isCancelled || error is CancellationError { return }
             #if canImport(os)
             logger.error("Error handling sign request: \(error.localizedDescription)")
             #endif
             if case SirosError.transactionData(let refusal) = error {
                 // Answer at once rather than leave the engine waiting out its
-                // sign timeout (an empty response makes it fail the flow).
+                // sign timeout; an empty response makes it fail the flow. The
+                // engine protocol has no field for `invalid_transaction_data`
+                // / `access_denied`, so only the code reaches the app, and the
+                // user's own decline is not presented to it as an error.
                 engine.sendSignResponse(flowId: msg.flowId, messageId: msg.messageId)
-                // Verifier error code first, so the app can act on it.
-                reportSignFailure(flowId: msg.flowId, message: "\(refusal.verifierErrorCode): \(refusal.userFacingDescription)")
+                reportSignFailure(flowId: msg.flowId, message: refusal.verifierErrorCode, notifyError: refusal.reason != .declined)
             } else {
                 reportSignFailure(flowId: msg.flowId, message: error.localizedDescription)
             }
         }
-    }
-
-    /// Refuses a presentation request that carries `transaction_data`: this
-    /// SDK cannot process it yet, and answering without the transaction hashes
-    /// (and without the user seeing the transaction) is never acceptable.
-    static func refuseTransactionData(_ member: TransactionDataMember) throws {
-        guard member.requestsTransactionHandling else { return }
-        throw SirosError.transactionData(TransactionDataError(
-            .disabled, detail: "sign_presentation carries transaction_data and TS12 handling is not in effect"
-        ))
     }
 
     /// Builds a single credential's VP-token part - ZK-wrapped mdoc, plain
@@ -827,8 +887,14 @@ extension SirosWallet {
         matchResult: CredentialMatcher.MatchResult?,
         nonce: String,
         audience: String,
-        msg: SignRequestMessage
+        msg: SignRequestMessage,
+        transactionData: TransactionDataBinding? = nil,
+        transactionKid: String? = nil
     ) async throws -> String {
+        if transactionData != nil, cred.format == "mso_mdoc" || matchResult?.format.map(CredentialUtils.isZkpFormat) == true {
+            // The pipeline refuses non-SD-JWT credentials before this point.
+            throw SirosError.transactionData(TransactionDataError(.unsupportedFormat))
+        }
         if let format = matchResult?.format, CredentialUtils.isZkpFormat(format) {
             // ZK-wrapped mDoc presentation - see handleDCAPIRequest's
             // identical branch, which this mirrors for the WS-engine/
@@ -920,6 +986,16 @@ extension SirosWallet {
                 .replacingOccurrences(of: "=", with: "")
         } else {
             // SD-JWT VP token with KB-JWT
+            if let transactionData {
+                return try await keystore.signVpToken(
+                    credential: cred.raw,
+                    disclosedClaims: ref.disclosedClaims,
+                    nonce: nonce,
+                    audience: audience,
+                    transactionData: transactionData,
+                    kid: transactionKid ?? cred.kid
+                )
+            }
             return try await keystore.signVpToken(
                 credential: cred.raw,
                 disclosedClaims: ref.disclosedClaims,
@@ -1229,7 +1305,8 @@ extension SirosWallet {
     /// handleSignRequest proceeded to sign and send the VP token regardless,
     /// defeating the audience-binding protection this function's name
     /// implies it provides.
-    private func validateAudience(flowId: String, audience: String) throws {
+    @discardableResult
+    private func validateAudience(flowId: String, audience: String) throws -> TrustResult? {
         lock.lock()
         // Consume (remove) the entry here, at actual point of use, instead
         // of at credential-selection time - see `handleMatchRequest`'s
@@ -1237,10 +1314,11 @@ extension SirosWallet {
         let trustResult = lastTrustResults.removeValue(forKey: flowId)
         lock.unlock()
 
-        guard let trustResult, let expectedId = trustResult.identifier else { return }
+        guard let trustResult, let expectedId = trustResult.identifier else { return trustResult }
         if !audience.isEmpty && !expectedId.isEmpty && audience != expectedId {
             throw SirosError.wallet(message: "Audience mismatch for flow \(flowId): sign_request audience='\(audience)' != trusted identifier='\(expectedId)'")
         }
+        return trustResult
     }
 
     /// Report a flow-terminating failure immediately (e.g. a keystore/WSCD
@@ -1253,12 +1331,13 @@ extension SirosWallet {
     /// handleSignRequest's catch block previously only logged
     /// (logger.error), so the engine waited indefinitely for a sign_response
     /// that would never arrive.
-    private func reportSignFailure(flowId: String, message: String) {
+    private func reportSignFailure(flowId: String, message: String, notifyError: Bool = true) {
         lock.lock()
         let listener = eventListener
         pendingMatchResultsByFlow.removeValue(forKey: flowId)
+        legacyFlowSnapshots.removeValue(forKey: flowId)
         lock.unlock()
-        listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil)
+        if notifyError { listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil) }
 
         // A terminal path for whatever issuance may have been in flight - a
         // no-op for a presentation sign-request failure, which never sets
@@ -1277,11 +1356,25 @@ extension SirosWallet {
         }
     }
 
-    private func handleFlowError(msg: FlowErrorMessage) {
+    /// A transaction waiting for the user belongs to its flow: once the flow
+    /// has ended (error or completion) it must not go on to sign or record a
+    /// consented outcome for a flow that no longer exists.
+    func cancelTransactionTasks(flowId: String) {
+        lock.lock()
+        flowEndSeq[flowId, default: 0] += 1      // a task for this flow still being registered sees that it ended
+        let doomed = transactionTasks.filter { $0.value.flowId == flowId }
+        for key in doomed.keys { transactionTasks.removeValue(forKey: key) }
+        lock.unlock()
+        for entry in doomed.values { entry.cancel() }
+    }
+
+    func handleFlowError(msg: FlowErrorMessage) {
         let fid = msg.flowId ?? "unknown"
+        cancelTransactionTasks(flowId: fid)
         lock.lock()
         let listener = eventListener
         pendingMatchResultsByFlow.removeValue(forKey: fid)
+        legacyFlowSnapshots.removeValue(forKey: fid)
         lock.unlock()
         let redirectUri = msg.error.details?["redirect_uri"]?.stringValue
         // This one error's details name the credential the user is missing, so

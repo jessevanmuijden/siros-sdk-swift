@@ -50,6 +50,10 @@ final class TransactionDataWalletFlagTests: XCTestCase {
         func getPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput { throw E() }
     }
 
+    private final class StubHandler: TransactionConsentHandler, @unchecked Sendable {
+        func confirm(_ request: TransactionConsentRequest) async throws -> Bool { false }
+    }
+
     private func makeWallet(enabled: Bool = false) -> SirosWallet {
         SirosWallet(
             config: WalletConfig(backendUrl: "https://w.example.invalid", credentialStore: InMemoryCredentialStore(), transactionDataEnabled: enabled),
@@ -75,7 +79,7 @@ final class TransactionDataWalletFlagTests: XCTestCase {
 
     func testFlagAndHandlerDeclareBothTransports() {
         let w = makeWallet(enabled: true)
-        w.transactionConsentHandlerRegistered = true
+        w.transactionConsentHandler = StubHandler()
         XCTAssertEqual(w.transactionDataEngineFeatures, ["transaction_data.v1"])
         XCTAssertNotNil(w.transactionDataWmpCapabilities?["transaction_data"])
         w.transactionDataEnabled = false
@@ -94,20 +98,6 @@ final class TransactionDataWalletFlagTests: XCTestCase {
             XCTFail("must refuse")
         } catch SirosError.transactionData(let e) {
             XCTAssertEqual(e.verifierErrorCode, "invalid_transaction_data")
-        }
-    }
-
-    func testDCAPIRefusesEvenWhenFlagAndHandlerAreSetUntilThePipelineExists() async throws {
-        let wallet = makeWallet(enabled: true)
-        wallet.transactionConsentHandlerRegistered = true
-        let obj: [String: Any] = ["requests": [["protocol": "openid4vp-v1-unsigned", "data": [
-            "nonce": "n", "transaction_data": ["abc"],
-        ]]]]
-        let json = String(decoding: try JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
-        do {
-            _ = try await wallet.handleDCAPIRequest(rawRequestJson: json, origin: "https://rp.example")
-            XCTFail("must refuse")
-        } catch SirosError.transactionData {
         }
     }
 }

@@ -64,10 +64,13 @@ public enum MigrationResult: Sendable {
 public struct SignerKeyInfo: Sendable, Equatable {
     public let keyId: String
     public let algorithm: String
+    /// The WSCD plugin holding the key (`softkey`, `r2ps`, `fido2`), when known.
+    public let pluginId: String?
 
-    public init(keyId: String, algorithm: String) {
+    public init(keyId: String, algorithm: String, pluginId: String? = nil) {
         self.keyId = keyId
         self.algorithm = algorithm
+        self.pluginId = pluginId
     }
 }
 

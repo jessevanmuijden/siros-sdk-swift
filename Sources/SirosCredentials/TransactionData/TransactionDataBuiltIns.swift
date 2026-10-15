@@ -33,6 +33,18 @@ public enum TransactionDataBuiltIns {
         }
     }
 
+    /// The name TS12 section 5.3 gives each built-in type in the transaction
+    /// log; the type URI itself for any other type.
+    public static func displayName(forType type: String) -> String {
+        switch type {
+        case paymentType: return "Payment Confirmation"
+        case loginRiskType: return "Login, Risk-based Authentication"
+        case accountAccessType: return "Payment Account Information Access"
+        case emandateType: return "E-mandate"
+        default: return type
+        }
+    }
+
     /// The payload schema of a built-in type, parsed once.
     public static func schema(forType type: String) -> JSONValue? {
         schemas[type]

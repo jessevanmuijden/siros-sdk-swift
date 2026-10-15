@@ -32,7 +32,7 @@ public enum TransactionDataHashing {
         return base64UrlEncode(digest)
     }
 
-    static func base64UrlEncode(_ data: Data) -> String {
+    public static func base64UrlEncode(_ data: Data) -> String {
         data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -41,7 +41,7 @@ public enum TransactionDataHashing {
 
     /// Strict base64url decode: only the URL-safe alphabet, optional trailing
     /// `=` padding, nothing else (no standard-alphabet `+` `/`, no whitespace).
-    static func base64UrlDecode(_ text: String) -> Data? {
+    public static func base64UrlDecode(_ text: String) -> Data? {
         var body = Substring(text)
         var padding = 0
         while body.last == "=" { body = body.dropLast(); padding += 1 }

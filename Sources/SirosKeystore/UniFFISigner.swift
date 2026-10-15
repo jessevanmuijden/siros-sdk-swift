@@ -182,7 +182,7 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     public func listKeys() async throws -> [SignerKeyInfo] {
         try await onFFIQueue {
             try self.ffi.listKeys().map {
-                SignerKeyInfo(keyId: $0.kid, algorithm: Self.algorithmToString($0.algorithm))
+                SignerKeyInfo(keyId: $0.kid, algorithm: Self.algorithmToString($0.algorithm), pluginId: $0.pluginId)
             }
         }
     }

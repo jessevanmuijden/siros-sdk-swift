@@ -74,6 +74,7 @@ extension SirosWallet {
         // credentials are still signable. A successful login() unlocks it
         // again as part of its normal path.
         keystore.lock()
+        resetDefaultTransactionLogStore()
         // Same account/session-boundary reasoning as `endSessionLocally()`
         // (review finding: this teardown used to skip it entirely) - a
         // cut-off is exactly the kind of event whose own likely CAUSE is a

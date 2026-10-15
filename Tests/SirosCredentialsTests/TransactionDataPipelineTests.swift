@@ -351,6 +351,14 @@ final class TransactionDataPipelineTests: XCTestCase {
         _ = try await TransactionDataPipeline(source: source(doc)).validate(request([.init(raw: entry())], credentials: [credential(pins: ["vct#integrity": pin])]))
     }
 
+    /// Which queries a transaction is bound to is read from the entries before validation.
+    func testBoundQueryIdsAreReadFromTheEntries() {
+        let a = raw(#"{"type":"urn:eudi:sca:payment:1","credential_ids":["pay","pay2"],"payload":{}}"#)
+        let b = raw(#"{"type":"urn:eudi:sca:payment:1","credential_ids":["other"],"payload":{}}"#)
+        XCTAssertEqual(TransactionDataPipeline.boundQueryIds(rawEntries: [a, b, "not-base64!", ""]), ["pay", "pay2", "other"])
+        XCTAssertEqual(TransactionDataPipeline.boundQueryIds(rawEntries: []), [])
+    }
+
     // MARK: - Step 5: type support
 
     func testUnknownTypeIsRefused() async {

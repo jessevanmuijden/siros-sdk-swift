@@ -486,11 +486,14 @@ public struct KeyInfo: Sendable, Equatable {
     public let keyId: String
     public let algorithm: String
     public let createdAt: Int64
+    /// The WSCD plugin holding the key, when known.
+    public let pluginId: String?
 
-    public init(keyId: String, algorithm: String, createdAt: Int64 = 0) {
+    public init(keyId: String, algorithm: String, createdAt: Int64 = 0, pluginId: String? = nil) {
         self.keyId = keyId
         self.algorithm = algorithm
         self.createdAt = createdAt
+        self.pluginId = pluginId
     }
 }
 
