@@ -42,7 +42,7 @@ private final class CountingSigner: Signer, @unchecked Sendable {
     func signForSca(keyId: String, payload: @escaping ([AuthenticationFactor]) throws -> Data) async throws -> SignerScaOutcome {
         try ScaSignFlow.run(
             pluginId: pluginId, capability: capability,
-            promptPin: { lock.lock(); _pinPrompts += 1; lock.unlock(); return pin },
+            promptPin: { lock.lock(); _pinPrompts += 1; lock.unlock(); return SecureBytes(pin) },
             payload: payload,
             sign: { _, _ in
                 lock.lock(); _signCount += 1; lock.unlock()

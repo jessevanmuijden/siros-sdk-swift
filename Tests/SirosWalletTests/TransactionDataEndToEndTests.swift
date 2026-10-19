@@ -28,7 +28,7 @@ private final class ZeroSigner: Signer, @unchecked Sendable {
     func authenticationCapability(keyId: String) async throws -> SignerFactorCapability { capability }
     func signForSca(keyId: String, payload: @escaping ([AuthenticationFactor]) throws -> Data) async throws -> SignerScaOutcome {
         try ScaSignFlow.run(
-            pluginId: "r2ps", capability: capability, promptPin: { if let e = self.scaError { throw e }; return Data("123456".utf8) }, payload: payload,
+            pluginId: "r2ps", capability: capability, promptPin: { if let e = self.scaError { throw e }; return SecureBytes(utf8: "123456") }, payload: payload,
             sign: { [applied] _, _ in
                 ScaSignReport(signature: Data(repeating: 2, count: 64), factors: applied,
                               satisfiesTwoCategories: Set(applied.map(\.category)).count >= 2, shortfall: nil)
@@ -1071,6 +1071,27 @@ final class TransactionDataEndToEndTests: XCTestCase {
         XCTAssertTrue(f.consent.requests.isEmpty, "refused before the user was asked, not after they consented")
     }
 
+    /// Gap 5 of #199: #198 normalised a cancelled PIN prompt to `declined`/`access_denied` on the
+    /// legacy engine transport (`testEngineAnswersAtOnceWhenTheUserCancelsThePin` above) - this
+    /// confirms the WMP transport already gets the SAME mapping, not a generic signing failure,
+    /// through the one shared `TransactionDataPlan`/`SirosError.transactionData` plumbing both
+    /// transports call into (`WmpErrorCodeProviding.wmpErrorCode` -> `verifierErrorCode`, read by
+    /// `OpenID4xProfile.handleSignRequest`'s catch block).
+    func testWmpAnswersCleanlyWhenTheUserCancelsThePin() async throws {
+        let f = try await fixture()
+        f.keystore.signer.scaError = TransactionDataError(.declined, detail: "the user cancelled the authentication")
+        do {
+            _ = try await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams())
+            XCTFail("must not produce a token")
+        } catch SirosError.transactionData(let e) {
+            XCTAssertEqual(e.reason, .declined)
+            XCTAssertEqual(e.verifierErrorCode, "access_denied", "the WMP wire code a cancelled PIN prompt gets, same as any other decline")
+        }
+        let log = await f.wallet.transactionLog()
+        XCTAssertEqual(log.first?.outcome, .declined, "cancelling the PIN prompt is logged as a decline, not a refusal")
+        XCTAssertNil(log.first?.reason)
+    }
+
     func testWmpRefusesACombinedPresentation() async throws {
         let f = try await fixture()
         let refs = #"[{"credential_query_id":"pay","credential_id":"1"},{"credential_query_id":"age","credential_id":"2"}]"#
@@ -1139,6 +1160,28 @@ final class TransactionDataEndToEndTests: XCTestCase {
         let f = try await fixture(format: "mso_mdoc")
         let req = #"{"requests":[{"protocol":"openid4vp-v1-unsigned","data":{"nonce":"n","response_mode":"dc_api","transaction_data":["\#(raw)"],"dcql_query":{"credentials":[{"id":"pay","format":"mso_mdoc"}]}}}]}"#
         do { _ = try await f.wallet.handleDCAPIRequest(rawRequestJson: req, origin: "https://shop.example"); XCTFail() } catch SirosError.transactionData {}
+    }
+
+    /// Gap 5 of #199, DC API side: `handleDCAPIRequest` has no network transport of its own inside
+    /// this SDK (the OS/browser delivers whatever is thrown here to the relying party) - the mapping
+    /// it owns is throwing the real, unwrapped `SirosError.transactionData(.declined)` rather than a
+    /// generic failure, exactly like the engine and WMP paths, so a host app can render a clean
+    /// decline instead of an error. `signTransactionVpToken` rewraps `TransactionDataError` as
+    /// `SirosError.transactionData` without flattening the reason (see
+    /// `SirosWallet+TransactionData.swift`), and `dcapiSignTokens`'s loop does not catch in between.
+    func testDcApiAnswersCleanlyWhenTheUserCancelsThePin() async throws {
+        let f = try await fixture()
+        f.keystore.signer.scaError = TransactionDataError(.declined, detail: "the user cancelled the authentication")
+        do {
+            _ = try await f.wallet.handleDCAPIRequest(rawRequestJson: dcapiRequest(transactionData: #"["\#(raw)"]"#), origin: "https://shop.example")
+            XCTFail("must not produce a token")
+        } catch SirosError.transactionData(let e) {
+            XCTAssertEqual(e.reason, .declined)
+            XCTAssertEqual(e.verifierErrorCode, "access_denied")
+        }
+        let log = await f.wallet.transactionLog()
+        XCTAssertEqual(log.first?.outcome, .declined, "cancelling the PIN prompt is logged as a decline, not a refusal")
+        XCTAssertNil(log.first?.reason)
     }
 }
 #endif
