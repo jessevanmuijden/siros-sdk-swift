@@ -529,6 +529,13 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// `FlowStartMessage.dpopKeyId` on renewal.
     public var dpopKeyId: String?
     public var timestamp: String?
+    /// The issuer's response-level `credential_metadata` (OpenID4VCI 1.1), relayed verbatim.
+    /// May carry a delivered secret: never log or print it (its description is redacted).
+    /// A value that is not a JSON object decodes as a malformed placeholder, never an error.
+    public var credentialMetadata: CredentialResponseMetadata?
+    /// Set by the engine only when `credentialMetadata` is present and the issuer's response
+    /// was JWE-decrypted. A delivered secret is refused unless this is true.
+    public var credentialMetadataEncryptedResponse: LenientFlag?
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp
@@ -540,6 +547,8 @@ public struct FlowCompleteMessage: Codable, Sendable {
         case refreshToken = "refresh_token"
         case dpopJwk = "dpop_jwk"
         case dpopKeyId = "dpop_key_id"
+        case credentialMetadata = "credential_metadata"
+        case credentialMetadataEncryptedResponse = "credential_metadata_encrypted_response"
     }
 }
 

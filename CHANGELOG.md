@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Transport: the issuer's response-level `credential_metadata` on both transports,
+  and the WMP replay marker.** `FlowCompleteMessage` (engine) and the new
+  `WmpFlowCompleteResult` (`wmp.flow.complete`) carry `credentialMetadata`
+  (`CredentialResponseMetadata`: the object verbatim, unknown members intact, a
+  non-object becomes a malformed placeholder instead of failing the frame, so
+  an issuance is refused rather than left hanging) and
+  `credentialMetadataEncryptedResponse` (a lenient flag, never true by
+  accident). The metadata may hold a delivered secret: its `description`,
+  `debugDescription` and mirror are redacted and it encodes as `null`. A
+  replayed `wmp.flow.complete` lists what it withheld in `redacted_members`
+  (`RedactedMembers`); `credentialMetadataWithheld` and `renewalMaterialWithheld`
+  say whether a seed or the renewal material (`refresh_token`, `dpop_jwk`,
+  `dpop_key_id`) is not recoverable. Decoding only: the wallet checks and
+  storage follow.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
