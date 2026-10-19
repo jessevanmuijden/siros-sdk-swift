@@ -1,0 +1,1752 @@
+{
+  "status": "self-generated, not yet cross-checked with the circuit developers",
+  "rulebook": "nym_auth v0.3, satisfiability rules (query structure, pseudonym and age_check functions)",
+  "generator": "tools/gen_circuit_zk_validator_vectors.py",
+  "cases": [
+    {
+      "name": "ok: known-offender ssc, x509_san_dns",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: known-offender psc, semantic",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-psc",
+              "verifier_id_type": "semantic"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: account-recovery with context",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "acct-1"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: xsite has no verifier_id_type",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "user-managed-pseudonym-xsite-ssc"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: pseudonym and age_check together",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: explicit holder binding true",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          },
+          "require_cryptographic_holder_binding": true
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: two pseudonym items",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "a",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "b",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "pseudonym-count"
+      }
+    },
+    {
+      "name": "fail: two age_check items",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "b",
+            "params": {
+              "le": "2020-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-count"
+      }
+    },
+    {
+      "name": "fail: vct_values is reserved",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "vct_values": [
+              "urn:x"
+            ]
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "meta-vct-values-reserved"
+      }
+    },
+    {
+      "name": "fail: holder binding is the string 'true'",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          },
+          "require_cryptographic_holder_binding": "true"
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "holder-binding-false"
+      }
+    },
+    {
+      "name": "fail: holder binding is a number",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          },
+          "require_cryptographic_holder_binding": 1
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "holder-binding-false"
+      }
+    },
+    {
+      "name": "fail: holder binding false",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          },
+          "require_cryptographic_holder_binding": false
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "holder-binding-false"
+      }
+    },
+    {
+      "name": "fail: unknown function id",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "future_fn",
+            "handle": "f",
+            "params": {}
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "unknown-function"
+      }
+    },
+    {
+      "name": "fail: unknown function next to a known one",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "future_fn",
+            "handle": "f",
+            "params": {}
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "unknown-function"
+      }
+    },
+    {
+      "name": "fail: circuit declares functions and lacks age_check",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "options": {
+        "circuits": [
+          {
+            "system": "sys",
+            "circuit_id": "c1",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ],
+            "functions": [
+              "pseudonym-v1-sha256"
+            ]
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "function-not-declared"
+      }
+    },
+    {
+      "name": "ok: circuit declares all the functions",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "options": {
+        "circuits": [
+          {
+            "system": "sys",
+            "circuit_id": "c1",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ],
+            "functions": [
+              "pseudonym-v1-sha256",
+              "age_check"
+            ]
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: circuit declares no functions, so no function filtering",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "options": {
+        "circuits": [
+          {
+            "system": "sys",
+            "circuit_id": "c1",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ]
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: no fitting circuit is the matcher's business, not this rule's",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "options": {
+        "circuits": [
+          {
+            "system": "sys",
+            "circuit_id": "c1",
+            "doc_types": [
+              "other"
+            ],
+            "functions": []
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: another circuit declares the function",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "options": {
+        "circuits": [
+          {
+            "system": "sys",
+            "circuit_id": "c1",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ],
+            "functions": [
+              "pseudonym-v1-sha256"
+            ]
+          },
+          {
+            "system": "sys",
+            "circuit_id": "c2",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ],
+            "functions": [
+              "pseudonym-v1-sha256",
+              "age_check"
+            ]
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: circuit_filter narrows to the circuit lacking the function",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          },
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ],
+        "circuit_filter": [
+          {
+            "system": "sys",
+            "circuit_id": "c1"
+          }
+        ]
+      },
+      "options": {
+        "circuits": [
+          {
+            "system": "sys",
+            "circuit_id": "c1",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ],
+            "functions": [
+              "pseudonym-v1-sha256"
+            ]
+          },
+          {
+            "system": "sys",
+            "circuit_id": "c2",
+            "doc_types": [
+              "eu.europa.ec.eudi.nym_auth.1"
+            ],
+            "functions": [
+              "pseudonym-v1-sha256",
+              "age_check"
+            ]
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "function-not-declared"
+      }
+    },
+    {
+      "name": "fail: unsupported config",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "made-up-config",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "pseudonym-config-unsupported"
+      }
+    },
+    {
+      "name": "fail: config missing",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "pseudonym-config-unsupported"
+      }
+    },
+    {
+      "name": "fail: config not a string",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": 5,
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "pseudonym-config-unsupported"
+      }
+    },
+    {
+      "name": "fail: account-recovery without verifier_context",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-required"
+      }
+    },
+    {
+      "name": "fail: verifier_context on known-offender",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "c"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-forbidden"
+      }
+    },
+    {
+      "name": "fail: verifier_context on xsite",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "user-managed-pseudonym-xsite-ssc",
+              "verifier_context": "c"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-forbidden"
+      }
+    },
+    {
+      "name": "fail: empty verifier_context",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": ""
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-length"
+      }
+    },
+    {
+      "name": "ok: 1-byte verifier_context",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "c"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: 64-byte verifier_context",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: 65-byte verifier_context",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-length"
+      }
+    },
+    {
+      "name": "ok: 16 four-byte characters are 64 bytes",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: 17 four-byte characters are 68 bytes (17 characters)",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-length"
+      }
+    },
+    {
+      "name": "ok: 32 two-byte characters are 64 bytes",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "åååååååååååååååååååååååååååååååå"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: 33 two-byte characters are 66 bytes (33 characters)",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": "ååååååååååååååååååååååååååååååååå"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-length"
+      }
+    },
+    {
+      "name": "fail: verifier_context not a string",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_id_type": "x509_san_dns",
+              "verifier_context": 7
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "verifier-context-length"
+      }
+    },
+    {
+      "name": "ok: known-offender without verifier_id_type",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: account-recovery without verifier_id_type",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "account-recovery-ssc",
+              "verifier_context": "c"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: legacy verifier_id_type is accepted and ignored (xsite, which has no verifier input)",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "user-managed-pseudonym-xsite-ssc",
+              "verifier_id_type": "semantic"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: legacy verifier_id_type of an unknown value is ignored",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": "x509_hash"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: legacy verifier_id_type that is not a string is ignored",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc",
+              "verifier_id_type": 1
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: age_check with no bounds",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {}
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-no-bounds"
+      }
+    },
+    {
+      "name": "ok: ge only",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: le only",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: le before ge",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2001-01-02",
+              "le": "2001-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-le-before-ge"
+      }
+    },
+    {
+      "name": "fail: le before ge by a year",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2020-01-01",
+              "le": "2019-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-le-before-ge"
+      }
+    },
+    {
+      "name": "fail: le == ge is a one-day span",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2001-01-01",
+              "le": "2001-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-span-short"
+      }
+    },
+    {
+      "name": "fail: 364-day span",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2001-01-01",
+              "le": "2001-12-30"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-span-short"
+      }
+    },
+    {
+      "name": "ok: 365-day span",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2001-01-01",
+              "le": "2001-12-31"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: 366-day span",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2001-01-01",
+              "le": "2002-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: 364 days inside a non-leap year (Jan 1 to Dec 30)",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2023-01-01",
+              "le": "2023-12-30"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-span-short"
+      }
+    },
+    {
+      "name": "ok: Jan 1 to Dec 31 of a non-leap year is 365 days",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2023-01-01",
+              "le": "2023-12-31"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: leap year Jan 1 to Dec 30 is 365 days, so Jan 1 to Dec 29 is 364",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2024-01-01",
+              "le": "2024-12-29"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-span-short"
+      }
+    },
+    {
+      "name": "ok: leap year Jan 1 to Dec 30 is 365 days",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2024-01-01",
+              "le": "2024-12-30"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: across Feb 29, 2023-03-01 to 2024-02-28 is 365 days minus one (364)",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2023-03-01",
+              "le": "2024-02-27"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-span-short"
+      }
+    },
+    {
+      "name": "ok: across Feb 29, 2023-03-01 to 2024-02-28 is 365 days",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2023-03-01",
+              "le": "2024-02-28"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: across Feb 29, 2024-03-01 to 2025-02-27 is 364 days",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2024-03-01",
+              "le": "2025-02-27"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-span-short"
+      }
+    },
+    {
+      "name": "ok: across Feb 29, 2024-03-01 to 2025-02-28 is 365 days",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2024-03-01",
+              "le": "2025-02-28"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "ok: a long range",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "1900-01-01",
+              "le": "2100-12-31"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "ok": true
+      }
+    },
+    {
+      "name": "fail: ge is not a full-date",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-1-1"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-bad-date"
+      }
+    },
+    {
+      "name": "fail: le is not a calendar date",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2001-02-30"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-bad-date"
+      }
+    },
+    {
+      "name": "fail: ge is a date-time",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01T00:00:00Z"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-bad-date"
+      }
+    },
+    {
+      "name": "fail: ge has an expanded year",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "+02000-01-01"
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-bad-date"
+      }
+    },
+    {
+      "name": "fail: ge is a number",
+      "plan": {
+        "query": {
+          "id": "nym",
+          "format": "circuit_zk",
+          "meta": {
+            "doctype_value": "eu.europa.ec.eudi.nym_auth.1"
+          }
+        },
+        "functions": [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": 20000101
+            }
+          }
+        ]
+      },
+      "verdict": {
+        "access_denied": "age-check-bad-date"
+      }
+    }
+  ]
+}

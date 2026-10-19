@@ -26,6 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
   byte-for-byte from siros-sdk-kotlin: 62 consent cases, 17 merge cases, 22
   pre-check cases). Not wired into the wallet yet.
+- **`RulebookCircuitZkValidator`: the wallet-side satisfiability rules for a
+  planned `circuit_zk` request (nym_auth rulebook v0.3), data-driven.** Plain-data
+  plan/circuit types (`CircuitZkPlan`, `CircuitZkFunction`, `CircuitZkCircuit`,
+  `CircuitZkCircuitFilter`, `CircuitZkCircuitSource`), `CircuitZkRuleSet` (new
+  functions and pseudonym configs are entries, not code) and
+  `CircuitZkVerdict`. Every failure is `accessDenied`; the rule id is for local
+  logs and tests and never reaches the verifier. A `verifier_id_type` member in a
+  pseudonym item is accepted and ignored. Tested against the 63 shared
+  `circuit-zk-validator-vectors.json` cases (byte-for-byte copy from
+  siros-sdk-kotlin). Platform-neutral (also builds and tests on Linux).
+- **`circuit_zk` consent model: `PresentationConsentHandler`,
+  `PresentationConsentRequest` and `PresentationConsentBuilder`.** The
+  locale-free request a user approves before anything is signed or proved
+  (items `pseudonym`, `ageRange`, `claim`, `legacyPseudonym`, per credential,
+  with the verifier label and, for hosts and tests only, the trust framework
+  and `verifier_id_type`). The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`,
+  a throw or a timeout is a decline, and with no handler a `circuit_zk` request
+  is refused. `PresentationConsentRequest.shortened(verifierId:)` is the
+  display shortening. The builder is tested against the shared
+  `circuit-zk-consent-vectors.json` (copied byte-for-byte from siros-sdk-kotlin,
+  32 cases). Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob

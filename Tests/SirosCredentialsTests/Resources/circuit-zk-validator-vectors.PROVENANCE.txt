@@ -1,0 +1,6 @@
+circuit-zk-validator-vectors.json (and .md) are VERBATIM copies of spec/ in
+sirosfoundation/siros-sdk-kotlin, branch feat/nym-pseudonym-derivation, head f8f71f9
+(last changed by ffda39f). Never edit by hand; re-copy and update the hash in
+RulebookCircuitZkValidatorTests when Kotlin changes them.
+
+  sha256 (json): c75b6e57e70147a0a5184cb35ffaeb32e48bb39989be1b87ce81b6c9d64cda67
