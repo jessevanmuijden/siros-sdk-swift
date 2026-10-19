@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.10.0.** Regenerated
+  `Generated/siros_dc_matcher_ffi.swift` from the v0.10.0 tag (keeping the
+  `#if os(iOS)` gate) and updated the `Package.swift` checksum. The FFI gains
+  `FfiCapability`/`addCircuitZkSystem` (the `circuit_zk` capability match),
+  `FfiMatchedCredentialSet.purposes` and `droppedIsExact`; nothing in this SDK
+  calls them yet. No behaviour change for DCQL matching: the iOS simulator
+  `CredentialMatcherTests` give the same result before and after (4 failures,
+  pre-existing on 0.6.2).
+
 ### Added
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,

@@ -89,8 +89,8 @@ let package = Package(
         // Headers/module.modulemap.
         .binaryTarget(
             name: "siros_dc_matcher_ffiFFI",
-            url: "https://github.com/sirosfoundation/siros-dc-matcher/releases/download/v0.6.2/siros_dc_matcher_ffi.xcframework.zip",
-            checksum: "319c9b1979c42a3569ef9d413d013729f81dc39560f61a0471e19f38123c389c"
+            url: "https://github.com/sirosfoundation/siros-dc-matcher/releases/download/v0.10.0/siros_dc_matcher_ffi.xcframework.zip",
+            checksum: "a1da62f260b9ba81963ad7406846d9c9cc6de3c3f76eeb4a3c0e712fa46288df"
         ),
 
         // --- zk-cred-vega UniFFI bindings (XCFramework) ---
