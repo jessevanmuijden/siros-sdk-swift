@@ -89,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display shortening. The builder is tested against the shared
   `circuit-zk-consent-vectors.json` (copied byte-for-byte from siros-sdk-kotlin,
   32 cases). Not wired into the wallet yet.
+  different number of lookups than functions is false; float operands must be finite
+  and exact. `requestSigned` is a required argument (the signature result, never
+  defaulted) and an empty query list is refused. Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob

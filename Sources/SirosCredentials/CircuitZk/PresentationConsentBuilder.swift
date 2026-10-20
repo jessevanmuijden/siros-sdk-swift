@@ -48,7 +48,8 @@ public enum PresentationConsentBuilder {
     ///   - verifiedClientIdDisplayName: the display name of the client id of a SIGNED request;
     ///     nil for an unsigned one (its client id is unauthenticated).
     ///   - verifierId: what the wallet resolved; used only for pseudonyms.
-    ///   - requestSigned: whether the request was signed.
+    ///   - requestSigned: the result of the request's signature verification. Required: it is
+    ///     the authentication status hosts show, so it is never defaulted.
     ///   - today: `YYYY-MM-DD`, the date the age maths use.
     public static func build(
         queries: [CircuitZkConsentQuery],
@@ -58,10 +59,11 @@ public enum PresentationConsentBuilder {
         attestedOrigin: String,
         verifierId: String?,
         verifierIdType: String?,
-        requestSigned: Bool = true,
+        requestSigned: Bool,
         today: String
     ) -> PresentationConsentRequest? {
-        guard let todayDate = CivilDate(today) else { return nil }
+        // Nothing to ask: refused, never an empty consent.
+        guard !queries.isEmpty, let todayDate = CivilDate(today) else { return nil }
         var entries: [PresentationConsentEntry] = []
         var wantsVerifierId = false
         for query in queries {

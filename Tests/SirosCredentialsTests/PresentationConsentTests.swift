@@ -172,6 +172,16 @@ final class PresentationConsentTests: XCTestCase {
         // Exact width 10 - 1e-100 is below 10, but Decimal would round it to 10 and accept.
         let plans = [[n(["ge": try parse("1e-100")])], [n(["le": .int(10)])]]
         XCTAssertFalse(numbers.combinedBoundsOk(plans: plans))
+        // Exact widths that a worst-case digit estimate would wrongly refuse (Copilot review).
+        let big = "10000000000000000000000000000000000000"          // 10^37, 38 digits
+        let bigPlus10 = "10000000000000000000000000000000000010"
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": try parse(big)])], [n(["le": try parse(bigPlus10)])]]), "width exactly 10")
+        let bigPlus9 = "10000000000000000000000000000000000009"
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": try parse(big)])], [n(["le": try parse(bigPlus9)])]]), "width 9 is below the minimum")
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": .int(0)])], [n(["le": try parse("1e100")])]]), "exactly representable huge width")
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": try parse("-5")])], [n(["le": .int(5)])]]), "negative lower bound: width 10")
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": try parse("-4")])], [n(["le": .int(5)])]]), "width 9")
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": .int(11)])], [n(["le": .int(0)])]]), "upper below lower")
         // A plain wide range still passes.
         XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": .int(0)])], [n(["le": .int(10)])]]))
     }
@@ -183,6 +193,30 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertTrue(numbers.precheck(functions: [f], lookups: [.unsupported]))
     }
 
+    func testRequestSignedIsCarriedAndAnEmptyQueryListIsRefused() throws {
+        let query = CircuitZkConsentQuery(
+            plan: [CircuitZkFunction(id: "age_check", handle: "a", params: ["le": .string("2008-10-19")])],
+            credential: PresentationConsentCredential(name: nil, issuer: nil))
+        func build(_ queries: [CircuitZkConsentQuery], signed: Bool) -> PresentationConsentRequest? {
+            PresentationConsentBuilder.build(
+                queries: queries, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+                verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil,
+                requestSigned: signed, today: "2026-10-19")
+        }
+        XCTAssertEqual(build([query], signed: false)?.requestSigned, false)
+        XCTAssertEqual(build([query], signed: true)?.requestSigned, true)
+        XCTAssertNil(build([], signed: true), "nothing to ask is refused, not an empty consent")
+    }
+
+    func testFloatOperandsMustBeFiniteExactNumbers() {
+        let fn = numbers["n"]!
+        XCTAssertNil(fn.parse(n(["ge": .double(.nan)])))
+        XCTAssertNil(fn.parse(n(["ge": .double(.infinity)])))
+        XCTAssertNil(fn.parse(n(["ge": .double(1e200)])), "outside Decimal's range: refused, not compared")
+        XCTAssertNotNil(fn.parse(n(["ge": .double(2.5)])))
+        XCTAssertFalse(numbers.precheck(functions: [n(["ge": .double(.nan)])], lookups: [.unsupported]), "an unsupported lookup must not wave an invalid operand through")
+    }
+
     func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
         XCTAssertNotNil(PredicateFunctions.default["age_check"])
         XCTAssertNil(PredicateFunctions.default["number_range"])
@@ -191,7 +225,7 @@ final class PresentationConsentTests: XCTestCase {
             credential: PresentationConsentCredential(name: nil, issuer: nil))
         XCTAssertNil(PresentationConsentBuilder.build(
             queries: [unknown], trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
-            verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil, today: "2026-10-19"),
+            verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil, requestSigned: true, today: "2026-10-19"),
             "a function the registry does not declare is refused before consent")
     }
 
@@ -224,7 +258,8 @@ final class PresentationConsentTests: XCTestCase {
                 identifier: trust["identifier"]?.stringValue, intermediaryRisk: trust["intermediary_risk"] == .bool(true)),
             verifiedClientIdDisplayName: input["verified_client_id_display_name"]?.stringValue,
             attestedOrigin: try XCTUnwrap(input["attested_origin"]?.stringValue),
-            verifierId: input["verifier_id"]?.stringValue, verifierIdType: input["verifier_id_type"]?.stringValue, today: today)
+            verifierId: input["verifier_id"]?.stringValue, verifierIdType: input["verifier_id_type"]?.stringValue,
+            requestSigned: true, today: today)
     }
 
     private static func expectedRequest(_ request: [String: JSONValue]) throws -> PresentationConsentRequest {
