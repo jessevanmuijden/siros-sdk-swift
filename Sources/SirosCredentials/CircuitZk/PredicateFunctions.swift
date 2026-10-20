@@ -112,7 +112,9 @@ extension PredicateFunction {
                 let values = items.map { PredicateOperand.text(of: $0, as: valueType) }
                 guard values.allSatisfy({ $0 != nil }) else { return nil }
                 let texts = values.compactMap { $0 }
-                guard Set(texts).count == texts.count else { return nil }
+                // Duplicates are judged by VALUE (1, 1.0 and 1e0 are one number), not by spelling.
+                let keys = texts.map { PredicateOperand.canonicalKey($0, as: valueType) }
+                guard keys.allSatisfy({ $0 != nil }), Set(keys.compactMap { $0 }).count == texts.count else { return nil }
                 conditions.append(PredicateCondition(op: .in, values: texts))
             } else {
                 guard let text = PredicateOperand.text(of: raw, as: valueType) else { return nil }
@@ -138,7 +140,7 @@ enum PredicateOperand {
         case .number:
             switch value {
             case .int(let integer): return String(integer)
-            case .decimal(let text): return text
+            case .decimal(let text): return decimal(text) == nil ? nil : text // not exactly representable: refused
             case .double(let number): return "\(number)"
             default: return nil
             }
@@ -147,11 +149,44 @@ enum PredicateOperand {
 
     private static let number = try? NSRegularExpression(pattern: "^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$")
 
-    /// A number operand or claim text as an exact decimal, or nil.
+    /// A number operand or claim text as an EXACT decimal, or nil: `Decimal` silently rounds
+    /// beyond 38 significant digits or out of its exponent range, and a rounded bound would
+    /// change a comparison or the merge check, so such a value is refused instead.
     static func decimal(_ text: String) -> Decimal? {
         let range = NSRange(text.startIndex..., in: text)
         guard number?.firstMatch(in: text, range: range) != nil else { return nil }
-        return Decimal(string: text, locale: Locale(identifier: "en_US_POSIX"))
+        return JSONValue.decimal(text).exactNumber
+    }
+
+    /// Whether `a - b` fits `Decimal`'s 38 significant digits exactly once both are aligned to the
+    /// smaller exponent (so the subtraction is neither rounded nor lossy). Both must be valid numbers.
+    static func differenceIsExact(_ a: String, _ b: String) -> Bool {
+        guard let left = scale(a), let right = scale(b) else { return false }
+        let exponent = min(left.exponent, right.exponent)
+        let digits = max(left.digits + (left.exponent - exponent), right.digits + (right.exponent - exponent))
+        return digits + 1 <= 38
+    }
+
+    /// The significant digits and the power of ten of a number text: value = coefficient * 10^exponent.
+    private static func scale(_ text: String) -> (digits: Int, exponent: Int)? {
+        let lower = text.lowercased()
+        let parts = lower.split(separator: "e", maxSplits: 1).map(String.init)
+        let mantissa = parts[0].hasPrefix("-") ? String(parts[0].dropFirst()) : parts[0]
+        guard let exponentPart = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
+        let pieces = mantissa.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        let fraction = pieces.count == 2 ? pieces[1] : ""
+        let coefficient = (pieces[0] + fraction).drop(while: { $0 == "0" })
+        return (coefficient.count, exponentPart - fraction.count)
+    }
+
+    /// A key that is equal exactly when the VALUES are equal: the exact decimal for a number,
+    /// the day number for a date, the text for the others. Nil when the text is not exact.
+    static func canonicalKey(_ text: String, as type: PredicateValueType) -> String? {
+        switch type {
+        case .number: return decimal(text).map { "\($0)" }
+        case .date: return CivilDate(text).map { String($0.daysSinceEpoch) }
+        case .string, .bool: return text
+        }
     }
 }
 
@@ -169,9 +204,12 @@ extension PredicateFunctions {
     /// The local satisfiability check, before anything is asked: false when the credential
     /// DEFINITELY does not satisfy a function (an absent claim, a type mismatch, a failed
     /// comparison, or params that are not valid for the function); true when every function holds
-    /// OR cannot be judged. `lookups[i]` is the lookup for `functions[i]`'s claim; an
-    /// `unsupported` one is skipped, not guessed.
+    /// OR cannot be judged. `lookups[i]` is the lookup for `functions[i]`'s claim (a different
+    /// count is false); an `unsupported` one is skipped, not guessed.
     public func precheck(functions: [CircuitZkFunction], lookups: [PredicateClaimLookup]) -> Bool {
+        // A missing lookup must not silently skip a function: callers pass `.unsupported` for a claim
+        // they cannot read.
+        guard functions.count == lookups.count else { return false }
         for (function, lookup) in zip(functions, lookups) {
             guard let registered = self[function.id], let parsed = registered.parse(function) else { return false }
             switch lookup {
@@ -230,6 +268,8 @@ extension PredicateFunctions {
         struct Group {
             var lower: Decimal?
             var upper: Decimal?
+            var lowerText = ""
+            var upperText = ""
             var minSpan = 0
             let type: PredicateValueType
         }
@@ -242,18 +282,29 @@ extension PredicateFunctions {
                 group.minSpan = max(group.minSpan, minSpan)
                 for condition in parsed.conditions {
                     guard let text = condition.values.first, let value = Self.ordinal(text, group.type) else { return false }
-                    if condition.op == .ge, group.lower.map({ value > $0 }) ?? true { group.lower = value }
-                    if condition.op == .le, group.upper.map({ value < $0 }) ?? true { group.upper = value }
+                    if condition.op == .ge, group.lower.map({ value > $0 }) ?? true { group.lower = value; group.lowerText = text }
+                    if condition.op == .le, group.upper.map({ value < $0 }) ?? true { group.upper = value; group.upperText = text }
                 }
                 groups[parsed.path] = group
             }
         }
         for group in groups.values {
             guard let lower = group.lower, let upper = group.upper else { continue }
-            let span = group.type == .date ? upper - lower + 1 : upper - lower
+            // Checked arithmetic: a width that cannot be computed exactly (loss of precision) is refused.
+            guard group.type == .date || PredicateOperand.differenceIsExact(group.upperText, group.lowerText),
+                  let width = Self.exactDifference(upper, lower) else { return false }
+            let span = group.type == .date ? width + 1 : width
             if span < Decimal(group.minSpan) { return false }
         }
         return true
+    }
+
+    /// `a - b`, or nil when the result is not exact.
+    private static func exactDifference(_ a: Decimal, _ b: Decimal) -> Decimal? {
+        var result = Decimal()
+        var left = a, right = b
+        guard NSDecimalSubtract(&result, &left, &right, .plain) == .noError else { return nil }
+        return result
     }
 
     /// A bound as a comparable number: days since the epoch for a date, the decimal itself for a number.
