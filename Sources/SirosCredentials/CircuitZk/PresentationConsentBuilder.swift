@@ -8,11 +8,18 @@ public struct CircuitZkConsentQuery: Sendable {
     public let plan: [CircuitZkFunction]
     public let credential: PresentationConsentCredential
     public let claims: [PresentationConsentClaimRef]
+    /// The credential's doctype namespace, when known: its claim metadata paths are `[namespace, element]`, so a
+    /// predicate on `score` is labelled by the entry `[namespace, "score"]`, never by another namespace's `score`.
+    public let namespace: String?
 
-    public init(plan: [CircuitZkFunction], credential: PresentationConsentCredential, claims: [PresentationConsentClaimRef] = []) {
+    public init(
+        plan: [CircuitZkFunction], credential: PresentationConsentCredential, claims: [PresentationConsentClaimRef] = [],
+        namespace: String? = nil
+    ) {
         self.plan = plan
         self.credential = credential
         self.claims = claims
+        self.namespace = namespace
     }
 }
 
@@ -120,16 +127,17 @@ public enum PresentationConsentBuilder {
                 }
             default:
                 guard let registered = functions[function.id], let parsed = registered.parse(function) else { return nil }
-                out.append(.predicate(predicate(registered, parsed, claims: query.claims, today: today)))
+                out.append(.predicate(predicate(registered, parsed, claims: query.claims, namespace: query.namespace, today: today)))
             }
         }
         return out.isEmpty ? nil : out
     }
 
     private static func predicate(
-        _ registered: PredicateFunction, _ parsed: ParsedPredicate, claims: [PresentationConsentClaimRef], today: CivilDate
+        _ registered: PredicateFunction, _ parsed: ParsedPredicate, claims: [PresentationConsentClaimRef], namespace: String?, today: CivilDate
     ) -> PresentationConsentPredicate {
-        let label = claims.first { $0.path == parsed.path }?.label
+        let metadataPath = (namespace.map { [$0] } ?? []) + parsed.path
+        let label = claims.first { $0.path == metadataPath }?.label
         let usable = label.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         return PresentationConsentPredicate(
             functionId: registered.id, claim: PresentationConsentClaimRef(path: parsed.path, label: usable),

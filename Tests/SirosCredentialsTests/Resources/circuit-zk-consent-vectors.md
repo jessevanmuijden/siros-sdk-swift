@@ -57,3 +57,16 @@ default dialog text.
 request together reveal the intersection of their age bounds (lower = latest `ge`, upper = earliest `le`),
 which must still span at least 365 days (`upper - lower + 1`), else the request is refused. An unreadable
 bound is not ok.
+
+A query may carry `namespace` (the credential's doctype namespace, when known): the credential's claim metadata paths are
+`[namespace, element]`, so a predicate on `score` is labelled by the entry `[namespace, "score"]`, never by another
+namespace's `score`. An item param `source` (`{"path": [claim]}`, the rulebook example) is accepted when it names the
+function's own claim, otherwise the request is refused.
+
+## Age wording and empty requests
+
+- A function declared `age_specialisation` renders as an age (`age_form`) ONLY when every condition of the request is a
+  single `ge` or `le` bound. If it also declares `eq` (or any other comparison) and the request uses it, `age_form` is null
+  and the generic wording states every comparison: the age wording says the exact birth date is not shared, which an `eq`
+  contradicts (registry entry `age_with_eq`).
+- A request with no query at all is refused (`expected: {"refused": true}`).
