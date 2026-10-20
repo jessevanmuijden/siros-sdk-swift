@@ -259,6 +259,45 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertNotNil(try predicate(["le": .string("2008-10-19")]).ageForm)
     }
 
+    func testTheAgeWordingIsDroppedWhenTheRequestRevealsTheBirthDateElsewhere() throws {
+        let registry = PredicateFunctions([
+            .ageCheck,
+            PredicateFunction(id: "date_compare", claim: .param, valueType: .date, comparisons: [.init(param: "eq", op: .eq)]),
+        ])
+        func age(_ extra: [CircuitZkFunction]) throws -> PresentationConsentPredicate {
+            let ageFn = CircuitZkFunction(id: "age_check", handle: "a", params: ["le": .string("2008-10-19")])
+            let query = CircuitZkConsentQuery(plan: [ageFn] + extra, credential: PresentationConsentCredential(name: nil, issuer: nil))
+            let request = try XCTUnwrap(PresentationConsentBuilder.build(
+                queries: [query], functions: registry, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+                verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil, requestSigned: true, today: "2026-10-19"))
+            guard case .predicate(let p) = request.entries[0].items[0] else { throw XCTSkip("not a predicate") }
+            return p
+        }
+        XCTAssertNotNil(try age([]).ageForm, "alone it is an age")
+        // a legacy disclosure of birth_date
+        let disclosure = CircuitZkFunction(id: "zk-claim-disclosure-v1", handle: "d", params: ["claims": .array([.string("birth_date")])])
+        XCTAssertNil(try age([disclosure]).ageForm)
+        // a separate equality on the same claim
+        let equality = CircuitZkFunction(id: "date_compare", handle: "e", params: ["claim": .string("birth_date"), "eq": .string("2000-01-01")])
+        XCTAssertNil(try age([equality]).ageForm)
+        // other claims do not matter
+        let other = CircuitZkFunction(id: "zk-claim-disclosure-v1", handle: "d", params: ["claims": .array([.string("family_name")])])
+        XCTAssertNotNil(try age([other]).ageForm)
+    }
+
+    func testTheCutoverDateIsNamedAsTheOperandNotNormalised() throws {
+        let item = PresentationConsentItem.predicate(PresentationConsentPredicate(
+            functionId: "x", claim: PresentationConsentClaimRef(path: ["d"], label: "D"), valueType: .date,
+            conditions: [PredicateCondition(op: .eq, values: ["1582-10-10"])], ageForm: nil))
+        let request = PresentationConsentRequest(
+            verifier: PresentationConsentVerifier(label: "x", trustFramework: nil, trustIdentifier: nil, verifierId: nil, verifierIdType: nil, intermediaryRisk: false),
+            entries: [PresentationConsentEntry(credential: PresentationConsentCredential(name: nil, issuer: nil), items: [item])], requestSigned: true)
+        let line = try PresentationConsentText(locale: Locale(identifier: "en")).render(request).entries[0].lines[0]
+        XCTAssertFalse(line.contains("20"), line)
+        XCTAssertTrue(line.contains("10"), line)
+        XCTAssertTrue(line.contains("1582"), line)
+    }
+
     func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
         XCTAssertNotNil(PredicateFunctions.default["age_check"])
         XCTAssertNil(PredicateFunctions.default["number_range"])
