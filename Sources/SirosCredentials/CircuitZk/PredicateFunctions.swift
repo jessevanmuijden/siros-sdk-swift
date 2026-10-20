@@ -141,7 +141,12 @@ enum PredicateOperand {
             switch value {
             case .int(let integer): return String(integer)
             case .decimal(let text): return decimal(text) == nil ? nil : text // not exactly representable: refused
-            case .double(let number): return "\(number)"
+            case .double(let number):
+                // A float scalar is text-converted, then validated like any other number (NaN, infinity
+                // and values Decimal cannot hold exactly are refused).
+                guard number.isFinite else { return nil }
+                let text = "\(number)"
+                return decimal(text) == nil ? nil : text
             default: return nil
             }
         }
