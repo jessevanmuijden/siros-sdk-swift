@@ -116,10 +116,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -182,10 +184,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-psc"
+                  "config": "known-offender-matching-psc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -248,10 +252,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               },
               {
@@ -362,10 +368,12 @@
                 }
               },
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -1187,10 +1195,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -1224,7 +1234,7 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
                   "config": "account-recovery-ssc",
@@ -1262,7 +1272,7 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
                   "config": "user-managed-pseudonym-xsite-ssc"
@@ -1299,7 +1309,7 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
                   "config": "known-offender-matching-ssc",
@@ -1337,7 +1347,7 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
                   "config": "nope"
@@ -1976,10 +1986,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2089,10 +2101,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2155,10 +2169,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2221,10 +2237,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2286,10 +2304,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2351,10 +2371,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2416,10 +2438,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -2482,10 +2506,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               }
             ],
@@ -4874,10 +4900,12 @@
           {
             "plan": [
               {
-                "id": "pseudonym-v1-sha256",
+                "id": "pseudonym",
                 "handle": "n",
                 "params": {
-                  "config": "known-offender-matching-ssc"
+                  "config": "known-offender-matching-ssc",
+                  "ver": 1,
+                  "prf": "sha-256"
                 }
               },
               {
@@ -5019,10 +5047,12 @@
       "plans": [
         [
           {
-            "id": "pseudonym-v1-sha256",
+            "id": "pseudonym",
             "handle": "n",
             "params": {
-              "config": "known-offender-matching-ssc"
+              "config": "known-offender-matching-ssc",
+              "ver": 1,
+              "prf": "sha-256"
             }
           }
         ]

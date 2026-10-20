@@ -11,7 +11,7 @@ import CryptoKit
 /// registry-driven local pre-check and the cross-query merge, against this SDK.
 final class PresentationConsentTests: XCTestCase {
 
-    private static let vectorsHash = "e58b2ad54b5f0c9242a90f56559e1e91adae51ec2587a43b2736fd74b0426d66"
+    private static let vectorsHash = "9693823c5cdd57750f58f9d9124c1c19f45280ca7a2d0973a4d52c53960a2fcf"
 
     private func vectors() throws -> [String: JSONValue] {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "circuit-zk-consent-vectors", withExtension: "json"))

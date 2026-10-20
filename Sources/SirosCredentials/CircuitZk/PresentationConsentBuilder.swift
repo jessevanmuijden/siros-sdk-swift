@@ -100,7 +100,7 @@ public enum PresentationConsentBuilder {
         "known-offender-matching-psc": (.perVerifier, false),
     ]
 
-    private static let pseudonymFunction = "pseudonym-v1-sha256"
+    private static let pseudonymFunction = "pseudonym"
     private static let legacyDisclosureFunction = "zk-claim-disclosure-v1"
 
     private static func items(
