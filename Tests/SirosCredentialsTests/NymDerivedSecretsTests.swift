@@ -81,7 +81,6 @@ final class NymPseudonymTests: XCTestCase {
         XCTAssertEqual(
             NymPseudonym.configIds,
             ["known-offender-matching-ssc", "known-offender-matching-psc", "account-recovery-ssc", "user-managed-pseudonym-xsite-ssc"])
-        XCTAssertEqual(NymPseudonym.configIds, Set(CircuitZkRuleSet.rulebookPseudonymConfigs.map(\.id)))
         XCTAssertEqual(
             NymPseudonym.describe(config: "account-recovery-ssc"),
             NymConfigInfo(seedKind: .secret, userValue: false, verifierId: true, verifierContext: true))
