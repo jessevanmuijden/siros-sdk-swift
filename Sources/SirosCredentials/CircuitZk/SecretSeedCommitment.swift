@@ -50,7 +50,8 @@ public enum SecretSeedCommitment {
 
     /// The `ssc` of a compact SD-JWT VC: its one top-level `ssc` disclosure, as 64 lowercase hex
     /// characters. Nil when there is no such disclosure, more than one, the claim is also present
-    /// in the clear, the disclosure is not referenced from the signed payload's top-level `_sd`,
+    /// in the clear, the disclosure is not referenced from the signed payload's top-level `_sd`
+    /// (a same-named claim in a nested object is ignored), `_sd_alg` is present and not `sha-256`,
     /// or the value is not 64 lowercase hex characters.
     public static func sscOfSdJwt(_ credential: String) -> [UInt8]? {
         let parts = credential.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
@@ -59,17 +60,24 @@ public enum SecretSeedCommitment {
         guard jwtParts.count > 1, let payloadData = base64UrlDecode(String(jwtParts[1])),
               let payload = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any],
               payload["ssc"] == nil else { return nil }
+        // Disclosure digests are SHA-256 here: a payload declaring any other `_sd_alg` is not bound under that
+        // hash, so it fails closed (an absent `_sd_alg` is the SHA-256 default).
+        if let algorithm = payload["_sd_alg"] {
+            guard let name = algorithm as? String, name == "sha-256" else { return nil }
+        }
+        let digests = Set((payload["_sd"] as? [Any])?.compactMap { $0 as? String } ?? [])
         var found: [(segment: String, value: String)] = []
         for segment in parts.dropFirst() where !segment.isEmpty {
             guard let data = base64UrlDecode(segment),
                   let array = (try? JSONSerialization.jsonObject(with: data)) as? [Any], array.count == 3,
-                  let name = array[1] as? String, name == "ssc" else { continue }
+                  let name = array[1] as? String, name == "ssc",
+                  // Only a disclosure the signed payload's TOP-LEVEL `_sd` references is the top-level claim; a same-named
+                  // claim inside a nested object's `_sd` is a different claim and is ignored.
+                  digests.contains(disclosureDigest(segment)) else { continue }
             guard let value = array[2] as? String else { return nil }
             found.append((segment, value))
         }
         guard found.count == 1, let only = found.first else { return nil }
-        let digests = (payload["_sd"] as? [Any])?.compactMap { $0 as? String } ?? []
-        guard digests.contains(disclosureDigest(only.segment)) else { return nil }
         guard isLowerHex(only.value, count: 2 * commitmentBytes) else { return nil }
         return bytes(fromLowerHex: only.value)
     }

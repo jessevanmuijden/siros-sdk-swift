@@ -267,6 +267,15 @@ final class SecretSeedCommitmentTests: XCTestCase {
         // not 64 lowercase hex
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [sscDisclosure(hexValue.uppercased())])))
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [sscDisclosure(String(hexValue.dropLast(2)))])))
+        // a same-named claim inside a nested object is a different claim: only the top-level one counts
+        let nested = sscDisclosure(String(repeating: "c", count: 64))
+        let nestedPayload = "{\"_sd\":[\"\(SecretSeedCommitment.disclosureDigest(good))\"],\"profile\":{\"_sd\":[\"\(SecretSeedCommitment.disclosureDigest(nested))\"]}}"
+        let withNested = ([b64url("{\"alg\":\"ES256\"}") + "." + b64url(nestedPayload) + ".sig", good, nested]).joined(separator: "~") + "~"
+        XCTAssertEqual(SecretSeedCommitment.sscOfSdJwt(withNested), sscBytes)
+        // the digest algorithm: absent or sha-256 only; anything else fails closed
+        XCTAssertEqual(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [good], payloadExtra: ",\"_sd_alg\":\"sha-256\"")), sscBytes)
+        XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [good], payloadExtra: ",\"_sd_alg\":\"sha-512\"")))
+        XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [good], payloadExtra: ",\"_sd_alg\":5")))
         // none
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [])))
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt("garbage"))
