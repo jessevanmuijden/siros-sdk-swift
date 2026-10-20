@@ -59,7 +59,7 @@ public struct NymConfigInfo: Sendable, Equatable {
     public let verifierContext: Bool
 }
 
-/// The rulebook's pseudonym function `pseudonym-v1-sha256`:
+/// The rulebook's pseudonym function `pseudonym` (v0.4; `ver` 1, `prf` `sha-256`):
 /// `SHA256(DST || seed || prover_input || verifier_input)`, with
 /// `DST = "nym_auth/v1/<config>"` (UTF-8) and no separators.
 ///
@@ -80,7 +80,7 @@ public enum NymPseudonym {
     private static let dstPrefix = "nym_auth/v1/"
     private static let inputBytes = 32
 
-    /// The config table (rulebook v0.3). A new configuration is a new entry; nothing else changes.
+    /// The config table (rulebook v0.3 and v0.4). A new configuration is a new entry; nothing else changes.
     static let configs: [String: Config] = Dictionary(uniqueKeysWithValues: [
         Config(id: "known-offender-matching-ssc", seed: .secret, proverInput: .none, verifierInput: .sha256OfId),
         Config(id: "known-offender-matching-psc", seed: .private, proverInput: .none, verifierInput: .sha256OfId),

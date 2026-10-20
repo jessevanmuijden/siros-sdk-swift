@@ -1,17 +1,19 @@
 # nym_auth pseudonym test vectors
 
-`nym-pseudonym-vectors.json` holds test vectors for `pseudonym-v1-sha256`, the
-`nym_auth` rulebook's pseudonym function (rulebook v0.3, "Pseudonym generation
+`nym-pseudonym-vectors.json` holds test vectors for `pseudonym`, the
+`nym_auth` rulebook's pseudonym function (rulebook v0.4, "Pseudonym generation
 function" and "Configurations"):
 
     pseudonym = SHA256(DST || seed || prover_input || verifier_input)
     DST       = "nym_auth/v1/<config>"   (UTF-8, no separators)
     null input = 32 zero bytes
 
-**Status: self-generated, not yet cross-checked with the circuit developers.**
-The longfellow circuit note says `SHA-256(client_id)` where the rulebook hashes
-`verifier_id`; the vectors take `verifier_id` as an opaque string and decide
-nothing about that. Cross-check them before a real prover relies on them.
+**Status: self-generated, and cross-checked against the circuit developers' reference pseudonyms.** The two
+`archive reference` vectors are the `pseudonym.json` values of zk-cred-vega (`155f4337...aad1` for
+`x509_san_dns:verifier.example`): the generator asserts them. `verifier_input = SHA-256(verifier_id)` with `verifier_id`
+the PREFIXED string (rulebook v0.4): for `x509_san_dns` the Client Identifier including its prefix
+(`x509_san_dns:<dns name>`), for `semantic` `semantic_id:` plus the identifier. The bare DNS name is not a `verifier_id`;
+the derivation itself hashes whatever string it is given, byte for byte.
 
 The file is shared between SDKs: the Kotlin SDK's `NymPseudonymTest` consumes
 it, and it is meant to be copied unchanged into siros-sdk-swift next to a

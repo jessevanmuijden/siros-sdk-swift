@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
   `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
   `psc`; the keystore binding to `mainKey` follows separately. The nym vector
-  files are byte-for-byte copies from siros-sdk-kotlin, `derived-secrets.json` from
+  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
   privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
   over-65535-byte fields refused). Platform-neutral (swift-crypto
   on Linux), no secret is logged or returned by a public API.

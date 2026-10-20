@@ -28,12 +28,14 @@ private func vectorFile(_ name: String, hash: String, file: StaticString = #file
 
 final class NymPseudonymTests: XCTestCase {
     private func vectors() throws -> [String: JSONValue] {
-        try vectorFile("nym-pseudonym-vectors", hash: "8ca029a9719ac896a77282adf3a3d3ac9fb84c1bff7fec75af5f2e5489dd27ca")
+        try vectorFile("nym-pseudonym-vectors", hash: "006bc11a79b2bf43dbf2abbdd6d4b1fae5baba94089f5e41c22526ae9649906e")
     }
 
     func testEveryVector() throws {
         let all = try XCTUnwrap(vectors()["vectors"]?.arrayValue)
-        XCTAssertEqual(all.count, 21)
+        XCTAssertEqual(all.count, 23)
+        // The archive reference value (zk-cred-vega pseudonym.json) for the PREFIXED verifier id is among them.
+        XCTAssertTrue(all.contains { $0.objectValue?["expected_hex"]?.stringValue?.hasPrefix("155f433796d1f282") == true })
         for item in all {
             let v = try XCTUnwrap(item.objectValue)
             let name = v["name"]?.stringValue ?? "?"
