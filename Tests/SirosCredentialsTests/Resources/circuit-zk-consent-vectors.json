@@ -1,0 +1,5199 @@
+{
+  "status": "self-generated; the Kotlin and Swift SDKs test against this file byte-for-byte",
+  "generator": "tools/gen_circuit_zk_consent_vectors.py",
+  "note": "Locale-free: the SDK-owned wording is generated from these items and is not part of this file.",
+  "function_registry": [
+    {
+      "id": "age_check",
+      "claim": {
+        "path": [
+          "birth_date"
+        ]
+      },
+      "value_type": "date",
+      "comparisons": {
+        "ge": "ge",
+        "le": "le"
+      },
+      "min_span": 365,
+      "age_specialisation": true
+    },
+    {
+      "id": "date_range",
+      "claim": {
+        "param": "claim"
+      },
+      "value_type": "date",
+      "comparisons": {
+        "ge": "ge",
+        "le": "le"
+      },
+      "min_span": 30
+    },
+    {
+      "id": "date_compare",
+      "claim": {
+        "param": "claim"
+      },
+      "value_type": "date",
+      "comparisons": {
+        "eq": "eq",
+        "ne": "ne",
+        "lt": "lt",
+        "le": "le",
+        "gt": "gt",
+        "ge": "ge",
+        "in": "in"
+      }
+    },
+    {
+      "id": "number_range",
+      "claim": {
+        "param": "claim"
+      },
+      "value_type": "number",
+      "comparisons": {
+        "ge": "ge",
+        "le": "le"
+      },
+      "min_span": 10
+    },
+    {
+      "id": "number_bounds",
+      "claim": {
+        "param": "claim"
+      },
+      "value_type": "number",
+      "comparisons": {
+        "gt": "gt",
+        "lt": "lt"
+      }
+    },
+    {
+      "id": "string_match",
+      "claim": {
+        "param": "claim"
+      },
+      "value_type": "string",
+      "comparisons": {
+        "eq": "eq",
+        "ne": "ne",
+        "in": "in"
+      }
+    },
+    {
+      "id": "flag_is",
+      "claim": {
+        "param": "claim"
+      },
+      "value_type": "bool",
+      "comparisons": {
+        "eq": "eq"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "ssc pseudonym: per verifier, the issuer can remap it",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "psc pseudonym: per verifier, the issuer cannot remap it",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-psc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-psc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": false,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "pseudonym and age keep the plan's order",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              },
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "1990-01-01",
+                  "le": "2008-10-19"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                },
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "1990-01-01"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "between",
+                    "from": "1990-01-01",
+                    "to": "2008-10-19",
+                    "min_years": 18,
+                    "max_years": 36
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age first, then pseudonym",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "1990-01-01",
+                  "le": "2008-10-19"
+                }
+              },
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "1990-01-01"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "between",
+                    "from": "1990-01-01",
+                    "to": "2008-10-19",
+                    "min_years": 18,
+                    "max_years": 36
+                  }
+                },
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: both bounds",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "1990-01-01",
+                  "le": "2008-10-19"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "1990-01-01"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "between",
+                    "from": "1990-01-01",
+                    "to": "2008-10-19",
+                    "min_years": 18,
+                    "max_years": 36
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: at least (only le); birthday is today",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "le": "2008-10-19"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_least",
+                    "years": 18
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: at least, birthday is tomorrow (one year less)",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "le": "2008-10-20"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-20"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_least",
+                    "years": 17
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: at most (only ge)",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "2000-01-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "2000-01-01"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_most",
+                    "years": 26
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: leap-day bound",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "le": "2008-02-29"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-02-29"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_least",
+                    "years": 18
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: bound in the future clamps to 0",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "le": "2030-01-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2030-01-01"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_least",
+                    "years": 0
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: other today",
+      "today": "2027-10-18",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "1990-01-01",
+                  "le": "2008-10-19"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "1990-01-01"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "between",
+                    "from": "1990-01-01",
+                    "to": "2008-10-19",
+                    "min_years": 18,
+                    "max_years": 37
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "age: no bound is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {}
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "age: unknown parameter is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "2000-01-01",
+                  "gt": "1999-01-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "age: malformed date is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "2000-1-1"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "age: impossible date is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "ge": "2000-02-30"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "pseudonym without a verifier_id is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": null,
+        "verifier_id_type": null
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "account-recovery-ssc is not modelled: refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "account-recovery-ssc",
+                  "verifier_context": "acct"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "user-managed-pseudonym-xsite-ssc is not modelled: refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "user-managed-pseudonym-xsite-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "a verifier_context on a per-verifier config is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc",
+                  "verifier_context": "x"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "unknown config is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "nope"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "unknown function is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "mystery",
+                "handle": "m",
+                "params": {}
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "empty plan is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "legacy claim disclosure lists the claim names",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "zk-claim-disclosure-v1",
+                "handle": "d",
+                "params": {
+                  "claims": [
+                    "family_name",
+                    "given_name"
+                  ],
+                  "systems": [
+                    {
+                      "id": "c",
+                      "system": "longfellow-libzk-v1"
+                    }
+                  ]
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": null,
+        "verifier_id_type": null
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": null,
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "claim",
+                  "name": "family_name"
+                },
+                {
+                  "kind": "claim",
+                  "name": "given_name"
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "legacy claim disclosure with a pseudonym",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "zk-claim-disclosure-v1",
+                "handle": "d",
+                "params": {
+                  "claims": [
+                    "age_over_18"
+                  ],
+                  "systems": [
+                    {
+                      "id": "c",
+                      "system": "longfellow-libzk-v1"
+                    }
+                  ],
+                  "pseudonym": true,
+                  "verifier_context": "ctx-1"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "claim",
+                  "name": "age_over_18"
+                },
+                {
+                  "kind": "legacy_pseudonym",
+                  "verifier_context": "ctx-1"
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "two queries: one request, both queries' items",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          },
+          {
+            "plan": [
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "le": "2008-10-19"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Other",
+              "issuer": null
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            },
+            {
+              "credential": {
+                "name": "Other",
+                "issuer": null
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_least",
+                    "years": 18
+                  }
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "credential without a name or issuer",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": null,
+              "issuer": null
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": null,
+                "issuer": null
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "label: trust entity name wins",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "client.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "label: verified client-id display name when the trust decision has no name",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": null,
+          "framework": "etsi-tl",
+          "identifier": "rp.example"
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "rp.example",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "label: blank entity name is no name",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "  ",
+          "framework": null,
+          "identifier": null
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "rp.example",
+            "trust_framework": null,
+            "trust_identifier": null,
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "label: attested origin for an unsigned request (client id is unauthenticated)",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": null,
+          "framework": null,
+          "identifier": null
+        },
+        "verified_client_id_display_name": null,
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "https://rp.example",
+            "trust_framework": null,
+            "trust_identifier": null,
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "a long DID verifier id is carried whole",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "did:web:verifier.example.org:very:long:path:segment:identifying:this:verifier",
+        "verifier_id_type": "semantic"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "did:web:verifier.example.org:very:long:path:segment:identifying:this:verifier",
+            "verifier_id_type": "semantic",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "did:web:verifier.example.org:very:long:path:segment:identifying:this:verifier",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "intermediary risk flag",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": true
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": true
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "numeric range on another claim, with the credential's own label",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_range",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "ge": 10,
+                  "le": 20
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "score"
+                ],
+                "label": "Credit score"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "number_range",
+                  "claim": {
+                    "path": [
+                      "score"
+                    ],
+                    "label": "Credit score"
+                  },
+                  "value_type": "number",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "10"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "20"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "numeric range: no display label, the path is the fallback",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_range",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "ge": 10.5,
+                  "le": 99
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "number_range",
+                  "claim": {
+                    "path": [
+                      "score"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "number",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "10.5"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "99"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "numeric range: a blank label is no label",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_range",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "ge": 10,
+                  "le": 20
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "score"
+                ],
+                "label": " "
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "number_range",
+                  "claim": {
+                    "path": [
+                      "score"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "number",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "10"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "20"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "numeric bounds: gt and lt",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_bounds",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "gt": 0,
+                  "lt": 100
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "number_bounds",
+                  "claim": {
+                    "path": [
+                      "score"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "number",
+                  "conditions": [
+                    {
+                      "op": "gt",
+                      "values": [
+                        "0"
+                      ]
+                    },
+                    {
+                      "op": "lt",
+                      "values": [
+                        "100"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "numeric: a string operand is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_range",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "ge": "10",
+                  "le": 20
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "numeric: an operand that is not a number is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_range",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "ge": true,
+                  "le": 20
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "equality on a string claim",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "eq": "SE"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "country"
+                ],
+                "label": "Country"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "string_match",
+                  "claim": {
+                    "path": [
+                      "country"
+                    ],
+                    "label": "Country"
+                  },
+                  "value_type": "string",
+                  "conditions": [
+                    {
+                      "op": "eq",
+                      "values": [
+                        "SE"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "set membership on a string claim",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "in": [
+                    "SE",
+                    "FI",
+                    "NO"
+                  ]
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "string_match",
+                  "claim": {
+                    "path": [
+                      "country"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "string",
+                  "conditions": [
+                    {
+                      "op": "in",
+                      "values": [
+                        "SE",
+                        "FI",
+                        "NO"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "string: inequality and membership together",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "ne": "DK",
+                  "in": [
+                    "SE",
+                    "FI"
+                  ]
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "string_match",
+                  "claim": {
+                    "path": [
+                      "country"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "string",
+                  "conditions": [
+                    {
+                      "op": "ne",
+                      "values": [
+                        "DK"
+                      ]
+                    },
+                    {
+                      "op": "in",
+                      "values": [
+                        "SE",
+                        "FI"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "string: an empty set is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "in": []
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "string: a duplicated set member is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "in": [
+                    "SE",
+                    "SE"
+                  ]
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "string: a non-array set is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "in": "SE"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "boolean equality",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "flag_is",
+                "handle": "p",
+                "params": {
+                  "claim": "resident",
+                  "eq": true
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "resident"
+                ],
+                "label": "Resident"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "flag_is",
+                  "claim": {
+                    "path": [
+                      "resident"
+                    ],
+                    "label": "Resident"
+                  },
+                  "value_type": "bool",
+                  "conditions": [
+                    {
+                      "op": "eq",
+                      "values": [
+                        "true"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "a date claim that is not birth_date renders generically, not as an age",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_range",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "ge": "2020-01-01",
+                  "le": "2024-12-31"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_range",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "2020-01-01"
+                      ]
+                    },
+                    {
+                      "op": "le",
+                      "values": [
+                        "2024-12-31"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: equal to a date (renderers use the date-specific wording for value_type date)",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "eq": "2024-03-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "eq",
+                      "values": [
+                        "2024-03-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: not equal to a date",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "ne": "2024-03-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ne",
+                      "values": [
+                        "2024-03-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: before a date",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "lt": "2024-03-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "lt",
+                      "values": [
+                        "2024-03-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: on or before a date",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "le": "2024-03-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2024-03-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: after a date",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "gt": "2024-03-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "gt",
+                      "values": [
+                        "2024-03-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: on or after a date",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "ge": "2024-03-01"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "ge",
+                      "values": [
+                        "2024-03-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: one of several dates",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "in": [
+                    "2024-03-01",
+                    "2024-04-01",
+                    "2024-05-01"
+                  ]
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "issue_date"
+                ],
+                "label": "Issue date"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "date_compare",
+                  "claim": {
+                    "path": [
+                      "issue_date"
+                    ],
+                    "label": "Issue date"
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "in",
+                      "values": [
+                        "2024-03-01",
+                        "2024-04-01",
+                        "2024-05-01"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "date claim: an operand that is not a full-date is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "date_compare",
+                "handle": "p",
+                "params": {
+                  "claim": "issue_date",
+                  "ge": "2024-3-1"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "number claim: the same comparison stays number-typed (not the date wording)",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "number_bounds",
+                "handle": "p",
+                "params": {
+                  "claim": "score",
+                  "gt": 10,
+                  "lt": 20
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "score"
+                ],
+                "label": "Score"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "number_bounds",
+                  "claim": {
+                    "path": [
+                      "score"
+                    ],
+                    "label": "Score"
+                  },
+                  "value_type": "number",
+                  "conditions": [
+                    {
+                      "op": "gt",
+                      "values": [
+                        "10"
+                      ]
+                    },
+                    {
+                      "op": "lt",
+                      "values": [
+                        "20"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "a nested claim path (array claim param)",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": [
+                    "address",
+                    "country"
+                  ],
+                  "eq": "SE"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": [
+              {
+                "path": [
+                  "address",
+                  "country"
+                ],
+                "label": "Country of residence"
+              }
+            ]
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": null,
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "predicate",
+                  "function": "string_match",
+                  "claim": {
+                    "path": [
+                      "address",
+                      "country"
+                    ],
+                    "label": "Country of residence"
+                  },
+                  "value_type": "string",
+                  "conditions": [
+                    {
+                      "op": "eq",
+                      "values": [
+                        "SE"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    },
+    {
+      "name": "an empty claim param is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "",
+                  "eq": "SE"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "a missing claim param is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "eq": "SE"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "an undeclared param is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "eq": "SE",
+                  "gt": "A"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "an unknown function is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "mystery_check",
+                "handle": "p",
+                "params": {
+                  "claim": "x",
+                  "eq": "y"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "a known predicate beside an unknown function: the request is refused",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "eq": "SE"
+                }
+              },
+              {
+                "id": "mystery",
+                "handle": "m",
+                "params": {}
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "refused": true
+      }
+    },
+    {
+      "name": "pseudonym, age and another claim's predicate, in the plan's order",
+      "today": "2026-10-19",
+      "input": {
+        "queries": [
+          {
+            "plan": [
+              {
+                "id": "pseudonym-v1-sha256",
+                "handle": "n",
+                "params": {
+                  "config": "known-offender-matching-ssc"
+                }
+              },
+              {
+                "id": "age_check",
+                "handle": "a",
+                "params": {
+                  "le": "2008-10-19"
+                }
+              },
+              {
+                "id": "string_match",
+                "handle": "p",
+                "params": {
+                  "claim": "country",
+                  "eq": "SE"
+                }
+              }
+            ],
+            "credential": {
+              "name": "Nym credential",
+              "issuer": "Example Issuer"
+            },
+            "claims": []
+          }
+        ],
+        "trust": {
+          "entity_name": "Example RP",
+          "framework": "etsi-tl",
+          "identifier": "rp.example",
+          "intermediary_risk": false
+        },
+        "verified_client_id_display_name": "rp.example",
+        "attested_origin": "https://rp.example",
+        "verifier_id": "rp.example",
+        "verifier_id_type": "x509_san_dns"
+      },
+      "expected": {
+        "request": {
+          "verifier": {
+            "label": "Example RP",
+            "trust_framework": "etsi-tl",
+            "trust_identifier": "rp.example",
+            "verifier_id": "rp.example",
+            "verifier_id_type": "x509_san_dns",
+            "intermediary_risk": false
+          },
+          "entries": [
+            {
+              "credential": {
+                "name": "Nym credential",
+                "issuer": "Example Issuer"
+              },
+              "items": [
+                {
+                  "kind": "pseudonym",
+                  "config": "known-offender-matching-ssc",
+                  "scope": "per_verifier",
+                  "remappable_by_issuer": true,
+                  "cross_site": false,
+                  "verifier_id": "rp.example",
+                  "verifier_context": null
+                },
+                {
+                  "kind": "predicate",
+                  "function": "age_check",
+                  "claim": {
+                    "path": [
+                      "birth_date"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "date",
+                  "conditions": [
+                    {
+                      "op": "le",
+                      "values": [
+                        "2008-10-19"
+                      ]
+                    }
+                  ],
+                  "age_form": {
+                    "kind": "at_least",
+                    "years": 18
+                  }
+                },
+                {
+                  "kind": "predicate",
+                  "function": "string_match",
+                  "claim": {
+                    "path": [
+                      "country"
+                    ],
+                    "label": null
+                  },
+                  "value_type": "string",
+                  "conditions": [
+                    {
+                      "op": "eq",
+                      "values": [
+                        "SE"
+                      ]
+                    }
+                  ],
+                  "age_form": null
+                }
+              ]
+            }
+          ],
+          "request_signed": true
+        }
+      }
+    }
+  ],
+  "verifier_id_shortening": [
+    {
+      "id": "rp.example",
+      "display": "rp.example"
+    },
+    {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "display": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "display": "aaaaaaaaaaaaaaaaaa…aaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "did:web:verifier.example.org:very:long:path:segment:identifying:this:verifier",
+      "display": "did:web:verifier.e…ying:this:verifier"
+    },
+    {
+      "id": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "display": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀…😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    }
+  ],
+  "combined_predicate_bounds": [
+    {
+      "name": "no predicates",
+      "plans": [
+        [
+          {
+            "id": "pseudonym-v1-sha256",
+            "handle": "n",
+            "params": {
+              "config": "known-offender-matching-ssc"
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "one query, one-sided",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2008-10-19"
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "two queries that together pin the date: ge=D and le=D",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2000-01-01"
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "two queries leaving exactly 365 days",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2000-12-30"
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "two queries leaving 364 days",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2000-12-29"
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "wide intersection",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "1990-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2008-10-19"
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "an unreadable bound is not ok",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-1-1"
+            }
+          }
+        ],
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "le": "2008-10-19"
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "a numeric claim: width exactly the declared minimum",
+      "plans": [
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "ge": 10
+            }
+          }
+        ],
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "le": 20
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "a numeric claim: one less than the declared minimum",
+      "plans": [
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "ge": 10
+            }
+          }
+        ],
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "le": 19
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "a numeric claim: pinned to one value",
+      "plans": [
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "ge": 15
+            }
+          }
+        ],
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "le": 15
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "a numeric claim: width 2^64 is wider than any minimum (never narrowed to a 64-bit integer)",
+      "plans": [
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "ge": 0
+            }
+          }
+        ],
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "le": 18446744073709551616
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "different claims do not merge",
+      "plans": [
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "ge": 15
+            }
+          }
+        ],
+        [
+          {
+            "id": "number_range",
+            "handle": "p",
+            "params": {
+              "claim": "other",
+              "le": 15
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "a date claim other than birth_date, declared minimum 30 days",
+      "plans": [
+        [
+          {
+            "id": "date_range",
+            "handle": "p",
+            "params": {
+              "claim": "issue_date",
+              "ge": "2024-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "date_range",
+            "handle": "p",
+            "params": {
+              "claim": "issue_date",
+              "le": "2024-01-30"
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "the same, 29 days",
+      "plans": [
+        [
+          {
+            "id": "date_range",
+            "handle": "p",
+            "params": {
+              "claim": "issue_date",
+              "ge": "2024-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "date_range",
+            "handle": "p",
+            "params": {
+              "claim": "issue_date",
+              "le": "2024-01-29"
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "two functions on one claim: the strictest declared minimum applies",
+      "plans": [
+        [
+          {
+            "id": "age_check",
+            "handle": "a",
+            "params": {
+              "ge": "2000-01-01"
+            }
+          }
+        ],
+        [
+          {
+            "id": "date_range",
+            "handle": "p",
+            "params": {
+              "claim": "birth_date",
+              "le": "2000-06-30"
+            }
+          }
+        ]
+      ],
+      "expected_ok": false
+    },
+    {
+      "name": "a function that declares no minimum has no merge rule",
+      "plans": [
+        [
+          {
+            "id": "string_match",
+            "handle": "p",
+            "params": {
+              "claim": "country",
+              "eq": "SE"
+            }
+          }
+        ],
+        [
+          {
+            "id": "string_match",
+            "handle": "p",
+            "params": {
+              "claim": "country",
+              "eq": "FI"
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    },
+    {
+      "name": "equality pinned across functions without a declared minimum",
+      "plans": [
+        [
+          {
+            "id": "number_bounds",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "gt": 5
+            }
+          }
+        ],
+        [
+          {
+            "id": "number_bounds",
+            "handle": "p",
+            "params": {
+              "claim": "score",
+              "lt": 6
+            }
+          }
+        ]
+      ],
+      "expected_ok": true
+    }
+  ],
+  "precheck": [
+    {
+      "name": "age: birth date inside the range",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "1999-01-01",
+            "le": "2005-01-01"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2000-06-15"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "age: birth date before the range",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "2001-01-01",
+            "le": "2005-01-01"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2000-06-15"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "age: bounds are inclusive (ge)",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "2000-06-15",
+            "le": "2005-01-01"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2000-06-15"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "age: bounds are inclusive (le)",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "1990-01-01",
+            "le": "2000-06-15"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2000-06-15"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "age: the claim is absent",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "1999-01-01",
+            "le": "2005-01-01"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "absent"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "age: the claim has another type",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "1999-01-01",
+            "le": "2005-01-01"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "2000-06-15"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "number in range",
+      "functions": [
+        {
+          "id": "number_range",
+          "handle": "p",
+          "params": {
+            "claim": "score",
+            "ge": 10,
+            "le": 20
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "number",
+          "text": "15"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "number below range",
+      "functions": [
+        {
+          "id": "number_range",
+          "handle": "p",
+          "params": {
+            "claim": "score",
+            "ge": 10,
+            "le": 20
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "number",
+          "text": "5"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "number: decimal compare",
+      "functions": [
+        {
+          "id": "number_range",
+          "handle": "p",
+          "params": {
+            "claim": "score",
+            "ge": 10.5,
+            "le": 20
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "number",
+          "text": "10.50"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "number: gt is strict",
+      "functions": [
+        {
+          "id": "number_bounds",
+          "handle": "p",
+          "params": {
+            "claim": "score",
+            "gt": 5,
+            "lt": 10
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "number",
+          "text": "5"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "number: lt is strict",
+      "functions": [
+        {
+          "id": "number_bounds",
+          "handle": "p",
+          "params": {
+            "claim": "score",
+            "gt": 5,
+            "lt": 10
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "number",
+          "text": "9"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "string equality holds",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": "country",
+            "eq": "SE"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "SE"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "string equality is exact (case)",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": "country",
+            "eq": "SE"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "se"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "string membership holds",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": "country",
+            "in": [
+              "SE",
+              "FI"
+            ]
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "FI"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "string membership fails",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": "country",
+            "in": [
+              "SE",
+              "FI"
+            ]
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "NO"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "string inequality fails",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": "country",
+            "ne": "SE"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "SE"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "bool equality holds",
+      "functions": [
+        {
+          "id": "flag_is",
+          "handle": "p",
+          "params": {
+            "claim": "resident",
+            "eq": true
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "bool",
+          "text": "true"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "bool equality fails",
+      "functions": [
+        {
+          "id": "flag_is",
+          "handle": "p",
+          "params": {
+            "claim": "resident",
+            "eq": true
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "bool",
+          "text": "false"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "date claim other than birth_date",
+      "functions": [
+        {
+          "id": "date_range",
+          "handle": "p",
+          "params": {
+            "claim": "issue_date",
+            "ge": "2020-01-01",
+            "le": "2024-12-31"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2022-03-01"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "an unsupported claim path is skipped, not guessed",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": [
+              "address",
+              "country"
+            ],
+            "eq": "SE"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "unsupported"
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "every function must hold",
+      "functions": [
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "1999-01-01",
+            "le": "2005-01-01"
+          }
+        },
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": "country",
+            "eq": "SE"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2000-06-15"
+        },
+        {
+          "lookup": "found",
+          "type": "string",
+          "text": "FI"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "one function unsupported, the other decides",
+      "functions": [
+        {
+          "id": "string_match",
+          "handle": "p",
+          "params": {
+            "claim": [
+              "a",
+              "b"
+            ],
+            "eq": "x"
+          }
+        },
+        {
+          "id": "age_check",
+          "handle": "a",
+          "params": {
+            "ge": "2001-01-01",
+            "le": "2005-01-01"
+          }
+        }
+      ],
+      "claims": [
+        {
+          "lookup": "unsupported"
+        },
+        {
+          "lookup": "found",
+          "type": "date",
+          "text": "2000-06-15"
+        }
+      ],
+      "expected": false
+    }
+  ]
+}

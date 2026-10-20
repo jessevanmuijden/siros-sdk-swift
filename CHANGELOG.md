@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
+  and a registry-driven builder.** The locale-free request a user approves before
+  anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
+  `legacyPseudonym`, per credential, with the verifier label and, for hosts and
+  tests only, the trust framework and `verifier_id_type`). Predicates apply to ANY
+  claim, and the function set is open-ended, so predicate functions are data:
+  `PredicateFunctions` (default: the nymauth `age_check`) declares per function id
+  its claim, value type, param-to-comparison map, an optional minimum span and
+  whether it reads as an age. Consent building, the local pre-check
+  (`precheck`) and the cross-query merge (`combinedBoundsOk`, the strictest
+  declared minimum span per credential and claim) are driven by it; a function not
+  in the registry is refused before consent. The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`, a
+  throw or a timeout is a decline, and with no handler a `circuit_zk` request is
+  refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
+  shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
+  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 17 merge cases, 22
+  pre-check cases). Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob

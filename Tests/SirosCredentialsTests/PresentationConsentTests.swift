@@ -1,0 +1,266 @@
+// Copyright 2026 SIROS Foundation. BSD 2-Clause License.
+
+import XCTest
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
+@testable import SirosCredentials
+
+/// The shared circuit_zk consent vectors (siros-sdk-kotlin spec/circuit-zk-consent-vectors.json,
+/// copied byte-for-byte, see circuit-zk-consent-vectors.PROVENANCE.txt): the consent builder, the
+/// registry-driven local pre-check and the cross-query merge, against this SDK.
+final class PresentationConsentTests: XCTestCase {
+
+    private static let vectorsHash = "4b7e25d8cde1b107e0c016c1ade3ace939ee8f3eb98670ed1ff141ddffdadf3e"
+
+    private func vectors() throws -> [String: JSONValue] {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "circuit-zk-consent-vectors", withExtension: "json"))
+        let data = try Data(contentsOf: url)
+        #if canImport(CryptoKit)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(digest, Self.vectorsHash, "re-copy from siros-sdk-kotlin spec/ and update PROVENANCE")
+        #endif
+        return try XCTUnwrap(StrictJSON.parse(data).objectValue)
+    }
+
+    /// The registry is DATA in the vector file: nothing here hard-codes a function.
+    private func registry(_ v: [String: JSONValue]) throws -> PredicateFunctions {
+        PredicateFunctions(try XCTUnwrap(v["function_registry"]?.arrayValue).map { item in
+            let o = item.objectValue ?? [:]
+            let claim = o["claim"]?.objectValue ?? [:]
+            let source: PredicateFunction.ClaimSource = claim["param"] != nil
+                ? .param : .fixed((claim["path"]?.arrayValue ?? []).compactMap { $0.stringValue })
+            let comparisons = (o["comparisons"]?.objectValue ?? [:]).map { ($0.key, $0.value.stringValue ?? "") }
+            return PredicateFunction(
+                id: o["id"]?.stringValue ?? "", claim: source,
+                valueType: PredicateValueType(rawValue: o["value_type"]?.stringValue ?? "") ?? .string,
+                comparisons: Self.ordered(comparisons, in: o["comparisons"]),
+                minSpan: o["min_span"].flatMap { if case .int(let n) = $0 { return Int(n) } else { return nil } },
+                ageSpecialisation: o["age_specialisation"] == .bool(true))
+        })
+    }
+
+    /// Comparison order is the file's order (display order); a dictionary lost it, so read the keys in order.
+    private static func ordered(_ pairs: [(String, String)], in raw: JSONValue?) -> [PredicateFunction.Comparison] {
+        let order = Self.keyOrder[raw?.objectValue?.keys.sorted().joined(separator: ",") ?? ""] ?? pairs.map(\.0).sorted()
+        return order.compactMap { key in
+            pairs.first { $0.0 == key }.flatMap { PredicateOp(rawValue: $0.1) }.map { PredicateFunction.Comparison(param: key, op: $0) }
+        }
+    }
+
+    /// The registry's declared order for each comparison-key set (JSON objects are unordered once parsed).
+    private static let keyOrder: [String: [String]] = [
+        "ge,le": ["ge", "le"],
+        "eq,ge,gt,in,le,lt,ne": ["eq", "ne", "lt", "le", "gt", "ge", "in"],
+        "gt,lt": ["gt", "lt"],
+        "eq,in,ne": ["eq", "ne", "in"],
+        "eq": ["eq"],
+    ]
+
+    func testEveryConsentCase() throws {
+        let v = try vectors()
+        let registry = try registry(v)
+        let cases = try XCTUnwrap(v["cases"]?.arrayValue)
+        XCTAssertGreaterThanOrEqual(cases.count, 62)
+        for item in cases {
+            let testCase = try XCTUnwrap(item.objectValue)
+            let name = testCase["name"]?.stringValue ?? "?"
+            let input = try XCTUnwrap(testCase["input"]?.objectValue, name)
+            let built = try Self.build(input: input, today: try XCTUnwrap(testCase["today"]?.stringValue), registry: registry)
+            let expected = try XCTUnwrap(testCase["expected"]?.objectValue, name)
+            if expected["refused"] == .bool(true) {
+                XCTAssertNil(built, "\(name): must be refused")
+            } else {
+                XCTAssertEqual(built, try Self.expectedRequest(try XCTUnwrap(expected["request"]?.objectValue)), name)
+            }
+        }
+    }
+
+    func testVerifierIdShortening() throws {
+        let cases = try XCTUnwrap(vectors()["verifier_id_shortening"]?.arrayValue)
+        XCTAssertEqual(cases.count, 5)
+        for item in cases {
+            let o = try XCTUnwrap(item.objectValue)
+            XCTAssertEqual(PresentationConsentRequest.shortened(verifierId: o["id"]?.stringValue ?? ""), o["display"]?.stringValue)
+        }
+    }
+
+    func testCombinedPredicateBounds() throws {
+        let v = try vectors()
+        let registry = try registry(v)
+        let cases = try XCTUnwrap(v["combined_predicate_bounds"]?.arrayValue)
+        XCTAssertEqual(cases.count, 17)
+        for item in cases {
+            let o = try XCTUnwrap(item.objectValue)
+            let plans = try XCTUnwrap(o["plans"]?.arrayValue).map { try Self.plan($0) }
+            XCTAssertEqual(registry.combinedBoundsOk(plans: plans), o["expected_ok"] == .bool(true), o["name"]?.stringValue ?? "?")
+        }
+    }
+
+    func testPrecheck() throws {
+        let v = try vectors()
+        let registry = try registry(v)
+        let cases = try XCTUnwrap(v["precheck"]?.arrayValue)
+        XCTAssertEqual(cases.count, 22)
+        for item in cases {
+            let o = try XCTUnwrap(item.objectValue)
+            let functions = try Self.plan(try XCTUnwrap(o["functions"]))
+            let lookups = try XCTUnwrap(o["claims"]?.arrayValue).map { value -> PredicateClaimLookup in
+                let c = value.objectValue ?? [:]
+                switch c["lookup"]?.stringValue {
+                case "absent": return .absent
+                case "unsupported": return .unsupported
+                default:
+                    return .found(type: PredicateValueType(rawValue: c["type"]?.stringValue ?? "") ?? .string, text: c["text"]?.stringValue ?? "")
+                }
+            }
+            XCTAssertEqual(registry.precheck(functions: functions, lookups: lookups), o["expected"] == .bool(true), o["name"]?.stringValue ?? "?")
+        }
+    }
+
+    /// The shared precheck vectors do not pin the strict ordering operators at their boundary.
+    func testPrecheckStrictOrderingAtTheBoundary() {
+        let registry = PredicateFunctions([
+            PredicateFunction(id: "n", claim: .param, valueType: .number,
+                              comparisons: [.init(param: "gt", op: .gt), .init(param: "lt", op: .lt)]),
+            PredicateFunction(id: "d", claim: .param, valueType: .date, comparisons: [.init(param: "lt", op: .lt), .init(param: "gt", op: .gt)]),
+        ])
+        func holds(_ id: String, _ params: [String: JSONValue], _ type: PredicateValueType, _ text: String) -> Bool {
+            registry.precheck(functions: [CircuitZkFunction(id: id, handle: "h", params: params.merging(["claim": .string("c")]) { a, _ in a })],
+                              lookups: [.found(type: type, text: text)])
+        }
+        XCTAssertFalse(holds("n", ["lt": .int(10)], .number, "10"))
+        XCTAssertTrue(holds("n", ["lt": .int(10)], .number, "9.99"))
+        XCTAssertFalse(holds("n", ["gt": .int(10)], .number, "10"))
+        XCTAssertFalse(holds("d", ["lt": .string("2024-03-01")], .date, "2024-03-01"))
+        XCTAssertTrue(holds("d", ["lt": .string("2024-03-01")], .date, "2024-02-29"))
+        XCTAssertFalse(holds("d", ["gt": .string("2024-03-01")], .date, "2024-03-01"))
+    }
+
+    func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
+        XCTAssertNotNil(PredicateFunctions.default["age_check"])
+        XCTAssertNil(PredicateFunctions.default["number_range"])
+        let unknown = CircuitZkConsentQuery(
+            plan: [CircuitZkFunction(id: "number_range", handle: "p", params: ["claim": .string("score"), "ge": .int(1)])],
+            credential: PresentationConsentCredential(name: nil, issuer: nil))
+        XCTAssertNil(PresentationConsentBuilder.build(
+            queries: [unknown], trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+            verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil, today: "2026-10-19"),
+            "a function the registry does not declare is refused before consent")
+    }
+
+    // MARK: - vector -> model
+
+    private static func plan(_ value: JSONValue) throws -> [CircuitZkFunction] {
+        try XCTUnwrap(value.arrayValue).map { item in
+            let o = item.objectValue ?? [:]
+            return CircuitZkFunction(id: o["id"]?.stringValue ?? "", handle: o["handle"]?.stringValue ?? "", params: o["params"]?.objectValue ?? [:])
+        }
+    }
+
+    private static func build(input: [String: JSONValue], today: String, registry: PredicateFunctions) throws -> PresentationConsentRequest? {
+        let queries = try XCTUnwrap(input["queries"]?.arrayValue).map { value -> CircuitZkConsentQuery in
+            let q = value.objectValue ?? [:]
+            let cred = q["credential"]?.objectValue ?? [:]
+            let claims = (q["claims"]?.arrayValue ?? []).map { c -> PresentationConsentClaimRef in
+                let o = c.objectValue ?? [:]
+                return PresentationConsentClaimRef(path: (o["path"]?.arrayValue ?? []).compactMap { $0.stringValue }, label: o["label"]?.stringValue)
+            }
+            return CircuitZkConsentQuery(
+                plan: try plan(q["plan"] ?? .array([])),
+                credential: PresentationConsentCredential(name: cred["name"]?.stringValue, issuer: cred["issuer"]?.stringValue), claims: claims)
+        }
+        let trust = input["trust"]?.objectValue ?? [:]
+        return PresentationConsentBuilder.build(
+            queries: queries, functions: registry,
+            trust: CircuitZkConsentTrust(
+                entityName: trust["entity_name"]?.stringValue, framework: trust["framework"]?.stringValue,
+                identifier: trust["identifier"]?.stringValue, intermediaryRisk: trust["intermediary_risk"] == .bool(true)),
+            verifiedClientIdDisplayName: input["verified_client_id_display_name"]?.stringValue,
+            attestedOrigin: try XCTUnwrap(input["attested_origin"]?.stringValue),
+            verifierId: input["verifier_id"]?.stringValue, verifierIdType: input["verifier_id_type"]?.stringValue, today: today)
+    }
+
+    private static func expectedRequest(_ request: [String: JSONValue]) throws -> PresentationConsentRequest {
+        let verifier = request["verifier"]?.objectValue ?? [:]
+        let entries = try XCTUnwrap(request["entries"]?.arrayValue).map { value -> PresentationConsentEntry in
+            let entry = value.objectValue ?? [:]
+            let cred = entry["credential"]?.objectValue ?? [:]
+            return PresentationConsentEntry(
+                credential: PresentationConsentCredential(name: cred["name"]?.stringValue, issuer: cred["issuer"]?.stringValue),
+                items: try XCTUnwrap(entry["items"]?.arrayValue).map(expectedItem))
+        }
+        return PresentationConsentRequest(
+            verifier: PresentationConsentVerifier(
+                label: verifier["label"]?.stringValue ?? "", trustFramework: verifier["trust_framework"]?.stringValue,
+                trustIdentifier: verifier["trust_identifier"]?.stringValue, verifierId: verifier["verifier_id"]?.stringValue,
+                verifierIdType: verifier["verifier_id_type"]?.stringValue, intermediaryRisk: verifier["intermediary_risk"] == .bool(true)),
+            entries: entries, requestSigned: request["request_signed"] == .bool(true))
+    }
+
+    private static func expectedItem(_ value: JSONValue) throws -> PresentationConsentItem {
+        let item = try XCTUnwrap(value.objectValue)
+        switch item["kind"]?.stringValue {
+        case "pseudonym":
+            return .pseudonym(
+                config: item["config"]?.stringValue ?? "",
+                scope: PresentationConsentItem.PseudonymScope(rawValue: item["scope"]?.stringValue ?? "") ?? .perVerifier,
+                remappableByIssuer: item["remappable_by_issuer"] == .bool(true), crossSite: item["cross_site"] == .bool(true),
+                verifierId: item["verifier_id"]?.stringValue ?? "", verifierContext: item["verifier_context"]?.stringValue)
+        case "predicate":
+            let claim = item["claim"]?.objectValue ?? [:]
+            let conditions = (item["conditions"]?.arrayValue ?? []).map { c -> PredicateCondition in
+                let o = c.objectValue ?? [:]
+                return PredicateCondition(
+                    op: PredicateOp(rawValue: o["op"]?.stringValue ?? "") ?? .eq,
+                    values: (o["values"]?.arrayValue ?? []).compactMap { $0.stringValue })
+            }
+            return .predicate(PresentationConsentPredicate(
+                functionId: item["function"]?.stringValue ?? "",
+                claim: PresentationConsentClaimRef(
+                    path: (claim["path"]?.arrayValue ?? []).compactMap { $0.stringValue }, label: claim["label"]?.stringValue),
+                valueType: PredicateValueType(rawValue: item["value_type"]?.stringValue ?? "") ?? .string,
+                conditions: conditions, ageForm: try expectedAgeForm(item["age_form"])))
+        case "claim": return .claim(name: item["name"]?.stringValue ?? "")
+        case "legacy_pseudonym": return .legacyPseudonym(verifierContext: item["verifier_context"]?.stringValue)
+        default: throw XCTSkip("unknown item kind")
+        }
+    }
+
+    private static func expectedAgeForm(_ value: JSONValue?) throws -> PredicateAgeForm? {
+        guard let form = value?.objectValue else { return nil }
+        func int(_ key: String) -> Int {
+            if case .int(let n)? = form[key] { return Int(n) }
+            return -1
+        }
+        switch form["kind"]?.stringValue {
+        case "between":
+            return .between(from: form["from"]?.stringValue ?? "", to: form["to"]?.stringValue ?? "", minYears: int("min_years"), maxYears: int("max_years"))
+        case "at_least": return .atLeast(years: int("years"))
+        case "at_most": return .atMost(years: int("years"))
+        default: throw XCTSkip("unknown age form")
+        }
+    }
+}
+
+final class CivilDateTests: XCTestCase {
+    func testStrictDates() {
+        XCTAssertNil(CivilDate("2000-1-1"))
+        XCTAssertNil(CivilDate("2000-02-30"))
+        XCTAssertNil(CivilDate("1900-02-29"))
+        XCTAssertNotNil(CivilDate("2000-02-29"))
+        XCTAssertNil(CivilDate("0000-01-01"))
+        XCTAssertNil(CivilDate("2000-01-01 "))
+    }
+
+    func testDaysSinceEpoch() throws {
+        XCTAssertEqual(try XCTUnwrap(CivilDate("1970-01-01")).daysSinceEpoch, 0)
+        XCTAssertEqual(try XCTUnwrap(CivilDate("1970-01-02")).daysSinceEpoch, 1)
+        XCTAssertEqual(try XCTUnwrap(CivilDate("2000-03-01")).daysSinceEpoch, 11017)
+        XCTAssertEqual(try XCTUnwrap(CivilDate("1969-12-31")).daysSinceEpoch, -1)
+        // 2024 is a leap year: 366 days between the same date a year apart across Feb 29.
+        let a = try XCTUnwrap(CivilDate("2023-03-01")), b = try XCTUnwrap(CivilDate("2024-03-01")), c = try XCTUnwrap(CivilDate("2025-03-01"))
+        XCTAssertEqual(b.daysSinceEpoch - a.daysSinceEpoch, 366)
+        XCTAssertEqual(c.daysSinceEpoch - b.daysSinceEpoch, 365)
+    }
+}
