@@ -1,7 +1,8 @@
 zkp_req, zkp_req_response, zkp_req_unsat and proof_time (the *.json files, and the directories own README.md
 files, which the digest excludes; all VERBATIM) come from
 crates/siros-dc-matcher-core/tests/vectors/ in sirosfoundation/siros-dc-matcher, squash commit
-93047bc7b8a22117fbc9b4c8cd59ce7cd742e8d3 (PR 50, rulebook v0.4). Never edit by hand; re-copy and update the
+93047bc7b8a22117fbc9b4c8cd59ce7cd742e8d3 (PR 50, rulebook v0.4), re-verified against the v0.11.0 tag (release merge
+09ac62fbdd02af47cf1b143dfc2613e509445395): the vector set digest is identical. Never edit by hand; re-copy and update the
 digest in ZkpReqVectorsTests when the source changes.
 
 vector set digest (scripts/vectors_digest.sh --digest): 9f482d7a3fb87cb1381d0dfb7a2fc396b6cd3c1eba07c5d76f44e47142b751ac
