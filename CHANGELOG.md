@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The `nymauth-*` proving seam: `NymAuthNativeProver`, its registry and typed errors,
+  with a refusing default.** One narrow async call (verified circuit bytes and the
+  already-assembled inputs in, proof and pseudonym out; the circuit authors' ABI,
+  mirrored from the Kotlin SDK). No native binding is shipped, so
+  `NymAuthNativeProverRegistry` hands out `RefusingNymAuthNativeProver`, which refuses
+  every request with `NymAuthNativeError(.noNativeProver)`; nothing is substituted.
+  Binding failures map to coarse kinds (and, for a refusal, a coarse reason) and carry
+  no message; the request (it holds the delivered seed) and response redact their
+  description, debug description and mirror. Not wired into the wallet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
