@@ -1,0 +1,14 @@
+nym-pseudonym-vectors.json and secret-seed-commitment-vectors.json (with their .md files)
+are VERBATIM copies of spec/ in sirosfoundation/siros-sdk-kotlin, branch
+feat/nym-pseudonym-derivation, head f8f71f9.
+
+derived-secrets.json is a VERBATIM copy of test-vectors/derived-secrets.json of
+sirosfoundation/privatedata-spec, main, merge commit 1b796d2 (SPEC 2.7, private_seed v2,
+per issuer). It replaces the Kotlin private-seed-vectors.json (v1, never released).
+
+Never edit by hand; re-copy and update the hashes in NymDerivedSecretsTests when the
+sources change.
+
+  sha256 derived-secrets.json                fdcdb5f01be080adaed1dc7a9f7c4bc9c9080322a92f764bc6a4b0a961209d2c
+  sha256 nym-pseudonym-vectors.json          8ca029a9719ac896a77282adf3a3d3ac9fb84c1bff7fec75af5f2e5489dd27ca
+  sha256 secret-seed-commitment-vectors.json 1b03550a7f6767a446a59f20f0a38f19e54bfde6e5c0ce52566b7d0bfe8ab5dd

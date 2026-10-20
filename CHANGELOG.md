@@ -52,6 +52,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round (over 38 digits) is refused, `in` members are deduplicated by value, the
   merge span is refused when it cannot be computed exactly, and a pre-check with a
   different number of lookups than functions is false. Not wired into the wallet yet.
+  pre-check cases). Not wired into the wallet yet.
+- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
+  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
+  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
+  with the four rulebook configs and the API-misuse errors, tested against the
+  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
+  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
+  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
+  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
+  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
+  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
+  files are byte-for-byte copies from siros-sdk-kotlin, `derived-secrets.json` from
+  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
+  over-65535-byte fields refused). Platform-neutral (swift-crypto
+  on Linux), no secret is logged or returned by a public API.
+- **`RulebookCircuitZkValidator`: the wallet-side satisfiability rules for a
+  planned `circuit_zk` request (nym_auth rulebook v0.3), data-driven.** Plain-data
+  plan/circuit types (`CircuitZkPlan`, `CircuitZkFunction`, `CircuitZkCircuit`,
+  `CircuitZkCircuitFilter`, `CircuitZkCircuitSource`), `CircuitZkRuleSet` (new
+  functions and pseudonym configs are entries, not code) and
+  `CircuitZkVerdict`. Every failure is `accessDenied`; the rule id is for local
+  logs and tests and never reaches the verifier. A `verifier_id_type` member in a
+  pseudonym item is accepted and ignored. Tested against the 63 shared
+  `circuit-zk-validator-vectors.json` cases (byte-for-byte copy from
+  siros-sdk-kotlin). Platform-neutral (also builds and tests on Linux).
+- **`circuit_zk` consent model: `PresentationConsentHandler`,
+  `PresentationConsentRequest` and `PresentationConsentBuilder`.** The
+  locale-free request a user approves before anything is signed or proved
+  (items `pseudonym`, `ageRange`, `claim`, `legacyPseudonym`, per credential,
+  with the verifier label and, for hosts and tests only, the trust framework
+  and `verifier_id_type`). The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`,
+  a throw or a timeout is a decline, and with no handler a `circuit_zk` request
+  is refused. `PresentationConsentRequest.shortened(verifierId:)` is the
+  display shortening. The builder is tested against the shared
+  `circuit-zk-consent-vectors.json` (copied byte-for-byte from siros-sdk-kotlin,
+  32 cases). Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob

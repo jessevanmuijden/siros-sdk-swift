@@ -1,0 +1,297 @@
+{
+  "status": "self-generated, not yet cross-checked with the circuit developers",
+  "rulebook": "nym_auth v0.3, pseudonym-v1-sha256",
+  "generator": "tools/gen_nym_pseudonym_vectors.py",
+  "vectors": [
+    {
+      "name": "known-offender ssc, x509_san_dns (bare lower-case DNS name)",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "expected_hex": "73621c21a2238c233720bc46707fd0da08ba1f7ad51fdba031369be927427f96"
+    },
+    {
+      "name": "known-offender ssc, semantic (VAT)",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "semantic",
+      "verifier_id": "semantic_id:VATSE-556000000101",
+      "expected_hex": "b512e175fb8faa65c11914270d617a8f5d81c9ce5ba73af896466ea1bac5a528"
+    },
+    {
+      "name": "known-offender ssc, semantic (LEI)",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "semantic",
+      "verifier_id": "semantic_id:LEIXG-529900T8BM49AURSDO55",
+      "expected_hex": "f1195efbfeae2feefb3d0a3ca1484124274eed05426e2151b1602da336ab98b9"
+    },
+    {
+      "name": "known-offender ssc, x509_san_uri",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_uri",
+      "verifier_id": "https://verifier.example.com/rp",
+      "expected_hex": "69ea58aee7042445332d073701e4e981e1f5d91ae2ad2a7b4247f5cf9134e66e"
+    },
+    {
+      "name": "known-offender ssc, decentralized_identifier",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "decentralized_identifier",
+      "verifier_id": "did:web:verifier.example.com",
+      "expected_hex": "440658aa863ed5576838ea32bea6785f65764d44aa02ad5a71311bbdaf0508cf"
+    },
+    {
+      "name": "known-offender ssc, openid_federation",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "openid_federation",
+      "verifier_id": "https://verifier.example.com/federation/entity",
+      "expected_hex": "dc197e260e0f1abb307b4c3feaba2d16974642dea30c2d63fab880612bb0680f"
+    },
+    {
+      "name": "known-offender ssc, other seed",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "expected_hex": "0709e013fe36ac4176fa606652012d3e96b9e1a1e98fd1bfbdd6a97d1f0c6187"
+    },
+    {
+      "name": "known-offender ssc, verbatim hashing: a mixed-case value is NOT lower-cased by the derivation",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "Verifier.Example.COM",
+      "expected_hex": "2437435281962f4887345feecbd2a663bad4f74f23ea2d62ab57485aad2e110c"
+    },
+    {
+      "name": "known-offender psc, x509_san_dns",
+      "config": "known-offender-matching-psc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "expected_hex": "8d338f94371c98d3c47f823a9a7aab864395b1f4d421152000ac5b424c1054e3"
+    },
+    {
+      "name": "known-offender psc, semantic, other seed",
+      "config": "known-offender-matching-psc",
+      "seed_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "verifier_id_type": "semantic",
+      "verifier_id": "semantic_id:VATSE-556000000101",
+      "expected_hex": "5038754a442e6dd9253881fde76ce932090be8a8f26281033f08a6752f7ea907"
+    },
+    {
+      "name": "known-offender psc vs ssc, same seed and id differ by DST",
+      "config": "known-offender-matching-psc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "semantic",
+      "verifier_id": "semantic_id:LEIXG-529900T8BM49AURSDO55",
+      "expected_hex": "a7fbfe3b188771cc52604bdfccd086afbaff00d58ea25dc9705261c339d7ba27"
+    },
+    {
+      "name": "account-recovery, ascii context",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "verifier_context": "account-1234",
+      "expected_hex": "223827c1f746a46c6f7323b0fcdab10253db431e89d2da1871bbc1109338ac3f"
+    },
+    {
+      "name": "account-recovery, semantic id",
+      "config": "account-recovery-ssc",
+      "seed_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "verifier_id_type": "semantic",
+      "verifier_id": "semantic_id:VATSE-556000000101",
+      "verifier_context": "account-1234",
+      "expected_hex": "a479c0a8ff66fec84c099e1eea1a3cec73c538c6f7382b5c2fab10ecbe1744f5"
+    },
+    {
+      "name": "account-recovery, multi-byte UTF-8 context",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "verifier_context": "könto-€-日本-🔒",
+      "expected_hex": "880b3a96bc29e1343b6ab802520c13f026dfd64ae6b921c2a965add49dc79914"
+    },
+    {
+      "name": "account-recovery, 64-byte context (boundary)",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "verifier_context": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected_hex": "77f9af56a552adc65d0c3486f58c7b216d9bccbad549626240d82a6f692079f2"
+    },
+    {
+      "name": "account-recovery, 65-byte context (derivation accepts any length)",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "verifier_context": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "expected_hex": "bc70dde92d9e67a0713cf1ba2debba7eaca59a9c115c685036762985ecdd78f9"
+    },
+    {
+      "name": "account-recovery, 64-byte multi-byte context (16 x 4-byte chars)",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "verifier_context": "🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒🔒",
+      "expected_hex": "e434cdfc58d8fd84a56de83acdadd3d376703ac071d221e42841e1eaaa259355"
+    },
+    {
+      "name": "account-recovery, empty context (derivation accepts any length)",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id_type": "x509_san_dns",
+      "verifier_id": "verifier.example.com",
+      "verifier_context": "",
+      "expected_hex": "8ff3c32cfa9d57c295443b613737f08f8cd8ce6f94dfe59287b6c93fa74de5ca"
+    },
+    {
+      "name": "xsite, 16-byte user value",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "prover_input_hex": "000102030405060708090a0b0c0d0e0f",
+      "expected_hex": "e686893cc7f45dee49cf1af6c0943808eb5756ed84ef6ad85d86a05ea1111984"
+    },
+    {
+      "name": "xsite, UTF-8 user value",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "prover_input_hex": "6d79207368617265642076c3a4726465",
+      "expected_hex": "707a9f85bda72e47fe7df07a69d44af0b982dac9574c9de6b9728ba812512745"
+    },
+    {
+      "name": "xsite, 100-byte user value",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "prover_input_hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "expected_hex": "821860616e77bfb78ba4bdb1ae13a75c045e4db8be9edc4541432d370c18af8d"
+    }
+  ],
+  "rejections": [
+    {
+      "name": "unknown config",
+      "config": "known-offender-matching-xyz",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id": "v",
+      "error": "UNKNOWN_CONFIG"
+    },
+    {
+      "name": "unknown config, bare name",
+      "config": "pseudonym-v1-sha256",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id": "v",
+      "error": "UNKNOWN_CONFIG"
+    },
+    {
+      "name": "known-offender ssc, missing verifier_id",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "error": "MISSING_INPUT"
+    },
+    {
+      "name": "known-offender psc, missing verifier_id",
+      "config": "known-offender-matching-psc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "error": "MISSING_INPUT"
+    },
+    {
+      "name": "account-recovery, missing verifier_id",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_context": "c",
+      "error": "MISSING_INPUT"
+    },
+    {
+      "name": "account-recovery, missing verifier_context",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id": "v",
+      "error": "MISSING_INPUT"
+    },
+    {
+      "name": "xsite, missing prover_input",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "error": "MISSING_INPUT"
+    },
+    {
+      "name": "known-offender ssc, verifier_context supplied",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id": "v",
+      "verifier_context": "c",
+      "error": "UNUSED_INPUT"
+    },
+    {
+      "name": "known-offender ssc, prover_input supplied",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id": "v",
+      "prover_input_hex": "00",
+      "error": "UNUSED_INPUT"
+    },
+    {
+      "name": "account-recovery, prover_input supplied",
+      "config": "account-recovery-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "verifier_id": "v",
+      "verifier_context": "c",
+      "prover_input_hex": "00",
+      "error": "UNUSED_INPUT"
+    },
+    {
+      "name": "xsite, verifier_id supplied",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "prover_input_hex": "00",
+      "verifier_id": "v",
+      "error": "UNUSED_INPUT"
+    },
+    {
+      "name": "xsite, verifier_context supplied",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f",
+      "prover_input_hex": "00",
+      "verifier_context": "c",
+      "error": "UNUSED_INPUT"
+    },
+    {
+      "name": "seed too short (15)",
+      "config": "known-offender-matching-ssc",
+      "seed_hex": "000102030405060708090a0b0c0d0e",
+      "verifier_id": "v",
+      "error": "WRONG_SEED_LENGTH"
+    },
+    {
+      "name": "seed too long (17)",
+      "config": "known-offender-matching-psc",
+      "seed_hex": "000102030405060708090a0b0c0d0e0f00",
+      "verifier_id": "v",
+      "error": "WRONG_SEED_LENGTH"
+    },
+    {
+      "name": "seed empty",
+      "config": "account-recovery-ssc",
+      "seed_hex": "",
+      "verifier_id": "v",
+      "verifier_context": "c",
+      "error": "WRONG_SEED_LENGTH"
+    },
+    {
+      "name": "seed 32 bytes",
+      "config": "user-managed-pseudonym-xsite-ssc",
+      "seed_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "prover_input_hex": "00",
+      "error": "WRONG_SEED_LENGTH"
+    }
+  ]
+}
