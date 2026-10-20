@@ -137,6 +137,52 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertFalse(holds("d", ["gt": .string("2024-03-01")], .date, "2024-03-01"))
     }
 
+    // Copilot review: numeric exactness and the lookup count.
+    private let numbers = PredicateFunctions([
+        PredicateFunction(id: "n", claim: .param, valueType: .number,
+                          comparisons: [.init(param: "in", op: .in), .init(param: "ge", op: .ge), .init(param: "le", op: .le)], minSpan: 10),
+    ])
+
+    private func n(_ params: [String: JSONValue]) -> CircuitZkFunction {
+        CircuitZkFunction(id: "n", handle: "h", params: params.merging(["claim": .string("c")]) { a, _ in a })
+    }
+
+    private func parse(_ text: String) throws -> JSONValue { try StrictJSON.parse(text) }
+
+    func testNumericInMembersAreDeduplicatedByValueNotSpelling() throws {
+        let fn = numbers["n"]!
+        XCTAssertNil(fn.parse(n(["in": try parse("[1, 1.0, 1e0]")])), "the same number three ways is a duplicate")
+        XCTAssertNil(fn.parse(n(["in": try parse("[10, 1e1]")])))
+        XCTAssertNotNil(fn.parse(n(["in": try parse("[1, 2.5, 3e0]")])))
+    }
+
+    func testNumbersThatCannotBeRepresentedExactlyAreRefusedNotRounded() throws {
+        let fn = numbers["n"]!
+        let long = "12345678901234567890123456789012345678901"      // 41 digits
+        XCTAssertNil(fn.parse(n(["ge": try parse(long)])), "a bound Decimal would round")
+        XCTAssertNil(fn.parse(n(["in": try parse("[\(long)]")])))
+        // Two distinct 40-digit lookups must not compare equal in the precheck.
+        let a = "1234567890123456789012345678901234567890", b = "1234567890123456789012345678901234567891"
+        let f = n(["ge": try parse(a)])
+        XCTAssertNil(fn.parse(f), "40 digits exceeds Decimal's exact range, so it is refused up front")
+        XCTAssertFalse(numbers.precheck(functions: [f], lookups: [.found(type: .number, text: b)]), "and never judged by a rounded compare")
+    }
+
+    func testTheMergeSpanIsRefusedWhenItCannotBeComputedExactly() throws {
+        // Exact width 10 - 1e-100 is below 10, but Decimal would round it to 10 and accept.
+        let plans = [[n(["ge": try parse("1e-100")])], [n(["le": .int(10)])]]
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: plans))
+        // A plain wide range still passes.
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": .int(0)])], [n(["le": .int(10)])]]))
+    }
+
+    func testPrecheckWithMissingLookupsIsNotSatisfied() {
+        let f = n(["ge": .int(1)])
+        XCTAssertFalse(numbers.precheck(functions: [f], lookups: []), "a missing lookup must not skip the function")
+        XCTAssertFalse(numbers.precheck(functions: [f, f], lookups: [.unsupported]))
+        XCTAssertTrue(numbers.precheck(functions: [f], lookups: [.unsupported]))
+    }
+
     func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
         XCTAssertNotNil(PredicateFunctions.default["age_check"])
         XCTAssertNil(PredicateFunctions.default["number_range"])

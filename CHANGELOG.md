@@ -25,7 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
   shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
   byte-for-byte from siros-sdk-kotlin: 62 consent cases, 17 merge cases, 22
-  pre-check cases). Not wired into the wallet yet.
+  pre-check cases). Numbers are compared as exact decimals: a value Decimal would
+  round (over 38 digits) is refused, `in` members are deduplicated by value, the
+  merge span is refused when it cannot be computed exactly, and a pre-check with a
+  different number of lookups than functions is false. Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
