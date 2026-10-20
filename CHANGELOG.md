@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-check cases). Numbers are compared as exact decimals: a value Decimal would
   round (over 38 digits) is refused, `in` members are deduplicated by value, the
   merge span is refused when it cannot be computed exactly, and a pre-check with a
-  different number of lookups than functions is false. Not wired into the wallet yet.
+  different number of lookups than functions is false; float operands must be finite
+  and exact. `requestSigned` is a required argument (the signature result, never
+  defaulted) and an empty query list is refused. Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
