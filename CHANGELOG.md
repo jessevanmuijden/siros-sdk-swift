@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the WMP replay marker.** `FlowCompleteMessage` (engine) and the new
   `WmpFlowCompleteResult` (`wmp.flow.complete`) carry `credentialMetadata`
   (`CredentialResponseMetadata`: the object verbatim, unknown members intact, a
-  non-object becomes a malformed placeholder instead of failing the frame, so
+  non-object, an explicit `null` included, becomes a malformed placeholder instead of failing the frame (only an absent key is nil), so
   an issuance is refused rather than left hanging) and
   `credentialMetadataEncryptedResponse` (a lenient flag, never true by
   accident). The metadata may hold a delivered secret: its `description`,

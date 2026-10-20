@@ -35,7 +35,7 @@ final class CredentialResponseMetadataTests: XCTestCase {
     /// A malformed value must not drop the frame (the engine decodes with `try?`, so a throw
     /// would leave the issuance hanging); the credentials and their notification_id stay readable.
     func testMalformedValuesBecomeAPlaceholderAndTheFrameStillDecodes() throws {
-        for malformed in ["[]", "[{\"type\":\"x\",\"value\":1}]", "\"str\"", "7", "true"] {
+        for malformed in ["[]", "[{\"type\":\"x\",\"value\":1}]", "\"str\"", "7", "true", "null"] {
             let msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: complete(",\"credential_metadata\":\(malformed)"))
             XCTAssertEqual(msg.credentialMetadata?.isMalformed, true, malformed)
             XCTAssertEqual(msg.credentialMetadata?.members.isEmpty, true, malformed)
@@ -104,6 +104,15 @@ final class CredentialResponseMetadataTests: XCTestCase {
         let r = try wmpResult(#"{"credentials":[],"credential_metadata":{},"redacted_members":["dpop_key_id"]}"#)
         XCTAssertFalse(r.credentialMetadataWithheld)
         XCTAssertTrue(r.renewalMaterialWithheld)
+    }
+
+    func testAnExplicitNullIsMalformedNotAbsent() throws {
+        let engine = try JSONDecoder().decode(FlowCompleteMessage.self, from: complete(",\"credential_metadata\":null"))
+        XCTAssertEqual(engine.credentialMetadata?.isMalformed, true)
+        let wmp = try wmpResult(#"{"credentials":[],"credential_metadata":null}"#)
+        XCTAssertEqual(wmp.credentialMetadata?.isMalformed, true)
+        // a truly absent key stays nil
+        XCTAssertNil(try wmpResult(#"{"credentials":[]}"#).credentialMetadata)
     }
 
     func testMalformedWmpMembersDoNotFailTheFrame() throws {

@@ -550,6 +550,24 @@ public struct FlowCompleteMessage: Codable, Sendable {
         case credentialMetadata = "credential_metadata"
         case credentialMetadataEncryptedResponse = "credential_metadata_encrypted_response"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        flowId = try c.decode(String.self, forKey: .flowId)
+        credentials = try c.decodeIfPresent([CredentialResult].self, forKey: .credentials)
+        redirectUri = try c.decodeIfPresent(String.self, forKey: .redirectUri)
+        typeMetadata = try c.decodeIfPresent(AnyCodable.self, forKey: .typeMetadata)
+        credentialIssuer = try c.decodeIfPresent(String.self, forKey: .credentialIssuer)
+        selectedCredentialConfigurationId = try c.decodeIfPresent(String.self, forKey: .selectedCredentialConfigurationId)
+        refreshToken = try c.decodeIfPresent(String.self, forKey: .refreshToken)
+        dpopJwk = try c.decodeIfPresent(String.self, forKey: .dpopJwk)
+        dpopKeyId = try c.decodeIfPresent(String.self, forKey: .dpopKeyId)
+        timestamp = try c.decodeIfPresent(String.self, forKey: .timestamp)
+        // An explicit null is malformed, not "absent": see CredentialResponseMetadata.decode.
+        credentialMetadata = CredentialResponseMetadata.decode(from: c, forKey: .credentialMetadata)
+        credentialMetadataEncryptedResponse = try c.decodeIfPresent(LenientFlag.self, forKey: .credentialMetadataEncryptedResponse)
+    }
 }
 
 public struct CredentialResult: Codable, Sendable {

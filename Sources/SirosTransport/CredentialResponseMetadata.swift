@@ -56,6 +56,14 @@ public struct CredentialResponseMetadata: Sendable, Equatable, Codable,
         self.init(members: object)
     }
 
+    /// The metadata member of a frame: nil only when the key is ABSENT. An explicit `null` (or any other
+    /// non-object) is the ``malformed`` placeholder, so a consumer can tell "the issuer sent no metadata"
+    /// from "the issuer sent something that is not an object" and refuse the latter.
+    public static func decode<Key: CodingKey>(from container: KeyedDecodingContainer<Key>, forKey key: Key) -> CredentialResponseMetadata? {
+        guard container.contains(key) else { return nil }
+        return (try? container.decode(CredentialResponseMetadata.self, forKey: key)) ?? .malformed
+    }
+
     /// Always encodes JSON `null`: the content is never written out by this type.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()

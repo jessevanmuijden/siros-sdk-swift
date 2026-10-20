@@ -33,7 +33,8 @@ public struct WmpFlowCompleteResult: Decodable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // A credential list that does not decode is an error: nothing can be stored without it.
         credentials = try c.decodeIfPresent([CredentialResult].self, forKey: .credentials)
-        credentialMetadata = try c.decodeIfPresent(CredentialResponseMetadata.self, forKey: .credentialMetadata)
+        // An explicit null is malformed, not "absent": see CredentialResponseMetadata.decode.
+        credentialMetadata = CredentialResponseMetadata.decode(from: c, forKey: .credentialMetadata)
         credentialMetadataEncryptedResponse = try c.decodeIfPresent(LenientFlag.self, forKey: .credentialMetadataEncryptedResponse)
         redactedMembers = try c.decodeIfPresent(RedactedMembers.self, forKey: .redactedMembers)
         // Withheld or mistyped token members are simply absent, never a failure of the frame.
