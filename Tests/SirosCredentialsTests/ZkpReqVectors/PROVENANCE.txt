@@ -1,5 +1,5 @@
-zkp_req, zkp_req_response, zkp_req_unsat and proof_time (the *.json files and the directories' own README.md
-are not copied; the JSON files are VERBATIM) come from
+zkp_req, zkp_req_response, zkp_req_unsat and proof_time (the *.json files, and the directories own README.md
+files, which the digest excludes; all VERBATIM) come from
 crates/siros-dc-matcher-core/tests/vectors/ in sirosfoundation/siros-dc-matcher, squash commit
 93047bc7b8a22117fbc9b4c8cd59ce7cd742e8d3 (PR 50, rulebook v0.4). Never edit by hand; re-copy and update the
 digest in ZkpReqVectorsTests when the source changes.

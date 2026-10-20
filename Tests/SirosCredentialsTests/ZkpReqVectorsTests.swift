@@ -161,4 +161,48 @@ final class ZkpReqVectorsTests: XCTestCase {
         XCTAssertEqual(prefixed, "6eae85a0b2dfcd7d8b716291e54a004da798f93a26a248c265becd33a04a6bab")
         XCTAssertNotEqual(prefixed, bare)
     }
+
+    // MARK: building
+
+    private func normativePlan() throws -> ZkpReqPlan {
+        let query = """
+        {"id":"nym_attestation","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"eu.europa.ec.eudi.nym_auth.1"},
+         "_req":[{"fn_id":"pseudonym","return":"nym","params":{"config":"known-offender-matching-ssc","ver":1,"prf":"sha-256"}},
+                 {"fn_id":"age_check","return":"age","params":{"ge":"2008-10-10","le":"2013-10-09"}}]}
+        """
+        let metadata = #"{"vp_formats_supported":{"zkp_req":{"system_id_values":["urn:circuits:longfellow:nym_auth:v1"]}}}"#
+        return try ZkpReqPlanner.plan(credentialQuery: query, clientMetadata: metadata)
+    }
+
+    private func build(proofTime: String? = "2026-10-20T12:00:00Z", keys: [[UInt8]] = [[1, 2, 3]], pseudonym: [UInt8] = Array(repeating: 7, count: 32)) throws -> String {
+        let plan = try normativePlan()
+        let presentation = ZkpReqPresentationBuilder.encode(
+            systemId: "urn:circuits:longfellow:nym_auth:v1", proof: [9, 9], issuerKeySet: keys, proofTime: proofTime,
+            results: [("nym", .pseudonym(pseudonym)), ("age", .predicateSatisfied)])
+        return try ZkpReqPresentationBuilder.vpToken(for: plan, presentations: [presentation])
+    }
+
+    func testABuiltPresentationPassesTheValidatorAndRoundTrips() throws {
+        let token = try build()
+        let parsed = try ZkpReqResponseValidator.parse(try normativePlan(), vpToken: token)
+        XCTAssertEqual(parsed.count, 1)
+        XCTAssertEqual(parsed[0].proofTime, "2026-10-20T12:00:00Z")
+        XCTAssertEqual(parsed[0].proofTime?.utf8.count, 20)
+        XCTAssertEqual(parsed[0].issuerKeySet, [[1, 2, 3]])
+        XCTAssertEqual(parsed[0].results.map(\.handle), ["nym", "age"])
+        XCTAssertFalse("\(parsed[0])".contains("007"), "description is redacted")
+    }
+
+    func testAnInvalidPresentationIsNeverReturned() throws {
+        func code(_ body: () throws -> String) -> String? {
+            do { _ = try body(); return nil } catch let e as ZkpReqPresentationBuilder.Refusal { if case .invalid(let c) = e { return c.code } else { return nil } } catch { return "other" }
+        }
+        XCTAssertEqual(code { try self.build(proofTime: nil) }, "proof_time_missing", "mso_mdoc requires proof_time")
+        XCTAssertEqual(code { try self.build(proofTime: "2026-10-20T12:00:00.000Z") }, "proof_time_form")
+        XCTAssertEqual(code { try self.build(keys: []) }, "issuer_key_set_empty")
+        XCTAssertEqual(code { try self.build(keys: Array(repeating: [1], count: 9)) }, "issuer_key_set_too_many")
+        XCTAssertEqual(code { try self.build(keys: [[UInt8](repeating: 1, count: 4097)]) }, "issuer_key_too_large")
+        XCTAssertEqual(code { try self.build(pseudonym: [1]) }, "pseudonym_wrong_length")
+        XCTAssertNotNil(try? self.build(keys: Array(repeating: [UInt8](repeating: 1, count: 4096), count: 8)), "limits are inclusive")
+    }
 }
