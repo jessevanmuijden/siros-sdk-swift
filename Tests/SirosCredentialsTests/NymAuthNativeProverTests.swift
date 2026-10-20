@@ -6,7 +6,7 @@ import XCTest
 final class NymAuthNativeProverTests: XCTestCase {
     private func request() -> NymAuthProveRequest {
         NymAuthProveRequest(
-            system: "longfellow-libzk-v1", circuitId: "c", circuitParams: ["k": .int(1)], circuit: Data([1, 2, 3]),
+            system: "longfellow-libzk-v1", circuitId: "c", artifactHash: "sha256:abc", circuitParams: ["k": .int(1)], circuit: Data([1, 2, 3]),
             issuerSigned: Data([4]), secretSeed: Array(repeating: 0xAB, count: 16), issuerKeyX: Array(repeating: 1, count: 32),
             issuerKeyY: Array(repeating: 2, count: 32), time: "2026-10-20T00:00:00Z", earliest: "0000-00-00", cutoff: "9999-12-31",
             challengeDigest: Array(repeating: 3, count: 32), deviceSignature: Array(repeating: 4, count: 64),

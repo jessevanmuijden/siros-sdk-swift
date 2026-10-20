@@ -103,7 +103,10 @@ public struct NymAuthNativeError: Error, Sendable, Equatable, CustomStringConver
 public struct NymAuthProveRequest: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     /// The catalog `system` of the circuit.
     public let system: String
+    /// The catalog's circuit id, which the presentation states as `system_id` (rulebook v0.4).
     public let circuitId: String
+    /// The catalog's hash of the circuit artifact (what ``circuit`` was verified against).
+    public let artifactHash: String
     /// The catalog descriptor's `params`, verbatim.
     public let circuitParams: [String: JSONValue]
     /// The decompressed circuit artifact, its hash verified against the catalog. Do not retain it past the call.
@@ -115,7 +118,8 @@ public struct NymAuthProveRequest: Sendable, CustomStringConvertible, CustomDebu
     /// Big-endian x and y of the issuer key (the `x5chain` leaf), 32 bytes each.
     public let issuerKeyX: [UInt8]
     public let issuerKeyY: [UInt8]
-    /// `T`: `YYYY-MM-DDThh:mm:ssZ`, 20 ASCII characters.
+    /// `T`, the `proof_time` the PROVER supplies (rulebook v0.4; never a verifier-chosen time and not the request's
+    /// `iat`): `YYYY-MM-DDThh:mm:ssZ`, exactly 20 ASCII characters, rendered from the wallet's clock.
     public let time: String
     /// `E`: `YYYY-MM-DD`, `0000-00-00` for no lower bound.
     public let earliest: String
@@ -125,18 +129,19 @@ public struct NymAuthProveRequest: Sendable, CustomStringConvertible, CustomDebu
     public let challengeDigest: [UInt8]
     /// The device key's ES256 signature on that message, `r || s`, 64 bytes.
     public let deviceSignature: [UInt8]
-    /// `SHA-256(verifier_id)`, 32 bytes.
+    /// `SHA-256(verifier_id)` of the PREFIXED verifier id (`x509_san_dns:<dns>`, `semantic_id:<id>`), 32 bytes.
     public let verifierInput: [UInt8]
     /// The SessionTranscript the proof is bound to (Longfellow's Fiat-Shamir seed).
     public let transcriptSeed: [UInt8]
 
     public init(
-        system: String, circuitId: String, circuitParams: [String: JSONValue], circuit: Data, issuerSigned: Data,
+        system: String, circuitId: String, artifactHash: String, circuitParams: [String: JSONValue], circuit: Data, issuerSigned: Data,
         secretSeed: [UInt8], issuerKeyX: [UInt8], issuerKeyY: [UInt8], time: String, earliest: String, cutoff: String,
         challengeDigest: [UInt8], deviceSignature: [UInt8], verifierInput: [UInt8], transcriptSeed: [UInt8]
     ) {
         self.system = system
         self.circuitId = circuitId
+        self.artifactHash = artifactHash
         self.circuitParams = circuitParams
         self.circuit = circuit
         self.issuerSigned = issuerSigned

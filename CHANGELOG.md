@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every request with `NymAuthNativeError(.noNativeProver)`; nothing is substituted.
   Binding failures map to coarse kinds (and, for a refusal, a coarse reason) and carry
   no message; the request (it holds the delivered seed) and response redact their
-  description, debug description and mirror. Not wired into the wallet.
+  description, debug description and mirror. The request mirrors the Kotlin ABI: `circuitId` is the catalog circuit id the presentation states as `system_id`, `artifactHash` the catalog hash of the verified circuit, `time` the PROVER-supplied `proof_time` (rulebook v0.4, exactly 20 bytes), `verifierInput` the SHA-256 of the PREFIXED verifier id. Not wired into the wallet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
