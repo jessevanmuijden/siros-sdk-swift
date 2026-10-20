@@ -139,6 +139,11 @@ public enum PresentationConsentBuilder {
 
     /// Both bounds -> between; only `le` -> at least; only `ge` -> at most (completed years, never below 0).
     private static func ageForm(_ conditions: [PredicateCondition], today: CivilDate) -> PredicateAgeForm? {
+        // The age wording says only the birth date's range and that the exact date is not shared. It is used only
+        // when EVERY condition is one `ge` and/or one `le` bound: any other comparison (an `eq` reveals the date)
+        // falls back to the generic wording, which states every comparison.
+        let ops = conditions.map(\.op)
+        guard ops.allSatisfy({ $0 == .ge || $0 == .le }), Set(ops).count == ops.count else { return nil }
         let ge = conditions.first { $0.op == .ge }?.values.first
         let le = conditions.first { $0.op == .le }?.values.first
         let geDate = ge.flatMap { CivilDate($0) }, leDate = le.flatMap { CivilDate($0) }

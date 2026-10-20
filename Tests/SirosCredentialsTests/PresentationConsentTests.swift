@@ -217,6 +217,33 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertFalse(numbers.precheck(functions: [n(["ge": .double(.nan)])], lookups: [.unsupported]), "an unsupported lookup must not wave an invalid operand through")
     }
 
+    func testAnAgeFunctionWithAnyOtherComparisonFallsBackToTheGenericWording() throws {
+        let registry = PredicateFunctions([
+            PredicateFunction(id: "age_plus", claim: .fixed(["birth_date"]), valueType: .date,
+                              comparisons: [.init(param: "ge", op: .ge), .init(param: "le", op: .le), .init(param: "eq", op: .eq)],
+                              minSpan: 365, ageSpecialisation: true),
+        ])
+        func predicate(_ params: [String: JSONValue]) throws -> PresentationConsentPredicate {
+            let query = CircuitZkConsentQuery(
+                plan: [CircuitZkFunction(id: "age_plus", handle: "a", params: params)],
+                credential: PresentationConsentCredential(name: nil, issuer: nil))
+            let request = try XCTUnwrap(PresentationConsentBuilder.build(
+                queries: [query], functions: registry, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+                verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil,
+                requestSigned: true, today: "2026-10-19"))
+            guard case .predicate(let p) = request.entries[0].items[0] else { throw XCTSkip("not a predicate") }
+            return p
+        }
+        // An equality reveals the date: no age form, so every comparison is worded.
+        let withEq = try predicate(["le": .string("2008-10-19"), "eq": .string("2000-01-01")])
+        XCTAssertNil(withEq.ageForm)
+        XCTAssertEqual(withEq.conditions.map(\.op), [.le, .eq])
+        XCTAssertNil(try predicate(["ge": .string("1990-01-01"), "le": .string("2010-01-01"), "eq": .string("2000-01-01")]).ageForm)
+        // Bounds alone keep the age wording.
+        XCTAssertNotNil(try predicate(["ge": .string("1990-01-01"), "le": .string("2010-01-01")]).ageForm)
+        XCTAssertNotNil(try predicate(["le": .string("2008-10-19")]).ageForm)
+    }
+
     func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
         XCTAssertNotNil(PredicateFunctions.default["age_check"])
         XCTAssertNil(PredicateFunctions.default["number_range"])
