@@ -97,7 +97,7 @@ jobs:
         #    SirosWalletCredentialSelectionDcqlIntegrationTests (4) + SirosWalletDCAPITests (1): they assert the
         #    built-in matcher's answer for fixtures whose raw credentials the iOS-only shared DCQL engine
         #    cannot read, so the engine answers differently. Test-fixture problem, not a product bug;
-        #    tracked in the issue linked from this PR.
+        #    tracked in https://github.com/sirosfoundation/siros-sdk-swift/issues/213 (delete the skips there).
         run: >
           xcodebuild test
           -scheme SirosSDK-Package

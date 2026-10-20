@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CI: the SwiftPM unit tests run on an iOS Simulator (`Test (iOS Simulator)`).** Until now nothing
+  ran the `#if os(iOS)` code or tests: `Test (macOS)` compiles them out and `Build (iOS)` only
+  compiles. Ten tests that fail only on iOS are skipped by name and tracked in
+  https://github.com/sirosfoundation/siros-sdk-swift/issues/213, so a new iOS failure fails the job. The card-stack
+  UI tests wait for the deck to be still before each gesture (they failed in different CI runs and passed
+  on re-run).
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
