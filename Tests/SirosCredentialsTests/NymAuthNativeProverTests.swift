@@ -40,14 +40,26 @@ final class NymAuthNativeProverTests: XCTestCase {
     }
 
     func testRequestAndResponseNeverPrintTheirContent() {
+        // The request holds the seed.
         var dumped = ""
         dump(request(), to: &dumped)
-        dump(NymAuthProveResponse(proof: [0xCD], pseudonym: [0xEF]), to: &dumped)
-        let all = [dumped, "\(request())", "\(String(reflecting: request()))"].joined()
+        let all = [dumped, "\(request())", String(reflecting: request())].joined()
         for needle in ["171", "0xAB", "ab", "2026-10-20", "longfellow"] {
             XCTAssertFalse(all.contains(needle), needle)
         }
         XCTAssertEqual("\(request())", "NymAuthProveRequest(redacted)")
+        XCTAssertEqual(Mirror(reflecting: request()).children.count, 0)
+
+        // The response holds the proof (205 = 0xCD) and the pseudonym (239 = 0xEF).
+        let response = NymAuthProveResponse(proof: [0xCD, 0xCD], pseudonym: [0xEF, 0xEF])
+        var responseDump = ""
+        dump(response, to: &responseDump)
+        for text in [responseDump, "\(response)", String(reflecting: response)] {
+            for needle in ["205", "239", "0xCD", "0xEF", "cd", "ef"] { XCTAssertFalse(text.contains(needle), "\(needle) in \(text)") }
+        }
+        XCTAssertEqual("\(response)", "NymAuthProveResponse(redacted)")
+        XCTAssertEqual(String(reflecting: response), "NymAuthProveResponse(redacted)")
+        XCTAssertEqual(Mirror(reflecting: response).children.count, 0)
     }
 
     func testBindingErrorsMapToCoarseKindsWithoutAMessage() {
