@@ -12,10 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Generated/siros_dc_matcher_ffi.swift` from the v0.10.0 tag (keeping the
   `#if os(iOS)` gate) and updated the `Package.swift` checksum. The FFI gains
   `FfiCapability`/`addCircuitZkSystem` (the `circuit_zk` capability match),
-  `FfiMatchedCredentialSet.purposes` and `droppedIsExact`; nothing in this SDK
-  calls them yet. No behaviour change for DCQL matching: the iOS simulator
-  `CredentialMatcherTests` give the same result before and after (4 failures,
-  pre-existing on 0.6.2).
+  `FfiMatchedCredentialSet.purposes` and `droppedIsExact`; nothing in this SDK calls
+  them yet, so this SDK's wiring is unchanged. **The engine's matching semantics are
+  not unchanged**, they are inherited from upstream 0.7.0-0.10.0: an absent
+  `zk_required` now means the proof is optional (it was read as required); a
+  verifier's `multiple` is honoured; duplicate DCQL identifiers are rejected; a
+  verifier requiring cryptographic holder binding is honoured; the combination
+  count says whether it is exact. The iOS simulator `CredentialMatcherTests` give the
+  same result before and after (4 failures, pre-existing on 0.6.2), but that does not
+  establish unchanged behaviour for a `zk_system_type` request without `zk_required`;
+  that needs a targeted regression on an iOS device or simulator and a human review.
 
 ### Added
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
