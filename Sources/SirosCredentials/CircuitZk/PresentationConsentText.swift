@@ -138,7 +138,12 @@ public struct PresentationConsentText: Sendable {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
         let components = DateComponents(calendar: calendar, timeZone: calendar.timeZone, year: day.year, month: day.month, day: day.day, hour: 12)
-        guard let value = calendar.date(from: components) else { return iso }
+        // Foundation's Gregorian calendar normalises the dates the historical cutover skips (1582-10-10 becomes
+        // 1582-10-20). The consent must name the predicate's own date, so a conversion that does not preserve year,
+        // month and day falls back to the original ISO text.
+        guard let value = calendar.date(from: components),
+              calendar.dateComponents([.year, .month, .day], from: value) == DateComponents(year: day.year, month: day.month, day: day.day)
+        else { return iso }
         let formatter = DateFormatter()
         formatter.locale = locale
         formatter.calendar = calendar

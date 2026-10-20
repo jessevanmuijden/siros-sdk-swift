@@ -102,7 +102,14 @@ extension PredicateFunction {
         }
         var allowed = Set(comparisons.map(\.param))
         if case .param = claim { allowed.insert("claim") }
+        allowed.insert("source")
         guard params.keys.allSatisfy({ allowed.contains($0) }) else { return nil }
+        // `source` (the rulebook example item: `{"path": [claim]}`) is accepted when it names the function's own
+        // claim, otherwise the request is refused.
+        if let source = params["source"] {
+            guard case .object(let object) = source, object.count == 1, case .array(let parts)? = object["path"],
+                  parts.compactMap(\.stringValue) == path, parts.count == path.count else { return nil }
+        }
 
         var conditions: [PredicateCondition] = []
         for comparison in comparisons {
@@ -299,8 +306,9 @@ extension PredicateFunctions {
 /// beyond 38 digits, and a rounded width could let a too-narrow range through, so the check is
 /// done on the digits of the bounds' own texts.
 enum ExactDecimal {
-    /// The exponents a bound may have: beyond this the digit strings would be absurdly long.
-    private static let maxExponent = 1000
+    /// The widest difference in scale (digits) two bounds may have: beyond this the exact arithmetic would need
+    /// absurdly long digit strings (`1` and `1e999999999`), so the width is refused instead of computed.
+    static let maxScaleDifference = 4096
 
     private struct Value {
         let negative: Bool
@@ -311,7 +319,7 @@ enum ExactDecimal {
     private static func parse(_ text: String) -> Value? {
         let lower = text.lowercased()
         let parts = lower.split(separator: "e", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        guard parts.count <= 2, let exponentPart = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
+        guard parts.count <= 2, let exponentPart = parts.count == 2 ? Int(parts[1]) : 0, abs(exponentPart) <= 1 << 40 else { return nil }
         var mantissa = parts[0]
         let negative = mantissa.hasPrefix("-")
         if negative { mantissa.removeFirst() }
@@ -320,9 +328,9 @@ enum ExactDecimal {
         let fraction = pieces.count == 2 ? pieces[1] : ""
         let all = Array((whole + fraction).utf8)
         guard all.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }) else { return nil }
-        let exponent = exponentPart - fraction.count
-        guard abs(exponent) <= maxExponent else { return nil }
-        return Value(negative: negative, digits: Array(all.drop(while: { $0 == 0x30 }).map { $0 - 0x30 }), exponent: exponent)
+        let digits = Array(all.drop(while: { $0 == 0x30 }).map { $0 - 0x30 })
+        // Zero has no scale: its exponent is irrelevant (0e999999999 is just 0).
+        return Value(negative: negative, digits: digits, exponent: digits.isEmpty ? 0 : exponentPart - fraction.count)
     }
 
     /// The digits of `value` scaled to the exponent `to` (which is not above its own).
@@ -354,6 +362,10 @@ enum ExactDecimal {
     /// Whether `upper - lower >= minimum` exactly, or nil when a bound is not a readable number.
     static func widthAtLeast(upper: String, lower: String, minimum: Int) -> Bool? {
         guard minimum >= 0, let hi = parse(upper), let lo = parse(lower) else { return nil }
+        // Refuse a span whose bounds differ in scale (magnitude, in digits) by more than the limit.
+        let hiScale = hi.digits.isEmpty ? 0 : hi.exponent + hi.digits.count, loScale = lo.digits.isEmpty ? 0 : lo.exponent + lo.digits.count
+        guard abs(hiScale - loScale) <= maxScaleDifference, abs(hi.exponent - lo.exponent) <= maxScaleDifference + max(hi.digits.count, lo.digits.count)
+        else { return nil }
         let exponent = min(hi.exponent, lo.exponent, 0)
         let high = scaled(hi, to: exponent), low = scaled(lo, to: exponent)
         let required = scaled(

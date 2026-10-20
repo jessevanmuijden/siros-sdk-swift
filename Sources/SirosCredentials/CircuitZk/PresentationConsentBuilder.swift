@@ -8,11 +8,18 @@ public struct CircuitZkConsentQuery: Sendable {
     public let plan: [CircuitZkFunction]
     public let credential: PresentationConsentCredential
     public let claims: [PresentationConsentClaimRef]
+    /// The credential's doctype namespace, when known: its claim metadata paths are `[namespace, element]`, so a
+    /// predicate on `score` is labelled by the entry `[namespace, "score"]`, never by another namespace's `score`.
+    public let namespace: String?
 
-    public init(plan: [CircuitZkFunction], credential: PresentationConsentCredential, claims: [PresentationConsentClaimRef] = []) {
+    public init(
+        plan: [CircuitZkFunction], credential: PresentationConsentCredential, claims: [PresentationConsentClaimRef] = [],
+        namespace: String? = nil
+    ) {
         self.plan = plan
         self.credential = credential
         self.claims = claims
+        self.namespace = namespace
     }
 }
 
@@ -76,6 +83,7 @@ public enum PresentationConsentBuilder {
                 }
             }
         }
+        entries = entries.map { PresentationConsentEntry(credential: $0.credential, items: withoutAgeWordingWhereRevealed($0.items, in: entries)) }
         let verifier = PresentationConsentVerifier(
             label: label(trust: trust, clientName: verifiedClientIdDisplayName, origin: attestedOrigin),
             trustFramework: trust.framework,
@@ -92,7 +100,7 @@ public enum PresentationConsentBuilder {
         "known-offender-matching-psc": (.perVerifier, false),
     ]
 
-    private static let pseudonymFunction = "pseudonym-v1-sha256"
+    private static let pseudonymFunction = "pseudonym"
     private static let legacyDisclosureFunction = "zk-claim-disclosure-v1"
 
     private static func items(
@@ -120,16 +128,42 @@ public enum PresentationConsentBuilder {
                 }
             default:
                 guard let registered = functions[function.id], let parsed = registered.parse(function) else { return nil }
-                out.append(.predicate(predicate(registered, parsed, claims: query.claims, today: today)))
+                out.append(.predicate(predicate(registered, parsed, claims: query.claims, namespace: query.namespace, today: today)))
             }
         }
         return out.isEmpty ? nil : out
     }
 
+    /// The age wording says the exact birth date is not shared. It is dropped (the generic wording states every
+    /// comparison) for an age predicate whose claim the request reveals elsewhere: a disclosure of that claim
+    /// (legacy `claims`), or another predicate on it that is not itself a ge/le age bound (an equality, a set).
+    private static func withoutAgeWordingWhereRevealed(
+        _ items: [PresentationConsentItem], in all: [PresentationConsentEntry]
+    ) -> [PresentationConsentItem] {
+        let everything = all.flatMap(\.items)
+        func revealed(_ path: [String], except own: PresentationConsentPredicate) -> Bool {
+            everything.contains { other in
+                switch other {
+                case .claim(let name): return [name] == path
+                case .predicate(let predicate):
+                    return predicate != own && predicate.claim.path == path && predicate.ageForm == nil
+                default: return false
+                }
+            }
+        }
+        return items.map { item in
+            guard case .predicate(let predicate) = item, predicate.ageForm != nil, revealed(predicate.claim.path, except: predicate) else { return item }
+            return .predicate(PresentationConsentPredicate(
+                functionId: predicate.functionId, claim: predicate.claim, valueType: predicate.valueType,
+                conditions: predicate.conditions, ageForm: nil))
+        }
+    }
+
     private static func predicate(
-        _ registered: PredicateFunction, _ parsed: ParsedPredicate, claims: [PresentationConsentClaimRef], today: CivilDate
+        _ registered: PredicateFunction, _ parsed: ParsedPredicate, claims: [PresentationConsentClaimRef], namespace: String?, today: CivilDate
     ) -> PresentationConsentPredicate {
-        let label = claims.first { $0.path == parsed.path }?.label
+        let metadataPath = (namespace.map { [$0] } ?? []) + parsed.path
+        let label = claims.first { $0.path == metadataPath }?.label
         let usable = label.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         return PresentationConsentPredicate(
             functionId: registered.id, claim: PresentationConsentClaimRef(path: parsed.path, label: usable),

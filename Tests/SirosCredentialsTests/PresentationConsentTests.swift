@@ -11,7 +11,7 @@ import CryptoKit
 /// registry-driven local pre-check and the cross-query merge, against this SDK.
 final class PresentationConsentTests: XCTestCase {
 
-    private static let vectorsHash = "4b7e25d8cde1b107e0c016c1ade3ace939ee8f3eb98670ed1ff141ddffdadf3e"
+    private static let vectorsHash = "9693823c5cdd57750f58f9d9124c1c19f45280ca7a2d0973a4d52c53960a2fcf"
 
     private func vectors() throws -> [String: JSONValue] {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "circuit-zk-consent-vectors", withExtension: "json"))
@@ -54,6 +54,7 @@ final class PresentationConsentTests: XCTestCase {
         "eq,ge,gt,in,le,lt,ne": ["eq", "ne", "lt", "le", "gt", "ge", "in"],
         "gt,lt": ["gt", "lt"],
         "eq,in,ne": ["eq", "ne", "in"],
+        "eq,ge,le": ["ge", "le", "eq"],
         "eq": ["eq"],
     ]
 
@@ -61,7 +62,7 @@ final class PresentationConsentTests: XCTestCase {
         let v = try vectors()
         let registry = try registry(v)
         let cases = try XCTUnwrap(v["cases"]?.arrayValue)
-        XCTAssertGreaterThanOrEqual(cases.count, 62)
+        XCTAssertGreaterThanOrEqual(cases.count, 72)
         for item in cases {
             let testCase = try XCTUnwrap(item.objectValue)
             let name = testCase["name"]?.stringValue ?? "?"
@@ -89,7 +90,7 @@ final class PresentationConsentTests: XCTestCase {
         let v = try vectors()
         let registry = try registry(v)
         let cases = try XCTUnwrap(v["combined_predicate_bounds"]?.arrayValue)
-        XCTAssertEqual(cases.count, 17)
+        XCTAssertEqual(cases.count, 18)
         for item in cases {
             let o = try XCTUnwrap(item.objectValue)
             let plans = try XCTUnwrap(o["plans"]?.arrayValue).map { try Self.plan($0) }
@@ -182,8 +183,22 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": try parse("-5")])], [n(["le": .int(5)])]]), "negative lower bound: width 10")
         XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": try parse("-4")])], [n(["le": .int(5)])]]), "width 9")
         XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": .int(11)])], [n(["le": .int(0)])]]), "upper below lower")
+        // Bounds whose scales differ by more than 4096 digits are refused, not computed (and cannot exhaust memory).
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": .int(1)])], [n(["le": .decimal("1e999999999")])]]))
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": .int(1)])], [n(["le": .decimal("1e5000")])]]))
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": .decimal("-1e999999999")])], [n(["le": .int(1)])]]))
         // A plain wide range still passes.
         XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": .int(0)])], [n(["le": .int(10)])]]))
+    }
+
+    func testTheExactWidthRefusesBoundsWhoseScalesDifferByMoreThan4096Digits() {
+        XCTAssertNil(ExactDecimal.widthAtLeast(upper: "1e999999999", lower: "1", minimum: 10))
+        XCTAssertNil(ExactDecimal.widthAtLeast(upper: "1e5000", lower: "1", minimum: 10))
+        XCTAssertNil(ExactDecimal.widthAtLeast(upper: "1", lower: "-1e999999999", minimum: 10))
+        XCTAssertNil(ExactDecimal.widthAtLeast(upper: "1e9223372036854775807", lower: "1", minimum: 10), "no Int overflow")
+        XCTAssertEqual(ExactDecimal.widthAtLeast(upper: "1e4000", lower: "1", minimum: 10), true, "within the limit")
+        XCTAssertEqual(ExactDecimal.widthAtLeast(upper: "0e999999999", lower: "-5", minimum: 5), true, "zero has no scale")
+        XCTAssertEqual(ExactDecimal.widthAtLeast(upper: "10", lower: "1e-100", minimum: 10), false, "exactly below the minimum")
     }
 
     func testPrecheckWithMissingLookupsIsNotSatisfied() {
@@ -244,6 +259,45 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertNotNil(try predicate(["le": .string("2008-10-19")]).ageForm)
     }
 
+    func testTheAgeWordingIsDroppedWhenTheRequestRevealsTheBirthDateElsewhere() throws {
+        let registry = PredicateFunctions([
+            .ageCheck,
+            PredicateFunction(id: "date_compare", claim: .param, valueType: .date, comparisons: [.init(param: "eq", op: .eq)]),
+        ])
+        func age(_ extra: [CircuitZkFunction]) throws -> PresentationConsentPredicate {
+            let ageFn = CircuitZkFunction(id: "age_check", handle: "a", params: ["le": .string("2008-10-19")])
+            let query = CircuitZkConsentQuery(plan: [ageFn] + extra, credential: PresentationConsentCredential(name: nil, issuer: nil))
+            let request = try XCTUnwrap(PresentationConsentBuilder.build(
+                queries: [query], functions: registry, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+                verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil, requestSigned: true, today: "2026-10-19"))
+            guard case .predicate(let p) = request.entries[0].items[0] else { throw XCTSkip("not a predicate") }
+            return p
+        }
+        XCTAssertNotNil(try age([]).ageForm, "alone it is an age")
+        // a legacy disclosure of birth_date
+        let disclosure = CircuitZkFunction(id: "zk-claim-disclosure-v1", handle: "d", params: ["claims": .array([.string("birth_date")])])
+        XCTAssertNil(try age([disclosure]).ageForm)
+        // a separate equality on the same claim
+        let equality = CircuitZkFunction(id: "date_compare", handle: "e", params: ["claim": .string("birth_date"), "eq": .string("2000-01-01")])
+        XCTAssertNil(try age([equality]).ageForm)
+        // other claims do not matter
+        let other = CircuitZkFunction(id: "zk-claim-disclosure-v1", handle: "d", params: ["claims": .array([.string("family_name")])])
+        XCTAssertNotNil(try age([other]).ageForm)
+    }
+
+    func testTheCutoverDateIsNamedAsTheOperandNotNormalised() throws {
+        let item = PresentationConsentItem.predicate(PresentationConsentPredicate(
+            functionId: "x", claim: PresentationConsentClaimRef(path: ["d"], label: "D"), valueType: .date,
+            conditions: [PredicateCondition(op: .eq, values: ["1582-10-10"])], ageForm: nil))
+        let request = PresentationConsentRequest(
+            verifier: PresentationConsentVerifier(label: "x", trustFramework: nil, trustIdentifier: nil, verifierId: nil, verifierIdType: nil, intermediaryRisk: false),
+            entries: [PresentationConsentEntry(credential: PresentationConsentCredential(name: nil, issuer: nil), items: [item])], requestSigned: true)
+        let line = try PresentationConsentText(locale: Locale(identifier: "en")).render(request).entries[0].lines[0]
+        XCTAssertFalse(line.contains("20"), line)
+        XCTAssertTrue(line.contains("10"), line)
+        XCTAssertTrue(line.contains("1582"), line)
+    }
+
     func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
         XCTAssertNotNil(PredicateFunctions.default["age_check"])
         XCTAssertNil(PredicateFunctions.default["number_range"])
@@ -275,7 +329,8 @@ final class PresentationConsentTests: XCTestCase {
             }
             return CircuitZkConsentQuery(
                 plan: try plan(q["plan"] ?? .array([])),
-                credential: PresentationConsentCredential(name: cred["name"]?.stringValue, issuer: cred["issuer"]?.stringValue), claims: claims)
+                credential: PresentationConsentCredential(name: cred["name"]?.stringValue, issuer: cred["issuer"]?.stringValue), claims: claims,
+                namespace: q["namespace"]?.stringValue)
         }
         let trust = input["trust"]?.objectValue ?? [:]
         return PresentationConsentBuilder.build(

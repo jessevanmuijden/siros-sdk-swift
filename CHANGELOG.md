@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display shortening. The builder is tested against the shared
   `circuit-zk-consent-vectors.json` (copied byte-for-byte from siros-sdk-kotlin,
   32 cases). Not wired into the wallet yet.
+  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 18 merge cases, 22
   pre-check cases). Numbers are compared as exact decimals: a value Decimal would
   round (over 38 digits) is refused, `in` members are deduplicated by value, the
   merge span is refused when it cannot be computed exactly, and a pre-check with a
@@ -91,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   32 cases). Not wired into the wallet yet.
   different number of lookups than functions is false; float operands must be finite
   and exact. `requestSigned` is a required argument (the signature result, never
-  defaulted) and an empty query list is refused. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+  defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
