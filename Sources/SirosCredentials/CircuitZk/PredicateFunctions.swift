@@ -158,27 +158,6 @@ enum PredicateOperand {
         return JSONValue.decimal(text).exactNumber
     }
 
-    /// Whether `a - b` fits `Decimal`'s 38 significant digits exactly once both are aligned to the
-    /// smaller exponent (so the subtraction is neither rounded nor lossy). Both must be valid numbers.
-    static func differenceIsExact(_ a: String, _ b: String) -> Bool {
-        guard let left = scale(a), let right = scale(b) else { return false }
-        let exponent = min(left.exponent, right.exponent)
-        let digits = max(left.digits + (left.exponent - exponent), right.digits + (right.exponent - exponent))
-        return digits + 1 <= 38
-    }
-
-    /// The significant digits and the power of ten of a number text: value = coefficient * 10^exponent.
-    private static func scale(_ text: String) -> (digits: Int, exponent: Int)? {
-        let lower = text.lowercased()
-        let parts = lower.split(separator: "e", maxSplits: 1).map(String.init)
-        let mantissa = parts[0].hasPrefix("-") ? String(parts[0].dropFirst()) : parts[0]
-        guard let exponentPart = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
-        let pieces = mantissa.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        let fraction = pieces.count == 2 ? pieces[1] : ""
-        let coefficient = (pieces[0] + fraction).drop(while: { $0 == "0" })
-        return (coefficient.count, exponentPart - fraction.count)
-    }
-
     /// A key that is equal exactly when the VALUES are equal: the exact decimal for a number,
     /// the day number for a date, the text for the others. Nil when the text is not exact.
     static func canonicalKey(_ text: String, as type: PredicateValueType) -> String? {
@@ -290,21 +269,14 @@ extension PredicateFunctions {
         }
         for group in groups.values {
             guard let lower = group.lower, let upper = group.upper else { continue }
-            // Checked arithmetic: a width that cannot be computed exactly (loss of precision) is refused.
-            guard group.type == .date || PredicateOperand.differenceIsExact(group.upperText, group.lowerText),
-                  let width = Self.exactDifference(upper, lower) else { return false }
-            let span = group.type == .date ? width + 1 : width
-            if span < Decimal(group.minSpan) { return false }
+            if group.type == .date {
+                if upper - lower + 1 < Decimal(group.minSpan) { return false }
+            } else if ExactDecimal.widthAtLeast(upper: group.upperText, lower: group.lowerText, minimum: group.minSpan) != true {
+                // Exact arithmetic on the number texts: an unreadable bound or a width below the minimum is refused.
+                return false
+            }
         }
         return true
-    }
-
-    /// `a - b`, or nil when the result is not exact.
-    private static func exactDifference(_ a: Decimal, _ b: Decimal) -> Decimal? {
-        var result = Decimal()
-        var left = a, right = b
-        guard NSDecimalSubtract(&result, &left, &right, .plain) == .noError else { return nil }
-        return result
     }
 
     /// A bound as a comparable number: days since the epoch for a date, the decimal itself for a number.
@@ -314,5 +286,106 @@ extension PredicateFunctions {
         case .number: return PredicateOperand.decimal(text)
         default: return nil
         }
+    }
+}
+
+/// Exact arbitrary-precision decimal arithmetic, only as much as the merge-span rule needs: the
+/// width `upper - lower` of two number bounds compared with an integer minimum. `Decimal` rounds
+/// beyond 38 digits, and a rounded width could let a too-narrow range through, so the check is
+/// done on the digits of the bounds' own texts.
+enum ExactDecimal {
+    /// The exponents a bound may have: beyond this the digit strings would be absurdly long.
+    private static let maxExponent = 1000
+
+    private struct Value {
+        let negative: Bool
+        let digits: [UInt8]   // most significant first, no leading zeros (empty = zero)
+        let exponent: Int     // value = digits * 10^exponent
+    }
+
+    private static func parse(_ text: String) -> Value? {
+        let lower = text.lowercased()
+        let parts = lower.split(separator: "e", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count <= 2, let exponentPart = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
+        var mantissa = parts[0]
+        let negative = mantissa.hasPrefix("-")
+        if negative { mantissa.removeFirst() }
+        let pieces = mantissa.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard let whole = pieces.first, !whole.isEmpty else { return nil }
+        let fraction = pieces.count == 2 ? pieces[1] : ""
+        let all = Array((whole + fraction).utf8)
+        guard all.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }) else { return nil }
+        let exponent = exponentPart - fraction.count
+        guard abs(exponent) <= maxExponent else { return nil }
+        return Value(negative: negative, digits: Array(all.drop(while: { $0 == 0x30 }).map { $0 - 0x30 }), exponent: exponent)
+    }
+
+    /// The digits of `value` scaled to the exponent `to` (which is not above its own).
+    private static func scaled(_ value: Value, to exponent: Int) -> [UInt8] {
+        value.digits.isEmpty ? [] : value.digits + [UInt8](repeating: 0, count: value.exponent - exponent)
+    }
+
+    private static func compare(_ a: [UInt8], _ b: [UInt8]) -> Int {
+        if a.count != b.count { return a.count < b.count ? -1 : 1 }
+        for (x, y) in zip(a, b) where x != y { return x < y ? -1 : 1 }
+        return 0
+    }
+
+    /// `a - b` for magnitudes with `a >= b`.
+    private static func subtract(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: a.count)
+        var borrow = 0
+        for offset in 0..<a.count {
+            let x = Int(a[a.count - 1 - offset])
+            let y = offset < b.count ? Int(b[b.count - 1 - offset]) : 0
+            var difference = x - y - borrow
+            borrow = difference < 0 ? 1 : 0
+            if difference < 0 { difference += 10 }
+            result[a.count - 1 - offset] = UInt8(difference)
+        }
+        return Array(result.drop(while: { $0 == 0 }))
+    }
+
+    /// Whether `upper - lower >= minimum` exactly, or nil when a bound is not a readable number.
+    static func widthAtLeast(upper: String, lower: String, minimum: Int) -> Bool? {
+        guard minimum >= 0, let hi = parse(upper), let lo = parse(lower) else { return nil }
+        let exponent = min(hi.exponent, lo.exponent, 0)
+        let high = scaled(hi, to: exponent), low = scaled(lo, to: exponent)
+        let required = scaled(
+            Value(negative: false, digits: Array(String(minimum).utf8).map { $0 - 0x30 }.filter { $0 != 0 || minimum != 0 }, exponent: 0),
+            to: exponent)
+        // width = upper - lower, as a sign and a magnitude.
+        var negative = false
+        var magnitude: [UInt8]
+        switch (hi.negative, lo.negative) {
+        case (false, false):
+            negative = compare(high, low) < 0
+            magnitude = negative ? subtract(low, high) : subtract(high, low)
+        case (true, true):
+            negative = compare(low, high) < 0       // -|H| + |L|
+            magnitude = negative ? subtract(high, low) : subtract(low, high)
+        case (false, true):
+            magnitude = add(high, low)
+        case (true, false):
+            negative = true
+            magnitude = add(high, low)
+        }
+        if negative && !magnitude.isEmpty { return false }
+        return compare(magnitude, required) >= 0
+    }
+
+    private static func add(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+        let length = max(a.count, b.count)
+        var result = [UInt8](repeating: 0, count: length + 1)
+        var carry = 0
+        for offset in 0..<length {
+            let x = offset < a.count ? Int(a[a.count - 1 - offset]) : 0
+            let y = offset < b.count ? Int(b[b.count - 1 - offset]) : 0
+            let sum = x + y + carry
+            result[length - offset] = UInt8(sum % 10)
+            carry = sum / 10
+        }
+        result[0] = UInt8(carry)
+        return Array(result.drop(while: { $0 == 0 }))
     }
 }

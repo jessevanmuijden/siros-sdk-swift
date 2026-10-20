@@ -172,6 +172,16 @@ final class PresentationConsentTests: XCTestCase {
         // Exact width 10 - 1e-100 is below 10, but Decimal would round it to 10 and accept.
         let plans = [[n(["ge": try parse("1e-100")])], [n(["le": .int(10)])]]
         XCTAssertFalse(numbers.combinedBoundsOk(plans: plans))
+        // Exact widths that a worst-case digit estimate would wrongly refuse (Copilot review).
+        let big = "10000000000000000000000000000000000000"          // 10^37, 38 digits
+        let bigPlus10 = "10000000000000000000000000000000000010"
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": try parse(big)])], [n(["le": try parse(bigPlus10)])]]), "width exactly 10")
+        let bigPlus9 = "10000000000000000000000000000000000009"
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": try parse(big)])], [n(["le": try parse(bigPlus9)])]]), "width 9 is below the minimum")
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": .int(0)])], [n(["le": try parse("1e100")])]]), "exactly representable huge width")
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": try parse("-5")])], [n(["le": .int(5)])]]), "negative lower bound: width 10")
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": try parse("-4")])], [n(["le": .int(5)])]]), "width 9")
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: [[n(["ge": .int(11)])], [n(["le": .int(0)])]]), "upper below lower")
         // A plain wide range still passes.
         XCTAssertTrue(numbers.combinedBoundsOk(plans: [[n(["ge": .int(0)])], [n(["le": .int(10)])]]))
     }
