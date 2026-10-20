@@ -65,7 +65,9 @@ public enum ZkpReqPresentationBuilder {
             case 0...23: out.append(major << 5 | UInt8(n))
             case 24...0xFF: out += [major << 5 | 24, UInt8(n)]
             case 0x100...0xFFFF: out += [major << 5 | 25, UInt8(n >> 8), UInt8(n & 0xFF)]
-            default: out += [major << 5 | 26] + (0..<4).map { UInt8(truncatingIfNeeded: n >> UInt64(24 - 8 * $0)) }
+            default:
+                out.append(major << 5 | 26)
+                for shift in [24, 16, 8, 0] as [UInt64] { out.append(UInt8(truncatingIfNeeded: n >> shift)) }
             }
         }
 

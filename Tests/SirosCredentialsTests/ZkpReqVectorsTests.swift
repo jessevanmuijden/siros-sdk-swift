@@ -193,6 +193,16 @@ final class ZkpReqVectorsTests: XCTestCase {
         XCTAssertFalse("\(parsed[0])".contains("007"), "description is redacted")
     }
 
+    func testLargeProofsUseTheFourByteLengthHeader() throws {
+        let plan = try normativePlan()
+        let proof = [UInt8](repeating: 0xAB, count: 70_000)
+        let presentation = ZkpReqPresentationBuilder.encode(
+            systemId: "urn:circuits:longfellow:nym_auth:v1", proof: proof, issuerKeySet: [[1]], proofTime: "2026-10-20T12:00:00Z",
+            results: [("nym", .pseudonym(Array(repeating: 7, count: 32))), ("age", .predicateSatisfied)])
+        let parsed = try ZkpReqResponseValidator.parse(plan, vpToken: try ZkpReqPresentationBuilder.vpToken(for: plan, presentations: [presentation]))
+        XCTAssertEqual(parsed[0].proof.count, 70_000)
+    }
+
     func testAnInvalidPresentationIsNeverReturned() throws {
         func code(_ body: () throws -> String) -> String? {
             do { _ = try body(); return nil } catch let e as ZkpReqPresentationBuilder.Refusal { if case .invalid(let c) = e { return c.code } else { return nil } } catch { return "other" }
