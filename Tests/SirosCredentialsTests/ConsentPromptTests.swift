@@ -122,6 +122,22 @@ final class ConsentPromptTests: XCTestCase {
         XCTAssertTrue(two)
     }
 
+    func testNonFiniteAndOutOfRangeTimeoutsNeverTrap() async throws {
+        for timeout in [TimeInterval.infinity, .nan, 1e300, Double.greatestFiniteMagnitude] {
+            let (prompt, _) = makePrompt(timeout: timeout)
+            let asked = Task { await prompt.ask("waits for the user") }
+            let question = try await pending(prompt)
+            try await Task.sleep(nanoseconds: 30_000_000)
+            XCTAssertNotNil(prompt.current, "no timer fired for \(timeout)")
+            XCTAssertTrue(question.answer(true))
+            let answer = await value(asked)
+            XCTAssertTrue(answer)
+        }
+        let (negative, _) = makePrompt(timeout: -5)
+        let expired = await negative.ask("already expired")
+        XCTAssertFalse(expired, "a negative timeout expires at once")
+    }
+
     func testANewQuestionDeclinesThePendingOne() async throws {
         let (prompt, host) = makePrompt()
         let first = Task { await prompt.ask("first") }

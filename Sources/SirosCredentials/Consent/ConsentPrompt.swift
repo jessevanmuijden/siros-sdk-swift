@@ -71,10 +71,17 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
 
     /// - Parameters:
     ///   - decline: the answer that means "no" (`false`, `.cancelled`, ...).
-    ///   - timeout: seconds after which a still-unanswered question is declined; nil waits for the user.
+    ///   - timeout: seconds after which a still-unanswered question is declined; nil (or a non-finite value) waits for
+    ///     the user, a negative value expires at once, and a huge value is capped.
     public init(decline: Answer, timeout: TimeInterval? = nil) {
         declineAnswer = decline
-        self.timeout = timeout
+        // Only a finite, representable wait reaches the timer: infinity and NaN mean "wait for the user" (like nil),
+        // a negative value expires at once and a huge one is capped (about 292 years), never converted unchecked.
+        if let timeout, timeout.isFinite {
+            self.timeout = min(max(timeout, 0), Double(UInt64.max / 2) / 1_000_000_000)
+        } else {
+            self.timeout = nil
+        }
     }
 
     /// Called with the question to show, and with nil when it is gone (answered, declined, expired). Set it
@@ -125,7 +132,7 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
                 if let timeout {
                     let id = new.id
                     let task = Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                        try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                         guard !Task.isCancelled else { return }
                         _ = self?.resolve(id: id, with: nil)
                     }
