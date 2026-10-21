@@ -81,12 +81,12 @@ struct ProximityEngagementContent: View {
         .onDisappear {
             server?.stop()
             centralClient?.stop()
-        }
-        .sheet(item: $pendingConsent, onDismiss: {
-            // The sheet went away without Share/Decline (e.g. swiped away): the SDK prompt declines. A no-op when
-            // the user already answered.
+            // Tear down: decline a question still pending and drop the callback (it captures this view); onAppear
+            // installs it again if the screen returns.
             consentPrompt.dismiss()
-        }) { consent in
+            consentPrompt.onChange = nil
+        }
+        .sheet(item: $pendingConsent) { consent in
             ProximityConsentSheet(
                 consent: consent,
                 filterEligible: { viewModel.filterEligibleForProximity($0) }
@@ -436,6 +436,9 @@ private struct ProximityConsentSheet: View {
                 }
             }
         }
+        // This sheet going away (swiped, or replaced) declines ITS OWN question only: the handle is a no-op once
+        // answered, and an outgoing sheet can never decline the question that replaced it.
+        .onDisappear { consent.decline() }
     }
 }
 
