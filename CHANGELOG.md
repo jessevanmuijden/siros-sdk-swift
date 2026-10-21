@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`PresentationConsentCoordinator`: the ready-made `PresentationConsentHandler` for a host app.** It
+  renders a request into the SDK's approved wording (`PresentationConsentText`) and hands the app one
+  question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
+  answer, declined on timeout (default 120 s), dismissal, supersede and cancellation, and with no UI set. A
+  request the wording does not cover is declined without being shown.
 - **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
   and a registry-driven builder.** The locale-free request a user approves before
   anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
