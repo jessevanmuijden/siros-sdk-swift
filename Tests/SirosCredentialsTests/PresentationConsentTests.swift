@@ -285,6 +285,21 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertNotNil(try age([other]).ageForm)
     }
 
+    func testALargeRequestIsBuiltWithoutQuadraticWork() throws {
+        // 20,000 single-item entries: the revealed-claims set is built once, not once per entry.
+        let entries = (0..<20_000).map { _ in
+            CircuitZkConsentQuery(
+                plan: [CircuitZkFunction(id: "age_check", handle: "a", params: ["le": .string("2008-10-19")])],
+                credential: PresentationConsentCredential(name: nil, issuer: nil))
+        }
+        let start = Date()
+        let request = try XCTUnwrap(PresentationConsentBuilder.build(
+            queries: entries, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+            verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil, requestSigned: true, today: "2026-10-19"))
+        XCTAssertEqual(request.entries.count, 20_000)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
     func testTheCutoverDateIsNamedAsTheOperandNotNormalised() throws {
         let item = PresentationConsentItem.predicate(PresentationConsentPredicate(
             functionId: "x", claim: PresentationConsentClaimRef(path: ["d"], label: "D"), valueType: .date,
