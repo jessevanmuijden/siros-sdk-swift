@@ -199,4 +199,82 @@ final class ConsentPromptTests: XCTestCase {
         XCTAssertEqual(accepted, 1, "every other question was declined by supersede")
         XCTAssertNil(prompt.current)
     }
+
+    // MARK: Copilot review: notification order and cancellation before installation
+
+    func testACancellationBeforeInstallationDeclinesWithoutPublishingAnAnswerableQuestion() async {
+        let prompt = Prompt(decline: false)
+        let shown = Counter()
+        // A host that approves synchronously, the moment it is told: if the question were published, this would win.
+        prompt.onChange = { pending in
+            if let pending { shown.increment(); pending.answer(true) }
+        }
+        let box = TaskBox()
+        prompt.beforeInstall = { box.task?.cancel() }
+        let asked = Task { await prompt.ask("cancelled in the window") }
+        box.task = asked
+        let answer = await value(asked)
+        XCTAssertFalse(answer, "cancelled before it was installed: declined, not approved")
+        XCTAssertEqual(shown.value, 0, "nothing answerable was published")
+        XCTAssertNil(prompt.current)
+    }
+
+    /// However installs, answers and supersedes interleave (callbacks even sleep to widen the windows), the last
+    /// thing the host was told is the question that is current.
+    func testTheLastNotificationAlwaysMatchesTheCurrentQuestion() async throws {
+        for round in 0..<60 {
+            let prompt = Prompt(decline: false)
+            let seen = Last()
+            prompt.onChange = { pending in
+                if round % 2 == 0 { Thread.sleep(forTimeInterval: 0.0005) }
+                seen.set(pending?.request)
+            }
+            let tasks = (0..<6).map { n in Task { await prompt.ask("q\(n)") } }
+            try await Task.sleep(nanoseconds: UInt64(round % 5) * 1_000_000)
+            // answer whatever is current from two directions at once
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { prompt.current?.answer(true) }
+                group.addTask { prompt.dismiss() }
+            }
+            // late installers may still be pending: end the round by declining until every asker resumed
+            try await Task.sleep(nanoseconds: 40_000_000)
+            prompt.dismiss()
+            for task in tasks { _ = await value(task) }
+            prompt.dismiss()
+            // Quiesce: wait for in-flight deliveries to finish
+            try await Task.sleep(nanoseconds: 30_000_000)
+            XCTAssertEqual(seen.value, prompt.current?.request, "round \(round)")
+        }
+    }
+
+    /// A callback that answers synchronously must neither deadlock nor reorder.
+    func testASynchronousCallbackAnswersWithoutDeadlock() async {
+        let prompt = Prompt(decline: false)
+        prompt.onChange = { pending in pending?.answer(true) }
+        let a = await prompt.ask("a")
+        let b = await prompt.ask("b")
+        XCTAssertTrue(a)
+        XCTAssertTrue(b)
+        XCTAssertNil(prompt.current)
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func increment() { lock.withLock { n += 1 } }
+        var value: Int { lock.withLock { n } }
+    }
+
+    private final class TaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Task<Bool, Never>?
+        var task: Task<Bool, Never>? { get { lock.withLock { stored } } set { lock.withLock { stored = newValue } } }
+    }
+
+    private final class Last: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: String?
+        func set(_ value: String?) { lock.withLock { stored = value } }
+        var value: String? { lock.withLock { stored } }
+    }
 }

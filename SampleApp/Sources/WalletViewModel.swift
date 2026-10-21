@@ -673,9 +673,6 @@ final class WalletViewModel: ObservableObject {
         await wscdChoice.ask(WscdChoiceQuestion(issuer: issuer, credentialType: credentialType, eligiblePluginIds: eligiblePluginIds))
     }
 
-    /// Cancels the choice if its sheet is dismissed without the user tapping a plugin or Cancel (e.g. swiped away).
-    func dismissWscdChoice() { wscdChoice.dismiss() }
-
     /// Resolves `pendingFido2PinEntry` as cancelled if the sheet is
     /// dismissed without the user tapping Submit/Cancel (e.g. swiping it
     /// away) - see `dismissWscdChoice`'s identical rationale. `respond` is

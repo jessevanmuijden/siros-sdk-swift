@@ -95,5 +95,8 @@ struct WscdChoiceSheet: View {
             .navigationTitle(L10n.string("wscdChoice.navTitle"))
             .navigationBarTitleDisplayMode(.inline)
         }
+        // The sheet going away (swiped, or replaced) cancels ITS OWN question only: the handle is a no-op once
+        // answered, so an outgoing sheet can never cancel the question that replaced it.
+        .onDisappear { choice.decline() }
     }
 }

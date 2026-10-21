@@ -52,6 +52,8 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
         var continuation: CheckedContinuation<Answer, Never>?
         var timeout: Task<Void, Never>?
         var resolved = false
+        /// Set when the asking task is cancelled, possibly BEFORE the entry is installed.
+        var cancelled = false
 
         init(request: Request) { self.request = request }
     }
@@ -61,6 +63,11 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
     private let timeout: TimeInterval?
     private var entry: Entry?
     private var change: (@Sendable (Pending?) -> Void)?
+    /// Notification delivery: serialised, coalesced, and always ending on the state that is current.
+    private var delivering = false
+    private var dirty = false
+    /// Test seam: runs between the cancellation check and the installation of a question.
+    var beforeInstall: (() -> Void)?
 
     /// - Parameters:
     ///   - decline: the answer that means "no" (`false`, `.cancelled`, ...).
@@ -86,14 +93,23 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
         let new = Entry(request: request)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Answer, Never>) in
-                let superseded: Entry? = lock.withLock {
+                beforeInstall?()
+                // Install atomically with the cancellation check: a cancellation that arrived first is recorded on
+                // the entry, and then nothing is published.
+                let installed: (superseded: Entry?, install: Bool) = lock.withLock {
+                    guard !new.cancelled else { new.resolved = true; return (nil, false) }
                     new.continuation = continuation
                     let old = entry
                     entry = new
                     old?.resolved = true
-                    return old
+                    dirty = true
+                    return (old, true)
                 }
-                if let superseded {
+                guard installed.install else {
+                    continuation.resume(returning: declineAnswer)
+                    return
+                }
+                if let superseded = installed.superseded {
                     superseded.timeout?.cancel()
                     superseded.continuation?.resume(returning: declineAnswer)
                     superseded.continuation = nil
@@ -112,12 +128,10 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
                     }
                     if !keep { task.cancel() }
                 }
-                notify(pending(new))
-                // Cancelled between the check above and the install: decline now.
-                if Task.isCancelled { _ = resolve(id: new.id, with: nil) }
+                deliver()
             }
         } onCancel: { [weak self] in
-            _ = self?.resolve(id: new.id, with: nil)
+            self?.cancel(new)
         }
     }
 
@@ -133,27 +147,52 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
         return Pending(id: id, request: entry.request) { [weak self] answer in self?.resolve(id: id, with: answer) ?? false }
     }
 
+    /// The asking task was cancelled: mark the entry (so an installation that has not happened yet declines) and
+    /// resolve it when it is already the pending one.
+    private func cancel(_ target: Entry) {
+        let id: UUID? = lock.withLock {
+            target.cancelled = true
+            return entry?.id == target.id ? target.id : nil
+        }
+        if let id { _ = resolve(id: id, with: nil) }
+    }
+
     /// Resolves the question `id` once. False when it is not the pending one (already resolved or superseded).
     private func resolve(id: UUID, with answer: Answer?) -> Bool {
         let taken: (Entry, CheckedContinuation<Answer, Never>?)? = lock.withLock {
             guard let current = entry, current.id == id, !current.resolved else { return nil }
             current.resolved = true
             entry = nil
+            dirty = true
             let continuation = current.continuation
             current.continuation = nil
             return (current, continuation)
         }
         guard let (resolved, continuation) = taken else { return false }
         resolved.timeout?.cancel()
-        // The host hears the question is gone BEFORE the asking call continues, so what it shows never outlives
-        // the answer the SDK acts on.
-        notify(nil)
+        // The host hears the question is gone BEFORE the asking call continues.
+        deliver()
         continuation?.resume(returning: answer ?? declineAnswer)
         return true
     }
 
-    private func notify(_ pending: Pending?) {
-        let callback = lock.withLock { change }
-        callback?(pending)
+    /// Tells the host the current state. Deliveries are serialised and coalesced: only one thread delivers at a
+    /// time, each delivery reads the state that is current THEN, and the last delivered value is always the
+    /// current question (or nil), however resolutions and new questions interleave. A callback that answers
+    /// synchronously is fine: the nested call only marks the state dirty and the delivering loop picks it up.
+    private func deliver() {
+        lock.lock()
+        guard !delivering else { lock.unlock(); return }
+        delivering = true
+        while dirty {
+            dirty = false
+            let snapshot = entry.map(pending)
+            let callback = change
+            lock.unlock()
+            callback?(snapshot)
+            lock.lock()
+        }
+        delivering = false
+        lock.unlock()
     }
 }
