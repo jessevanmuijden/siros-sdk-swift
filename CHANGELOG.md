@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
+  `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
+  version 3 container changes that number and nothing else. It reads versions 1
+  to 4 and **rewrites 3 and 4 only**. A container whose `S.schemaVersion`, or any
+  event's `schemaVersion`, is not 3 or 4, or that has an event without an integer `schemaVersion` or with a
+  `type` outside the ten that versions 1 to 4 define (the nine
+  `wallet-frontend` types and `set_extension`), is still unlocked and readable but
+  is never rewritten: `exportEncryptedContainer()` and the stores that exist to be
+  exported (`saveCredential`, `deleteCredential`, `clearCredentials`,
+  `savePresentationRecord`, `clearPresentationRecords`, `setExtensionEntry`,
+  `removeExtensionEntry`) throw the new `KeystoreError.unsupportedSchemaVersion(UnsupportedSchemaVersion)`,
+  which names the part (`.state`, `.event(index:)`, `.eventType(index:type:)`) and
+  what it found, and `JweKeystore.unsupportedSchemaVersion` reports the reason
+  after unlock. It is a distinct case, not a failed merge or a crypto error:
+  retrying does not help, updating the app does. The container the caller holds
+  is never overwritten. The rules are plain JSON in `WalletStateSchema`, so they
+  are tested on Linux too. Every event must carry an integer `schemaVersion`
+  (spec 3.0); one without it is refused.
+- **Keystore: unknown credential members, `metadata` and unknown keypair members
+  are written back unchanged, in order.** Every `S.credentials[]` entry is rebuilt
+  from the entry the container had (previously from a closed list of eight
+  members, which dropped everything else), the array keeps the container's order
+  (new entries are appended by id; it used to follow dictionary order), keypair
+  entries and their members survive likewise, and a keypair entry this build could
+  not load, including one that is not an object, is carried verbatim in place. Presentation entries and the members of a key's JWKs are written back unchanged too, so a 3 to 4 migration changes only `schemaVersion`; a present `S` that is not an object is refused, and `set_extension` stamped 3 is accepted (a writer emits 4). `metadata: null` and `metadata: []` are not
+  written back (spec section 6.0). This overlaps the credential-metadata work in
+  progress (#202), which adds the `metadata` accessors.
+- Test vectors: `Tests/SirosKeystoreTests/Resources/privatedata-spec/` is a
+  verbatim copy of privatedata-spec `test-vectors/` at pull request 9, head
+  `64315a5eae50e08a93772488217bbc913c82dd56`, with a recorded source and a
+  digest check (`vectors.PROVENANCE.txt`, `vectors.SHA256SUMS`).
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
@@ -56,6 +87,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the message instead of the raw JSON body. A body without a code is unchanged.
 
 ### Changed
+- **Keystore: containers are written at `S.schemaVersion` 4 (was 3).** Version 3
+  readers (older SDKs, a wallet-frontend before spec 3.0) crash on or drop
+  `S.extensions` and `S.credentials[].metadata`, which is why spec 3.0 moves them
+  to version 4; they will not rewrite a version 4 container, which is the
+  intended effect. Changing `S.extensions`
+  (`setExtensionEntry`, `removeExtensionEntry`) now also appends a `set_extension`
+  event (schemaVersion 4, a tombstone with `value` null for a removal) to
+  `events`, chained by `parentHash` as wallet-frontend chains them (SHA-256 hex of
+  the previous event's key-sorted JSON; `lastEventHash` for the first), as spec
+  6.1.3 requires of a client with no event log; the SDK still has no event
+  merger. It still writes the legacy `wscdCredentials` and
+  `credentialRefreshTokens` members, which spec 6.2 forbids: replacing them means
+  re-shaping per-plugin state into per-`kid` `org.siros.wscd` entries and defining
+  the `org.siros.oid4vci.refresh` value, which the spec does not specify and which
+  would have to match siros-sdk-kotlin, so that is left for its own change. **Rollout (spec 3.0):** this SDK writes version 4 on every
+  write; a wallet-frontend that implements only version 3 refuses a version 4
+  container (nothing is lost, the user cannot open the wallet there). No
+  compatibility shim is provided. **Older native SDK releases are not
+  protected by this:** they always wrote version 3 and rebuilt every credential
+  entry from a closed list of members, so one that rewrites a version 4 container
+  drops `metadata` and unknown credential members, with no refusal. Upgrade (or
+  block from writing) every native client that shares an account before a
+  version 4 container, or a delivered secret, exists in it; the version number
+  alone cannot stop them.
+- **Keystore: an issued credential is not stored, nor reported accepted to the
+  issuer, while the container is unsupported** (`storeIssuedCredential` checks the
+  new `KeystoreManager.unsupportedSchemaVersion`, default nil), because
+  `CredentialStore.save` does not throw. Likewise `SirosWallet.eligibleInstances`
+  offers no instance whose presentation the consumption policy would consume
+  (all under `consumeAll`, raw disclosures under `consumeNonZkp`), since a
+  consumption could not be persisted and the instance would become eligible
+  again on reopening. Deleting or clearing a credential now also
+  forgets its preserved container entry, so a credential later saved under the same
+  id does not inherit the deleted one's `metadata`.
 - **EC TS12 payment SCA: the `amr` now comes from the WSCD manager's own sign.**
   `siros-wscd-manager` XCFramework 0.9.1 -> 0.10.0 (vendored bindings
   regenerated). Before the user is shown a transaction the wallet asks the
