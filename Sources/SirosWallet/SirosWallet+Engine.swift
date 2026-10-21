@@ -40,6 +40,11 @@ extension SignResponseSender {
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil,
+        transactionId: String? = nil,
+        interval: Int? = nil,
+        error: String? = nil,
+        errorCode: String? = nil,
         messageId: String? = nil
     ) {
         sendSignResponse(SignResponseMessage(
@@ -51,7 +56,12 @@ extension SignResponseSender {
             clientAttestation: clientAttestation,
             clientAttestationPoP: clientAttestationPoP,
             dpopKeyId: dpopKeyId,
-            dpopProof: dpopProof
+            dpopProof: dpopProof,
+            credentialResponseEncryptionJwk: credentialResponseEncryptionJwk,
+            transactionId: transactionId,
+            interval: interval,
+            error: error,
+            errorCode: errorCode
         ))
     }
 }
@@ -67,6 +77,11 @@ extension WalletEngineSession: SignResponseSender {
             clientAttestationPoP: message.clientAttestationPoP,
             dpopKeyId: message.dpopKeyId,
             dpopProof: message.dpopProof,
+            credentialResponseEncryptionJwk: message.credentialResponseEncryptionJwk,
+            transactionId: message.transactionId,
+            interval: message.interval,
+            error: message.error,
+            errorCode: message.errorCode,
             messageId: message.messageId
         )
     }
@@ -129,7 +144,14 @@ extension SirosWallet {
                 guard let self else { return SirosTransport.TrustResult(trusted: false, reason: "Wallet deallocated") }
                 return await self.handleWmpTrustEvaluation(flowId: flowId, payload: payload)
             },
-            onComplete: { [weak self] flowId, _ in
+            onComplete: { [weak self] flowId, result in
+                // An issuance whose response was encrypted to this wallet's key: the engine's result
+                // carries no credential values, so it goes through the same pairing as the engine
+                // WebSocket's `flow_complete`, which also ends the flow.
+                if let self, let message = Self.encryptedFlowComplete(flowId: flowId, result: result) {
+                    await self.handleFlowComplete(msg: message)
+                    return
+                }
                 // Terminal path for this issuance over the WMP transport too -
                 // see `resetIssuanceGuards()`.
                 self?.resetIssuanceGuards()
@@ -303,6 +325,17 @@ extension SirosWallet {
         }
     }
 
+    /// The WMP `flow_complete` result as a `FlowCompleteMessage`, when it says the issuer's response
+    /// was encrypted to this wallet's key (`credential_response_encrypted`); nil otherwise, or when
+    /// the result does not decode.
+    static func encryptedFlowComplete(flowId: String, result: AnyCodable?) -> FlowCompleteMessage? {
+        guard var object = result?.objectValue, object["credential_response_encrypted"]?.boolValue == true else { return nil }
+        object["type"] = .string(MessageTypes.flowComplete)
+        object["flow_id"] = .string(flowId)
+        guard let data = try? JSONEncoder().encode(AnyCodable.object_(object)) else { return nil }
+        return try? JSONDecoder().decode(FlowCompleteMessage.self, from: data)
+    }
+
     // Not `private`: the test target drives it directly.
     func handleWmpSignRequest(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
         switch params.action {
@@ -325,7 +358,22 @@ extension SirosWallet {
             let flattenedKeyIds = generated.flatMap { $0.attestedKeyIds ?? [] }
             lock.lock(); activeAttestedKeyIds = flattenedKeyIds.isEmpty ? nil : flattenedKeyIds; lock.unlock()
             let proofs = generated.map { ProofObject(proofType: $0.proofType, jwt: $0.jwt, attestation: $0.attestation) }
-            return SignSubFlowResult(proofs: proofs)
+            return SignSubFlowResult(
+                proofs: proofs,
+                credentialResponseEncryptionJwk: credentialResponseEncryptionJwk(
+                    flowId: flowId, request: params.credentialResponseEncryption
+                )
+            )
+
+        case "decrypt_credential_response":
+            do {
+                let control = try await decryptCredentialResponse(flowId: flowId, jwe: params.jwe, deferred: params.deferred ?? false)
+                return SignSubFlowResult(transactionId: control.transactionId, interval: control.interval)
+            } catch {
+                // The profile reports a flow error carrying only this code.
+                discardCredentialResponseState(flowId: flowId)
+                throw (error as? CredentialResponseError) ?? CredentialResponseError.decryptFailed
+            }
 
         case "sign_presentation":
             // Same defense-in-depth audience check as the legacy engine
@@ -724,7 +772,34 @@ extension SirosWallet {
                 let flattenedKeyIds = generated.flatMap { $0.attestedKeyIds ?? [] }
                 lock.lock(); activeAttestedKeyIds = flattenedKeyIds.isEmpty ? nil : flattenedKeyIds; lock.unlock()
                 let proofs = generated.map { ProofObject(proofType: $0.proofType, jwt: $0.jwt, attestation: $0.attestation) }
-                engine.sendSignResponse(flowId: msg.flowId, proofs: proofs, messageId: msg.messageId)
+                // A fresh key per proof request (so per c_nonce retry); absent when the engine did not
+                // ask for response encryption or asked for a pair this build cannot open.
+                let responseJwk = credentialResponseEncryptionJwk(
+                    flowId: msg.flowId, request: msg.params.credentialResponseEncryption
+                )
+                engine.sendSignResponse(
+                    flowId: msg.flowId, proofs: proofs, credentialResponseEncryptionJwk: responseJwk, messageId: msg.messageId
+                )
+
+            case "decrypt_credential_response":
+                // Engine-blind issuance: the issuer's response is encrypted to a key only this wallet
+                // holds. Answer with the control fields and nothing else; a failure answers with an
+                // error that carries no plaintext, and the flow's state is dropped.
+                do {
+                    let control = try await decryptCredentialResponse(
+                        flowId: msg.flowId, jwe: msg.params.jwe, deferred: msg.params.deferred ?? false
+                    )
+                    engine.sendSignResponse(
+                        flowId: msg.flowId, transactionId: control.transactionId, interval: control.interval,
+                        messageId: msg.messageId
+                    )
+                } catch {
+                    if Task.isCancelled || error is CancellationError { return }
+                    let code = (error as? CredentialResponseError)?.wmpErrorCode ?? "DECRYPT_FAILED"
+                    discardCredentialResponseState(flowId: msg.flowId)
+                    engine.sendSignResponse(flowId: msg.flowId, error: "credential response could not be taken", errorCode: code, messageId: msg.messageId)
+                    reportSignFailure(flowId: msg.flowId, message: code)
+                }
 
             case "sign_presentation":
                 // Claim this flow's enablement record whether or not it carries a
@@ -1364,6 +1439,7 @@ extension SirosWallet {
         flowEndSeq[flowId, default: 0] += 1      // a task for this flow still being registered sees that it ended
         let doomed = transactionTasks.filter { $0.value.flowId == flowId }
         for key in doomed.keys { transactionTasks.removeValue(forKey: key) }
+        credentialResponseKeys.removeValue(forKey: flowId)
         lock.unlock()
         for entry in doomed.values { entry.cancel() }
     }

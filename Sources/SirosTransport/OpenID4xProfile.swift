@@ -287,9 +287,15 @@ public struct SignSubFlowParams: Codable, Sendable {
     public var dpopNonce: String?
     public var ath: String?
     public var keyId: String?
+    /// `generate_proof`: the response encryption the engine negotiated (see `SignRequestParams`).
+    public var credentialResponseEncryption: CredentialResponseEncryptionRequest?
+    /// `decrypt_credential_response`: the Credential Response JWE and whether it is a deferred one.
+    public var jwe: String?
+    public var deferred: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case action, nonce, audience, count, issuer, htm, htu, ath
+        case action, nonce, audience, count, issuer, htm, htu, ath, jwe, deferred
+        case credentialResponseEncryption = "credential_response_encryption"
         case proofType = "proof_type"
         case parentFlowId = "parent_flow_id"
         case transactionDataMember = "transaction_data"
@@ -316,8 +322,14 @@ public struct SignSubFlowParams: Codable, Sendable {
         htu: String? = nil,
         dpopNonce: String? = nil,
         ath: String? = nil,
-        keyId: String? = nil
+        keyId: String? = nil,
+        credentialResponseEncryption: CredentialResponseEncryptionRequest? = nil,
+        jwe: String? = nil,
+        deferred: Bool? = nil
     ) {
+        self.credentialResponseEncryption = credentialResponseEncryption
+        self.jwe = jwe
+        self.deferred = deferred
         self.action = action
         self.nonce = nonce
         self.audience = audience
@@ -360,6 +372,9 @@ public struct SignSubFlowParams: Codable, Sendable {
         dpopNonce = try c.decodeIfPresent(String.self, forKey: .dpopNonce)
         ath = try c.decodeIfPresent(String.self, forKey: .ath)
         keyId = try c.decodeIfPresent(String.self, forKey: .keyId)
+        credentialResponseEncryption = try c.decodeIfPresent(CredentialResponseEncryptionRequest.self, forKey: .credentialResponseEncryption)
+        jwe = try c.decodeIfPresent(String.self, forKey: .jwe)
+        deferred = try c.decodeIfPresent(Bool.self, forKey: .deferred)
     }
 }
 
@@ -413,6 +428,11 @@ public struct SignSubFlowResult: Sendable {
     public var clientAttestationPoP: String?
     public var dpopKeyId: String?
     public var dpopProof: String?
+    /// `generate_proof`: the public JWK of this proof request's response-encryption key.
+    public var credentialResponseEncryptionJwk: [String: String]?
+    /// `decrypt_credential_response`: only the control fields of the decrypted response.
+    public var transactionId: String?
+    public var interval: Int?
 
     public init(
         proofs: [ProofObject]? = nil,
@@ -421,8 +441,14 @@ public struct SignSubFlowResult: Sendable {
         clientAttestation: String? = nil,
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
-        dpopProof: String? = nil
+        dpopProof: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil,
+        transactionId: String? = nil,
+        interval: Int? = nil
     ) {
+        self.credentialResponseEncryptionJwk = credentialResponseEncryptionJwk
+        self.transactionId = transactionId
+        self.interval = interval
         self.proofs = proofs
         self.vpToken = vpToken
         self.credentialRequestExtras = credentialRequestExtras
@@ -647,6 +673,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         if let pop = result.clientAttestationPoP { params["client_attestation_pop"] = .string(pop) }
         if let keyId = result.dpopKeyId { params["dpop_key_id"] = .string(keyId) }
         if let proof = result.dpopProof { params["dpop_proof"] = .string(proof) }
+        if let jwk = result.credentialResponseEncryptionJwk {
+            params["credential_response_encryption_jwk"] = .object_(jwk.mapValues { .string($0) })
+        }
+        if let transactionId = result.transactionId { params["transaction_id"] = .string(transactionId) }
+        if let interval = result.interval { params["interval"] = .int(interval) }
         try? await peer.notify(method: WmpMethods.flowAction, params: params)
     }
 

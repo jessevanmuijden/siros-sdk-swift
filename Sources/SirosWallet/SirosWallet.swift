@@ -67,6 +67,13 @@ public final class SirosWallet: @unchecked Sendable {
     // Enablement records per flow / WMP session, consent flows in progress, log-store bookkeeping.
     var legacyFlowSnapshotQueue: [(effective: Bool, at: Date)] = []
     var legacyFlowSnapshots: [String: Bool] = [:]
+    // Engine-blind issuance (see `SirosWallet+CredentialResponseEncryption.swift`): the wallet's
+    // per-flow response-encryption key (memory only) and the Credential Responses decrypted for
+    // the flow, awaiting `flow_complete`. Both are dropped on every terminal path.
+    var credentialResponseKeys: [String: CredentialResponseKey] = [:]
+    var decryptedCredentialResponses: [String: [DecryptedCredentialResponse]] = [:]
+    /// Validates and splits a decrypted response's `credential_metadata` (see `CredentialMetadataReceiver`).
+    public var credentialMetadataReceiver: CredentialMetadataReceiver?
     var wmpSessionSnapshot = false
     var transactionTasks: [UUID: (flowId: String, cancel: @Sendable () -> Void)] = [:]
     var transactionLogStoreIsDefault = false

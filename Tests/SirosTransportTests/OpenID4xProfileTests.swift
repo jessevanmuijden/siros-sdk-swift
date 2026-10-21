@@ -141,6 +141,49 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications[0].params?["dpop_proof"], .string("dpop"))
     }
 
+    /// Engine-blind issuance over WMP: `generate_proof` carries the negotiated pair and is answered with
+    /// the wallet's public JWK; `decrypt_credential_response` carries the JWE and is answered with the
+    /// control fields only.
+    func testWmpCarriesCredentialResponseEncryptionBothWays() async throws {
+        let ctx = MockPeerContext()
+        var seen: [SignSubFlowParams] = []
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, params in
+                seen.append(params)
+                if params.action == "generate_proof" {
+                    return SignSubFlowResult(
+                        proofs: [ProofObject(proofType: "jwt", jwt: "a.b.c")],
+                        credentialResponseEncryptionJwk: ["kty": "EC", "crv": "P-256", "x": "X", "y": "Y", "use": "enc", "alg": "ECDH-ES+A256KW"]
+                    )
+                }
+                return SignSubFlowResult(transactionId: "tx-1", interval: 5)
+            }
+        ))
+        profile.initialize(ctx: ctx)
+
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "sign_request", payload: .object_([
+            "action": .string("generate_proof"), "nonce": .string("n"), "audience": .string("https://i.example"),
+            "credential_response_encryption": .object_([
+                "alg": .string("ECDH-ES+A256KW"), "enc": .string("A256GCM"), "required": .bool(true),
+            ]),
+        ])))
+        XCTAssertEqual(seen[0].credentialResponseEncryption, CredentialResponseEncryptionRequest(alg: "ECDH-ES+A256KW", enc: "A256GCM", required: true))
+        let proofReply = ctx.notifications[0].params
+        XCTAssertEqual(proofReply?["credential_response_encryption_jwk"]?.objectValue?["alg"], .string("ECDH-ES+A256KW"))
+        XCTAssertEqual(proofReply?["credential_response_encryption_jwk"]?.objectValue?["use"], .string("enc"))
+
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "sign_request", payload: .object_([
+            "action": .string("decrypt_credential_response"), "jwe": .string("a.b.c.d.e"), "deferred": .bool(true),
+        ])))
+        XCTAssertEqual(seen[1].jwe, "a.b.c.d.e")
+        XCTAssertEqual(seen[1].deferred, true)
+        let decryptReply = ctx.notifications[1].params
+        XCTAssertEqual(decryptReply?["transaction_id"], .string("tx-1"))
+        XCTAssertEqual(decryptReply?["interval"], .int(5))
+        XCTAssertNil(decryptReply?["credentials"])
+        XCTAssertNil(decryptReply?["credential_response_encryption_jwk"])
+    }
+
     func testHandleProgressMatchRequestCallsOnMatchRequest() async throws {
         let ctx = MockPeerContext()
         var receivedFlowId: String?

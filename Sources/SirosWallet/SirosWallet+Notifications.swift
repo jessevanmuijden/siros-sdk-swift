@@ -35,6 +35,8 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // Taken before `cancelTransactionTasks`, which also drops the flow's response-encryption key.
+        let decryptedResponses = takeDecryptedCredentialResponses(flowId: msg.flowId)
         cancelTransactionTasks(flowId: msg.flowId)
         lock.lock(); legacyFlowSnapshots.removeValue(forKey: msg.flowId); lock.unlock()
         lock.lock()
@@ -72,7 +74,24 @@ extension SirosWallet {
         // as success - see storeFailureReason below.
         var storedCount = 0
         var storeFailureReason: String?
-        if let credentials = msg.credentials {
+        var credentialsToStore = msg.credentials
+        if msg.credentialResponseEncrypted == true {
+            // Engine-blind issuance: the engine never held the credentials. Entry i of the engine's
+            // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
+            guard let entries = msg.credentials,
+                  let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
+                cancelTransactionTasks(flowId: msg.flowId)
+                resetIssuanceGuards()
+                lock.lock(); let listener = eventListener; lock.unlock()
+                listener?.onFlowError(
+                    flowId: msg.flowId,
+                    errorMessage: "The credentials the issuer sent do not match what the engine reported", redirectUri: nil
+                )
+                return
+            }
+            credentialsToStore = paired
+        }
+        if let credentials = credentialsToStore {
             for (index, cred) in credentials.enumerated() {
                 let outcome = await storeIssuedCredential(
                     cred, index: index, flowId: msg.flowId, offer: offer, vctm: vctm,
@@ -112,7 +131,7 @@ extension SirosWallet {
         // anything went wrong. Surface it as a flow error instead so the
         // UI's error handling fires, matching how any other flow failure is
         // handled.
-        let expectedCredentials = msg.credentials?.count ?? 0
+        let expectedCredentials = credentialsToStore?.count ?? 0
         lock.lock(); let listener = eventListener; lock.unlock()
         if expectedCredentials > 0 && storedCount == 0 {
             listener?.onFlowError(flowId: msg.flowId, errorMessage: storeFailureReason ?? "Credential could not be processed", redirectUri: nil)
@@ -307,18 +326,21 @@ extension SirosWallet {
         attestedKeyIds: [String]?,
         batchId: Int64
     ) async -> (stored: Bool, failureReason: String?) {
+        guard let rawCredential = cred.credential else {
+            return (false, "The issuer's credential did not arrive")
+        }
         if cred.format == "mso_mdoc" {
             // mso_mdoc credentials are base64url-encoded CBOR (a
             // DeviceResponse-shaped envelope, per wallet-frontend#191), never
             // JWT-shaped - the parseJwtPayload-based validation/expiry/
             // metadata path below doesn't apply and would always fail,
             // silently dropping every issued mdoc credential.
-            guard let mdocDocument = CredentialUtils.parseMdocDocument(cred.credential) else {
+            guard let mdocDocument = CredentialUtils.parseMdocDocument(rawCredential) else {
                 return (false, "Received credential could not be read")
             }
             if let reason = verifyIssuedType(
                 format: cred.format,
-                raw: cred.credential,
+                raw: rawCredential,
                 declaredType: mdocDocument.docType
             ) {
                 return (false, reason)
@@ -348,7 +370,7 @@ extension SirosWallet {
             let stored = StoredCredential(
                 id: randomUint32Id(),
                 format: cred.format,
-                raw: cred.credential,
+                raw: rawCredential,
                 kid: index < (attestedKeyIds?.count ?? 0) ? attestedKeyIds?[index] : nil,
                 metadata: metadata,
                 notificationId: cred.notificationId,
@@ -362,7 +384,7 @@ extension SirosWallet {
             return (true, nil)
         }
 
-        guard let payload = CredentialUtils.parseJwtPayload(cred.credential) else {
+        guard let payload = CredentialUtils.parseJwtPayload(rawCredential) else {
             return (false, "Received credential could not be read")
         }
         let exp = payload["exp"] as? Int64
@@ -373,7 +395,7 @@ extension SirosWallet {
 
         if let reason = verifyIssuedType(
             format: cred.format,
-            raw: cred.credential,
+            raw: rawCredential,
             declaredType: payload["vct"] as? String
         ) {
             return (false, reason)
@@ -395,13 +417,13 @@ extension SirosWallet {
         // replaced while the re-resolution was in flight.
         let effectiveVctm = integrity.refreshed?.vctm ?? vctm
         let metadata = offer.flatMap {
-            CredentialUtils.buildMetadata(offer: $0, vctm: effectiveVctm, rawCredential: cred.credential)
+            CredentialUtils.buildMetadata(offer: $0, vctm: effectiveVctm, rawCredential: rawCredential)
         }
 
         let stored = StoredCredential(
             id: randomUint32Id(),
             format: cred.format,
-            raw: cred.credential,
+            raw: rawCredential,
             kid: index < (attestedKeyIds?.count ?? 0) ? attestedKeyIds?[index] : nil,
             metadata: metadata,
             issuedAt: payload["iat"] as? Int64,

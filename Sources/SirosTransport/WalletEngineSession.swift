@@ -618,6 +618,11 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil,
+        transactionId: String? = nil,
+        interval: Int? = nil,
+        error: String? = nil,
+        errorCode: String? = nil,
         messageId: String? = nil
     ) {
         send(SignResponseMessage(
@@ -630,7 +635,12 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             clientAttestation: clientAttestation,
             clientAttestationPoP: clientAttestationPoP,
             dpopKeyId: dpopKeyId,
-            dpopProof: dpopProof
+            dpopProof: dpopProof,
+            credentialResponseEncryptionJwk: credentialResponseEncryptionJwk,
+            transactionId: transactionId,
+            interval: interval,
+            error: error,
+            errorCode: errorCode
         ))
     }
 

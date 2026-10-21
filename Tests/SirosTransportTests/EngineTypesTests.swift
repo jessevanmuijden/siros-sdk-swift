@@ -464,4 +464,54 @@ final class EngineTypesTests: XCTestCase {
             event: CredentialNotificationEvent.accepted
         )
     }
+
+    // MARK: - Engine-blind issuance wire shapes
+
+    func testSignRequestParamsDecodeTheResponseEncryptionAndDecryptMembers() throws {
+        let generate = try JSONDecoder().decode(SignRequestParams.self, from: Data(#"""
+        {"audience":"https://i.example","nonce":"n","credential_response_encryption":{"alg":"ECDH-ES+A256KW","enc":"A256GCM","required":true}}
+        """#.utf8))
+        XCTAssertEqual(generate.credentialResponseEncryption, CredentialResponseEncryptionRequest(alg: "ECDH-ES+A256KW", enc: "A256GCM", required: true))
+        let decrypt = try JSONDecoder().decode(SignRequestParams.self, from: Data(#"{"jwe":"a.b.c.d.e","deferred":false}"#.utf8))
+        XCTAssertEqual(decrypt.jwe, "a.b.c.d.e")
+        XCTAssertEqual(decrypt.deferred, false)
+        XCTAssertNil(decrypt.credentialResponseEncryption)
+    }
+
+    func testSignResponseCarriesOnlyWhatWasSet() throws {
+        func object(_ m: SignResponseMessage) throws -> [String: Any] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(m)) as? [String: Any])
+        }
+        let jwk = ["kty": "EC", "crv": "P-256", "x": "X", "y": "Y", "use": "enc", "alg": "ECDH-ES"]
+        let proof = try object(SignResponseMessage(flowId: "f", credentialResponseEncryptionJwk: jwk))
+        XCTAssertEqual(proof["credential_response_encryption_jwk"] as? [String: String], jwk)
+        XCTAssertNil(proof["transaction_id"])
+        XCTAssertNil(proof["error"])
+        let control = try object(SignResponseMessage(flowId: "f", transactionId: "tx", interval: 3))
+        XCTAssertEqual(control["transaction_id"] as? String, "tx")
+        XCTAssertEqual(control["interval"] as? Int, 3)
+        XCTAssertNil(control["credential_response_encryption_jwk"])
+        let failure = try object(SignResponseMessage(flowId: "f", error: "no", errorCode: "DECRYPT_FAILED"))
+        XCTAssertEqual(failure["error_code"] as? String, "DECRYPT_FAILED")
+        let plain = try object(SignResponseMessage(flowId: "f"))
+        for member in ["credential_response_encryption_jwk", "transaction_id", "interval", "error", "error_code"] {
+            XCTAssertNil(plain[member], member)
+        }
+    }
+
+    func testFlowCompleteOfAnEncryptedResponseHasNoCredentialValues() throws {
+        let message = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"""
+        {"type":"flow_complete","flow_id":"f","credential_response_encrypted":true,
+         "credentials":[{"format":"dc+sd-jwt","vct":"urn:eudi:pid:1"},{"format":"dc+sd-jwt"}]}
+        """#.utf8))
+        XCTAssertEqual(message.credentialResponseEncrypted, true)
+        XCTAssertEqual(message.credentials?.count, 2)
+        XCTAssertNil(message.credentials?.first?.credential)
+        // A plain response still decodes as before.
+        let plain = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"""
+        {"type":"flow_complete","flow_id":"f","credentials":[{"format":"dc+sd-jwt","credential":"x.y.z"}]}
+        """#.utf8))
+        XCTAssertNil(plain.credentialResponseEncrypted)
+        XCTAssertEqual(plain.credentials?.first?.credential, "x.y.z")
+    }
 }

@@ -8,20 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Transport: the issuer's response-level `credential_metadata` on both transports,
-  and the WMP replay marker.** `FlowCompleteMessage` (engine) and the new
-  `WmpFlowCompleteResult` (`wmp.flow.complete`) carry `credentialMetadata`
-  (`CredentialResponseMetadata`: the object verbatim, unknown members intact, a
-  non-object, an explicit `null` included, becomes a malformed placeholder instead of failing the frame (only an absent key is nil), so
-  an issuance is refused rather than left hanging) and
-  `credentialMetadataEncryptedResponse` (a lenient flag, never true by
-  accident). The metadata may hold a delivered secret: its `description`,
-  `debugDescription` and mirror are redacted and it encodes as `null`. A
-  replayed `wmp.flow.complete` lists what it withheld in `redacted_members`
-  (`RedactedMembers`); `credentialMetadataWithheld` and `renewalMaterialWithheld`
-  say whether a seed or the renewal material (`refresh_token`, `dpop_jwk`,
-  `dpop_key_id`) is not recoverable. Decoding only: the wallet checks and
-  storage follow.
+- **Engine-blind issuance: the wallet decrypts the issuer's Credential Response.** The engine (remote
+  or embedded) relays ciphertext and never sees a credential, the `secret_seed` or any other
+  `credential_metadata`; this replaces the earlier approach of the engine relaying
+  `credential_metadata` in `flow_complete` (that DTO and the WMP `redacted_members` marker are gone,
+  never released). On BOTH the engine WebSocket and WMP:
+  - `generate_proof` may carry `credential_response_encryption {alg, enc, required}`. The wallet
+    generates a FRESH in-memory P-256 key per proof request (so per c_nonce retry), keeps it per
+    flow id, and answers with `credential_response_encryption_jwk` (public JWK: `kty` EC, `crv`
+    P-256, `x`, `y`, `use` enc, `alg` the negotiated one). A pair it cannot open, or no request,
+    is a decline. The key is dropped when the flow completes, fails or is cancelled, and on
+    logout; it can not be serialized.
+  - New sign action `decrypt_credential_response {jwe, deferred}`: ECDH-ES (RFC 7518 4.6) with
+    A128GCM, A256GCM, A128CBC-HS256 and A256CBC-HS512, directly or with `ECDH-ES+A128KW` /
+    `ECDH-ES+A256KW` (RFC 3394 unwrap; gdc advertises only `+A256KW`). The header must carry
+    exactly the negotiated `alg`/`enc`; `zip`, `crit` and any curve but P-256 are refused; the
+    CBC-HMAC tag is verified, in constant time, before anything is decrypted. The wallet parses
+    the Credential Response strictly, keeps the credentials and the response-level
+    `credential_metadata` itself, and answers `sign_response` with ONLY `{transaction_id?,
+    interval?}`, or `error`/`error_code` (a code, never any plaintext). On WMP a failure is a flow
+    error with that code.
+  - `flow_complete.credentials[i]` of an encrypted response has no `credential`
+    (`credential_response_encrypted: true`); entry i is paired with the i-th decrypted credential
+    (immediate and deferred answers in order), a count mismatch is a flow error and stores
+    nothing, and the `notification_id` for `credential_notification` comes from the decrypted body.
+    `CredentialResult.credential` is therefore optional.
+  - `SirosWallet.credentialMetadataReceiver` is the seam for delivered-secret validation
+    (`DeliveredSecretReceipt`, privatedata-spec 5A): it sees each response's `credential_metadata`
+    with the facts (encrypted, deferred, has notification id) and may refuse the whole response.
+    Nothing is wired by default; storing the metadata into the container needs #202.
+  The AES block primitive is CommonCrypto on Apple platforms and a FIPS 197 reference elsewhere (CI);
+  the unwrap and CBC are built on it. Tests: 12 JWEs from go-jose v4.1.6 (every alg/enc pair, vendored
+  with its generator), RFC 7518 Appendix C, RFC 3394, RFC 7516 A.3 and FIPS 197 vectors.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob

@@ -317,6 +317,19 @@ public struct SignResponseMessage: Codable, Sendable {
     /// the WIA and a freshly signed PoP when `audience` was given.
     public var dpopKeyId: String?
     public var dpopProof: String?
+    /// Answer to `generate_proof` when the engine sent `credential_response_encryption`: the
+    /// PUBLIC JWK (`kty` EC, `crv` P-256, `x`, `y`, `use` enc, `alg`) of a key the wallet
+    /// generated for this proof request, so the issuer's response is encrypted to a key only the
+    /// wallet holds. Absent means declined.
+    public var credentialResponseEncryptionJwk: [String: String]?
+    /// Answer to `decrypt_credential_response`: ONLY the control fields of the decrypted
+    /// response. The credentials, `credential_metadata` and `notification_id` stay in the wallet.
+    public var transactionId: String?
+    public var interval: Int?
+    /// Set when the wallet could not do what the request asked (for example a response it could
+    /// not decrypt). `errorCode` is a short machine-readable code; neither carries any plaintext.
+    public var error: String?
+    public var errorCode: String?
     public var timestamp: String?
 
     public init(
@@ -331,6 +344,11 @@ public struct SignResponseMessage: Codable, Sendable {
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil,
+        transactionId: String? = nil,
+        interval: Int? = nil,
+        error: String? = nil,
+        errorCode: String? = nil,
         timestamp: String? = nil
     ) {
         self.type = type
@@ -344,11 +362,19 @@ public struct SignResponseMessage: Codable, Sendable {
         self.clientAttestationPoP = clientAttestationPoP
         self.dpopKeyId = dpopKeyId
         self.dpopProof = dpopProof
+        self.credentialResponseEncryptionJwk = credentialResponseEncryptionJwk
+        self.transactionId = transactionId
+        self.interval = interval
+        self.error = error
+        self.errorCode = errorCode
         self.timestamp = timestamp
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, proofs, timestamp
+        case type, proofs, timestamp, interval, error
+        case transactionId = "transaction_id"
+        case errorCode = "error_code"
+        case credentialResponseEncryptionJwk = "credential_response_encryption_jwk"
         case flowId = "flow_id"
         case messageId = "message_id"
         case proofJwt = "proof_jwt"
@@ -528,17 +554,15 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// Persisted with the refresh token and presented back as
     /// `FlowStartMessage.dpopKeyId` on renewal.
     public var dpopKeyId: String?
+    /// True when the issuer's response was encrypted to this wallet's key: the entries of
+    /// `credentials` then carry no `credential` value, and entry i belongs to the i-th credential
+    /// the wallet decrypted for this flow (`decrypt_credential_response`).
+    public var credentialResponseEncrypted: Bool?
     public var timestamp: String?
-    /// The issuer's response-level `credential_metadata` (OpenID4VCI 1.1), relayed verbatim.
-    /// May carry a delivered secret: never log or print it (its description is redacted).
-    /// A value that is not a JSON object decodes as a malformed placeholder, never an error.
-    public var credentialMetadata: CredentialResponseMetadata?
-    /// Set by the engine only when `credentialMetadata` is present and the issuer's response
-    /// was JWE-decrypted. A delivered secret is refused unless this is true.
-    public var credentialMetadataEncryptedResponse: LenientFlag?
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp
+        case credentialResponseEncrypted = "credential_response_encrypted"
         case flowId = "flow_id"
         case redirectUri = "redirect_uri"
         case typeMetadata = "type_metadata"
@@ -547,32 +571,15 @@ public struct FlowCompleteMessage: Codable, Sendable {
         case refreshToken = "refresh_token"
         case dpopJwk = "dpop_jwk"
         case dpopKeyId = "dpop_key_id"
-        case credentialMetadata = "credential_metadata"
-        case credentialMetadataEncryptedResponse = "credential_metadata_encrypted_response"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        type = try c.decode(String.self, forKey: .type)
-        flowId = try c.decode(String.self, forKey: .flowId)
-        credentials = try c.decodeIfPresent([CredentialResult].self, forKey: .credentials)
-        redirectUri = try c.decodeIfPresent(String.self, forKey: .redirectUri)
-        typeMetadata = try c.decodeIfPresent(AnyCodable.self, forKey: .typeMetadata)
-        credentialIssuer = try c.decodeIfPresent(String.self, forKey: .credentialIssuer)
-        selectedCredentialConfigurationId = try c.decodeIfPresent(String.self, forKey: .selectedCredentialConfigurationId)
-        refreshToken = try c.decodeIfPresent(String.self, forKey: .refreshToken)
-        dpopJwk = try c.decodeIfPresent(String.self, forKey: .dpopJwk)
-        dpopKeyId = try c.decodeIfPresent(String.self, forKey: .dpopKeyId)
-        timestamp = try c.decodeIfPresent(String.self, forKey: .timestamp)
-        // An explicit null is malformed, not "absent": see CredentialResponseMetadata.decode.
-        credentialMetadata = CredentialResponseMetadata.decode(from: c, forKey: .credentialMetadata)
-        credentialMetadataEncryptedResponse = try c.decodeIfPresent(LenientFlag.self, forKey: .credentialMetadataEncryptedResponse)
     }
 }
 
 public struct CredentialResult: Codable, Sendable {
     public var format: String
-    public var credential: String
+    /// Absent when the issuer's response was encrypted to the wallet's own key
+    /// (`FlowCompleteMessage.credentialResponseEncrypted`): the wallet has the credential, the
+    /// engine never did.
+    public var credential: String?
     public var vct: String?
     public var typeMetadata: AnyCodable?
     /// OID4VCI §10 notification identifier for this credential, if the issuer
@@ -580,10 +587,36 @@ public struct CredentialResult: Codable, Sendable {
     /// event occurs.
     public var notificationId: String?
 
+    public init(
+        format: String, credential: String?, vct: String? = nil,
+        typeMetadata: AnyCodable? = nil, notificationId: String? = nil
+    ) {
+        self.format = format
+        self.credential = credential
+        self.vct = vct
+        self.typeMetadata = typeMetadata
+        self.notificationId = notificationId
+    }
+
     enum CodingKeys: String, CodingKey {
         case format, credential, vct
         case typeMetadata = "type_metadata"
         case notificationId = "notification_id"
+    }
+}
+
+/// The engine's `credential_response_encryption` parameter of a `generate_proof` sign request:
+/// the `alg`/`enc` pair it negotiated from the issuer's metadata, and whether the issuer
+/// requires response encryption. The wallet answers with a public JWK for that pair (or declines).
+public struct CredentialResponseEncryptionRequest: Codable, Sendable, Equatable {
+    public var alg: String
+    public var enc: String
+    public var required: Bool?
+
+    public init(alg: String, enc: String, required: Bool? = nil) {
+        self.alg = alg
+        self.enc = enc
+        self.required = required
     }
 }
 
@@ -725,9 +758,16 @@ public struct SignRequestParams: Codable, Sendable {
     public var dpopNonce: String?
     public var ath: String?
     public var keyId: String?
+    /// `generate_proof`: the response encryption the engine negotiated, when the issuer supports it.
+    public var credentialResponseEncryption: CredentialResponseEncryptionRequest?
+    /// `decrypt_credential_response`: the issuer's Credential Response as a compact JWE, and whether
+    /// it answers a deferred request.
+    public var jwe: String?
+    public var deferred: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case audience, nonce, issuer, count, htm, htu, ath
+        case audience, nonce, issuer, count, htm, htu, ath, jwe, deferred
+        case credentialResponseEncryption = "credential_response_encryption"
         case proofType = "proof_type"
         case proofTypesSupported = "proof_types_supported"
         case credentialsToInclude = "credentials_to_include"
