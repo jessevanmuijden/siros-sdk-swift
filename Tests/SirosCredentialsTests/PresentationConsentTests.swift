@@ -313,6 +313,31 @@ final class PresentationConsentTests: XCTestCase {
         XCTAssertTrue(line.contains("1582"), line)
     }
 
+    func testStringOperandsAreComparedByUtf8BytesNotCanonicalEquivalence() throws {
+        let strings = PredicateFunctions([
+            PredicateFunction(id: "s", claim: .param, valueType: .string,
+                              comparisons: [.init(param: "eq", op: .eq), .init(param: "ne", op: .ne), .init(param: "in", op: .in)]),
+        ])
+        let composed = "\u{00E9}", decomposed = "e\u{0301}"
+        XCTAssertEqual(composed, decomposed, "Swift treats these as equal; the vectors of the other SDKs do not")
+        func fn(_ params: [String: JSONValue]) -> CircuitZkFunction {
+            CircuitZkFunction(id: "s", handle: "h", params: params.merging(["claim": .string("c")]) { a, _ in a })
+        }
+        // a set with both spellings is NOT a duplicate
+        XCTAssertNotNil(strings["s"]!.parse(fn(["in": .array([.string(composed), .string(decomposed)])])))
+        // the same spelling twice is
+        XCTAssertNil(strings["s"]!.parse(fn(["in": .array([.string(composed), .string(composed)])])))
+        func holds(_ params: [String: JSONValue], _ value: String) -> Bool {
+            strings.precheck(functions: [fn(params)], lookups: [.found(type: .string, text: value)])
+        }
+        XCTAssertTrue(holds(["eq": .string(composed)], composed))
+        XCTAssertFalse(holds(["eq": .string(composed)], decomposed))
+        XCTAssertTrue(holds(["ne": .string(composed)], decomposed))
+        XCTAssertFalse(holds(["ne": .string(composed)], composed))
+        XCTAssertTrue(holds(["in": .array([.string(composed)])], composed))
+        XCTAssertFalse(holds(["in": .array([.string(composed)])], decomposed))
+    }
+
     func testTheDefaultRegistryKnowsOnlyAgeCheckAndNothingElseIsAssumed() {
         XCTAssertNotNil(PredicateFunctions.default["age_check"])
         XCTAssertNil(PredicateFunctions.default["number_range"])
