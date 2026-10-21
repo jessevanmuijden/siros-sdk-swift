@@ -58,14 +58,16 @@ public enum SecretSeedCommitment {
         guard let jwt = parts.first else { return nil }
         let jwtParts = jwt.split(separator: ".", omittingEmptySubsequences: false)
         guard jwtParts.count > 1, let payloadData = base64UrlDecode(String(jwtParts[1])),
-              let payload = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any],
+              // StrictJSON, not JSONSerialization: a payload with a repeated member (two `_sd`, two `_sd_alg`) is
+              // ambiguous and a lenient parser would silently keep one of them, making the binding parser-dependent.
+              let payload = (try? StrictJSON.parse(payloadData))?.objectValue,
               payload["ssc"] == nil else { return nil }
         // Disclosure digests are SHA-256 here: a payload declaring any other `_sd_alg` is not bound under that
         // hash, so it fails closed (an absent `_sd_alg` is the SHA-256 default).
         if let algorithm = payload["_sd_alg"] {
-            guard let name = algorithm as? String, name == "sha-256" else { return nil }
+            guard algorithm.stringValue == "sha-256" else { return nil }
         }
-        let digests = Set((payload["_sd"] as? [Any])?.compactMap { $0 as? String } ?? [])
+        let digests = Set(payload["_sd"]?.arrayValue?.compactMap { $0.stringValue } ?? [])
         var found: [(segment: String, value: String)] = []
         for segment in parts.dropFirst() where !segment.isEmpty {
             guard let data = base64UrlDecode(segment),

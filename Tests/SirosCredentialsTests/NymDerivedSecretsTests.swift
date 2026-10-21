@@ -277,6 +277,14 @@ final class SecretSeedCommitmentTests: XCTestCase {
         XCTAssertEqual(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [good], payloadExtra: ",\"_sd_alg\":\"sha-256\"")), sscBytes)
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [good], payloadExtra: ",\"_sd_alg\":\"sha-512\"")))
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [good], payloadExtra: ",\"_sd_alg\":5")))
+        // a repeated payload member is ambiguous and refused, in either order (a lenient parser keeps the last one)
+        let good2 = SecretSeedCommitment.disclosureDigest(good)
+        func raw(_ payload: String) -> String { ([b64url("{\"alg\":\"ES256\"}") + "." + b64url(payload) + ".sig", good]).joined(separator: "~") + "~" }
+        XCTAssertEqual(SecretSeedCommitment.sscOfSdJwt(raw("{\"_sd\":[\"\(good2)\"]}")), sscBytes, "the single-member form still works")
+        XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(raw("{\"_sd\":[\"\(good2)\"],\"_sd\":[]}")), "conflicting _sd, referencing first")
+        XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(raw("{\"_sd\":[],\"_sd\":[\"\(good2)\"]}")), "conflicting _sd, referencing last")
+        XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(raw("{\"_sd\":[\"\(good2)\"],\"_sd_alg\":\"sha-512\",\"_sd_alg\":\"sha-256\"}")))
+        XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(raw("{\"_sd\":[\"\(good2)\"],\"_sd_alg\":\"sha-256\",\"_sd_alg\":\"sha-512\"}")))
         // none
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt(sdJwt(disclosures: [])))
         XCTAssertNil(SecretSeedCommitment.sscOfSdJwt("garbage"))
