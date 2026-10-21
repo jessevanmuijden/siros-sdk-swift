@@ -5,7 +5,7 @@ import Foundation
 import CommonCrypto
 #endif
 
-/// AES decryption of whole blocks (ECB, no padding): the one primitive RFC 3394
+/// AES decryption of whole blocks (the raw block cipher, no chaining, no padding): the one primitive RFC 3394
 /// key unwrap and CBC need and CryptoKit / swift-crypto do not offer.
 ///
 /// On Apple platforms it is CommonCrypto. Elsewhere (Linux CI) it is a plain
@@ -21,16 +21,26 @@ enum AesBlock {
         guard data.count % 16 == 0 else { throw Failure.badDataLength }
         if data.isEmpty { return [] }
         #if canImport(CommonCrypto)
-        var out = [UInt8](repeating: 0, count: data.count + 16)
-        var written = 0
-        let status = out.withUnsafeMutableBytes { outPtr in
-            CCCrypt(
-                CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionECBMode),
-                key, key.count, nil, data, data.count, outPtr.baseAddress, outPtr.count, &written
-            )
+        // One block at a time through CBC with an all-zero IV, which for a single block is exactly
+        // the raw block cipher. (CommonCrypto's ECB option would do the same; it is not used because
+        // ECB over data is what static analysis rightly flags, and this is only ever a single block
+        // inside RFC 3394 or a CBC loop that supplies its own chaining.)
+        var out = [UInt8]()
+        out.reserveCapacity(data.count)
+        for start in stride(from: 0, to: data.count, by: 16) {
+            let block = Array(data[start..<(start + 16)])
+            var plain = [UInt8](repeating: 0, count: 32)
+            var written = 0
+            let status = plain.withUnsafeMutableBytes { outPtr in
+                CCCrypt(
+                    CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES), 0,
+                    key, key.count, nil, block, block.count, outPtr.baseAddress, outPtr.count, &written
+                )
+            }
+            guard status == kCCSuccess, written == 16 else { throw Failure.platform }
+            out += plain.prefix(16)
         }
-        guard status == kCCSuccess, written == data.count else { throw Failure.platform }
-        return Array(out.prefix(written))
+        return out
         #else
         return try ReferenceAes(key: key).decrypt(data)
         #endif

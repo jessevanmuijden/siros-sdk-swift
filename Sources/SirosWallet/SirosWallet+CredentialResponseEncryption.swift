@@ -139,4 +139,49 @@ extension SirosWallet {
             )
         }
     }
+
+    // MARK: - Transport glue
+
+    /// `decrypt_credential_response` on the engine WebSocket: answer with the control fields and
+    /// nothing else; a failure answers with an error that carries no plaintext and drops the flow's state.
+    func answerDecryptCredentialResponse(engine: any SignResponseSender, msg: SignRequestMessage) async {
+        do {
+            let control = try await decryptCredentialResponse(
+                flowId: msg.flowId, jwe: msg.params.jwe, deferred: msg.params.deferred ?? false
+            )
+            engine.sendSignResponse(
+                flowId: msg.flowId, transactionId: control.transactionId, interval: control.interval, messageId: msg.messageId
+            )
+        } catch {
+            if Task.isCancelled || error is CancellationError { return }
+            let code = (error as? CredentialResponseError)?.wmpErrorCode ?? "DECRYPT_FAILED"
+            discardCredentialResponseState(flowId: msg.flowId)
+            engine.sendSignResponse(
+                flowId: msg.flowId, error: "credential response could not be taken", errorCode: code, messageId: msg.messageId
+            )
+            reportSignFailure(flowId: msg.flowId, message: code)
+        }
+    }
+
+    /// The same action over WMP; the profile reports a failure as a flow error carrying only the code.
+    func wmpDecryptCredentialResponse(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
+        do {
+            let control = try await decryptCredentialResponse(flowId: flowId, jwe: params.jwe, deferred: params.deferred ?? false)
+            return SignSubFlowResult(transactionId: control.transactionId, interval: control.interval)
+        } catch {
+            discardCredentialResponseState(flowId: flowId)
+            throw (error as? CredentialResponseError) ?? CredentialResponseError.decryptFailed
+        }
+    }
+
+    /// The WMP `flow_complete` result as a `FlowCompleteMessage`, when it says the issuer's response
+    /// was encrypted to this wallet's key (`credential_response_encrypted`); nil otherwise, or when
+    /// the result does not decode.
+    static func encryptedFlowComplete(flowId: String, result: AnyCodable?) -> FlowCompleteMessage? {
+        guard var object = result?.objectValue, object["credential_response_encrypted"]?.boolValue == true else { return nil }
+        object["type"] = .string(MessageTypes.flowComplete)
+        object["flow_id"] = .string(flowId)
+        guard let data = try? JSONEncoder().encode(AnyCodable.object_(object)) else { return nil }
+        return try? JSONDecoder().decode(FlowCompleteMessage.self, from: data)
+    }
 }
