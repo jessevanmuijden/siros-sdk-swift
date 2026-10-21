@@ -184,6 +184,30 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertNil(decryptReply?["credential_response_encryption_jwk"])
     }
 
+    func testWmpSignPresentationCarriesResponseEncryptionAndAnswersWithResponseJwe() async throws {
+        let ctx = MockPeerContext()
+        var seen: SignSubFlowParams?
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, params in
+            seen = params
+            return SignSubFlowResult(responseJwe: "h..i.c.t")
+        }))
+        profile.initialize(ctx: ctx)
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "sign_request", payload: .object_([
+            "action": .string("sign_presentation"), "nonce": .string("n"), "audience": .string("a"), "state": .string("st"),
+            "response_encryption": .object_([
+                "jwk": .object_(["kty": .string("EC"), "crv": .string("P-256"), "x": .string("X"), "y": .string("Y")]),
+                "alg": .string("ECDH-ES"), "enc": .string("A128GCM"),
+            ]),
+            "verified_request": .object_(["client_id": .string("c1")]),
+        ])))
+        XCTAssertEqual(seen?.responseEncryption?.enc, "A128GCM")
+        XCTAssertEqual(seen?.state, "st")
+        XCTAssertEqual(seen?.verifiedRequest?.clientId, "c1")
+        let reply = ctx.notifications[0].params
+        XCTAssertEqual(reply?["response_jwe"], .string("h..i.c.t"))
+        XCTAssertNil(reply?["vp_token"])
+    }
+
     func testHandleProgressMatchRequestCallsOnMatchRequest() async throws {
         let ctx = MockPeerContext()
         var receivedFlowId: String?

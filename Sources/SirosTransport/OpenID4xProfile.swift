@@ -295,9 +295,15 @@ public struct SignSubFlowParams: Codable, Sendable {
     /// `generate_proof` over WMP, when the peer sends it: an EMPTY object with
     /// `credential_response_encryption` means the request is for the key alone (no proofs).
     public var proofTypesSupported: [String: AnyCodable]?
+    /// `sign_presentation` for `direct_post.jwt`: see `SignRequestParams.responseEncryption`.
+    public var responseEncryption: ResponseEncryptionRequest?
+    public var state: String?
+    public var verifiedRequest: VerifiedRequest?
 
     enum CodingKeys: String, CodingKey {
-        case action, nonce, audience, count, issuer, htm, htu, ath, jwe, deferred
+        case action, nonce, audience, count, issuer, htm, htu, ath, jwe, deferred, state
+        case responseEncryption = "response_encryption"
+        case verifiedRequest = "verified_request"
         case proofTypesSupported = "proof_types_supported"
         case credentialResponseEncryption = "credential_response_encryption"
         case proofType = "proof_type"
@@ -330,8 +336,14 @@ public struct SignSubFlowParams: Codable, Sendable {
         credentialResponseEncryption: CredentialResponseEncryptionRequest? = nil,
         jwe: String? = nil,
         deferred: Bool? = nil,
-        proofTypesSupported: [String: AnyCodable]? = nil
+        proofTypesSupported: [String: AnyCodable]? = nil,
+        responseEncryption: ResponseEncryptionRequest? = nil,
+        state: String? = nil,
+        verifiedRequest: VerifiedRequest? = nil
     ) {
+        self.responseEncryption = responseEncryption
+        self.state = state
+        self.verifiedRequest = verifiedRequest
         self.proofTypesSupported = proofTypesSupported
         self.credentialResponseEncryption = credentialResponseEncryption
         self.jwe = jwe
@@ -382,6 +394,9 @@ public struct SignSubFlowParams: Codable, Sendable {
         jwe = try c.decodeIfPresent(String.self, forKey: .jwe)
         deferred = try c.decodeIfPresent(Bool.self, forKey: .deferred)
         proofTypesSupported = try? c.decodeIfPresent([String: AnyCodable].self, forKey: .proofTypesSupported)
+        responseEncryption = try? c.decodeIfPresent(ResponseEncryptionRequest.self, forKey: .responseEncryption)
+        state = try? c.decodeIfPresent(String.self, forKey: .state)
+        verifiedRequest = try? c.decodeIfPresent(VerifiedRequest.self, forKey: .verifiedRequest)
     }
 }
 
@@ -441,6 +456,8 @@ public struct SignSubFlowResult: Sendable {
     public var credentialCount: Int?
     public var transactionId: String?
     public var interval: Int?
+    /// `sign_presentation` answer for `direct_post.jwt`: the compact JWE, with no `vpToken`.
+    public var responseJwe: String?
 
     public init(
         proofs: [ProofObject]? = nil,
@@ -453,8 +470,10 @@ public struct SignSubFlowResult: Sendable {
         credentialResponseEncryptionJwk: [String: String]? = nil,
         transactionId: String? = nil,
         interval: Int? = nil,
-        credentialCount: Int? = nil
+        credentialCount: Int? = nil,
+        responseJwe: String? = nil
     ) {
+        self.responseJwe = responseJwe
         self.credentialCount = credentialCount
         self.credentialResponseEncryptionJwk = credentialResponseEncryptionJwk
         self.transactionId = transactionId
@@ -690,6 +709,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         if let jwk = result.credentialResponseEncryptionJwk {
             params["credential_response_encryption_jwk"] = .object_(jwk.mapValues { .string($0) })
         }
+        if let jwe = result.responseJwe { params["response_jwe"] = .string(jwe) }
         if let count = result.credentialCount { params["credential_count"] = .int(count) }
         if let transactionId = result.transactionId { params["transaction_id"] = .string(transactionId) }
         if let interval = result.interval { params["interval"] = .int(interval) }

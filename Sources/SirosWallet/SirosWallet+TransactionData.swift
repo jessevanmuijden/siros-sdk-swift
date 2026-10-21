@@ -572,17 +572,19 @@ extension SirosWallet {
                 }
                 toSign.append(WmpSigningItem(cred: cred, ref: ref, binding: binding, queryId: queryId))
             }
-            var parts: [String] = []
+            var parts: [PresentationPart] = []
             for item in toSign {
-                parts.append(try await signTransactionVpToken(
+                parts.append((item.queryId, try await signTransactionVpToken(
                     credential: item.cred.raw, disclosedClaims: item.ref.disclosedClaims, nonce: params.nonce,
                     audience: params.audience, transactionData: item.binding,
                     kid: plan.kid(for: item.queryId, fallback: item.cred.kid)
-                ))
+                )))
             }
             try Task.checkCancellation()   // after the final signing await: an ended flow gets no token and no record
+            // Built before the consent is recorded as signed: a response that cannot be encrypted was not sent.
+            let result = try wmpPresentationResult(params: params, parts: parts)
             await plan.plan.complete(signed: true)
-            return SignSubFlowResult(vpToken: parts.joined(separator: "\n"))
+            return result
         } catch {
             if !Task.isCancelled && !(error is CancellationError) { await plan.plan.complete(failedWith: error) }
             throw error

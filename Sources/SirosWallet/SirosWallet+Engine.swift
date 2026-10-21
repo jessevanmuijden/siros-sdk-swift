@@ -41,7 +41,7 @@ extension SignResponseSender {
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
         credentialResponseEncryptionJwk: [String: String]? = nil, credentialCount: Int? = nil,
-        transactionId: String? = nil, interval: Int? = nil, error: String? = nil, errorCode: String? = nil,
+        responseJwe: String? = nil, transactionId: String? = nil, interval: Int? = nil, error: String? = nil, errorCode: String? = nil,
         messageId: String? = nil
     ) {
         sendSignResponse(SignResponseMessage(
@@ -55,7 +55,7 @@ extension SignResponseSender {
             dpopKeyId: dpopKeyId,
             dpopProof: dpopProof,
             credentialResponseEncryptionJwk: credentialResponseEncryptionJwk, credentialCount: credentialCount,
-            transactionId: transactionId, interval: interval, error: error, errorCode: errorCode
+            transactionId: transactionId, interval: interval, responseJwe: responseJwe, error: error, errorCode: errorCode
         ))
     }
 }
@@ -72,7 +72,8 @@ extension WalletEngineSession: SignResponseSender {
             dpopKeyId: message.dpopKeyId,
             dpopProof: message.dpopProof,
             credentialResponseEncryptionJwk: message.credentialResponseEncryptionJwk, credentialCount: message.credentialCount,
-            transactionId: message.transactionId, interval: message.interval, error: message.error, errorCode: message.errorCode,
+            responseJwe: message.responseJwe, transactionId: message.transactionId, interval: message.interval,
+            error: message.error, errorCode: message.errorCode,
             messageId: message.messageId
         )
     }
@@ -362,7 +363,7 @@ extension SirosWallet {
                 credentialIds: [],
                 kid: nil
             )
-            return SignSubFlowResult(vpToken: vpToken)
+            return try wmpPresentationResult(params: params, parts: [(nil, vpToken)])
 
         // Client authentication, same semantics as the legacy transport's
         // request_attestation / sign_client_auth cases in handleSignRequest:
@@ -753,7 +754,7 @@ extension SirosWallet {
                     lock.lock()
                     let storedMatchResults = pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
                     lock.unlock()
-                    var vpParts: [String] = []
+                    var vpParts: [PresentationPart] = []
                     do {
                     for ref in credsToInclude {
                         // A flow that ended (or a logout) while the user decided must not sign.
@@ -765,7 +766,7 @@ extension SirosWallet {
                         let matchResult = storedMatchResults?.first(where: { result in
                             result.queryId == ref.credentialQueryId || result.candidates.contains(where: { $0.id == cred.id })
                         })
-                        vpParts.append(try await buildSignPresentationVpPart(
+                        vpParts.append((ref.credentialQueryId, try await buildSignPresentationVpPart(
                             cred: cred,
                             ref: ref,
                             matchResult: matchResult,
@@ -774,7 +775,7 @@ extension SirosWallet {
                             msg: msg,
                             transactionData: ref.credentialQueryId.flatMap { scaPlan?.bindings[$0] },
                             transactionKid: scaPlan?.kid(for: ref.credentialQueryId, fallback: nil)
-                        ))
+                        )))
                     }
                     // A signer need not observe cancellation: recheck after the FINAL signing await,
                     // so an ended flow's token is never sent and its consent never recorded.
@@ -784,8 +785,7 @@ extension SirosWallet {
                         if !Task.isCancelled && !(error is CancellationError) { await Self.shielded { await scaPlan?.plan.complete(failedWith: error) } }
                         throw error
                     }
-                    let vpToken = vpParts.joined(separator: "\n")
-                    engine.sendSignResponse(flowId: msg.flowId, vpToken: vpToken, messageId: msg.messageId)
+                    try sendPresentationResponse(engine: engine, msg: msg, parts: vpParts)
                     // The record of a presentation that was sent must be written even if the flow's
                     // completion cancels this task meanwhile.
                     await Self.shielded { await scaPlan?.plan.complete(signed: true) }
@@ -793,7 +793,7 @@ extension SirosWallet {
                     let vpToken = try await keystore.signPresentation(
                         nonce: nonce, audience: audience, credentialIds: [], kid: nil
                     )
-                    engine.sendSignResponse(flowId: msg.flowId, vpToken: vpToken, messageId: msg.messageId)
+                    try sendPresentationResponse(engine: engine, msg: msg, parts: [(nil, vpToken)])
                 }
 
             case "request_attestation":

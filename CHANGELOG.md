@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Engine-blind presentation: the wallet builds the `direct_post.jwt` response.** `sign_presentation`
+  for `direct_post.jwt` carries `response_encryption {jwk, alg, enc}`, `state` (only if the request had
+  one) and `verified_request`; the wallet answers `sign_response {response_jwe}` with NO `vp_token`,
+  and the engine posts `response=<jwe>` to the `response_uri` it validated (engine-blind contract
+  section G; go-wallet-backend #471). On BOTH the engine WebSocket and WMP. The JWE is
+  ECDH-ES with A128GCM or A256GCM to the verifier's P-256 key, its protected header carries exactly
+  the requested `alg`/`enc`, the JWK's `kid`, `epk` and `cty: JWT`, and its payload is the JARM claims
+  (`iss` `https://self-issued.me/v2`, `aud`, `iat`, `exp` = `iat` + 300, `vp_token`, `state`). `aud` is
+  `verified_request.client_id` and nothing else: without one nothing is built. `vp_token` is built by
+  the wallet: for DCQL `{queryId: [token, ...]}` grouped in order (every part names its query),
+  otherwise the string. A private or non-P-256 key, `use` other than `enc`, an `alg` other than
+  `ECDH-ES` or an `enc` other than the two GCM variants is refused, and a refused response answers
+  neither `response_jwe` nor `vp_token`. Plain `direct_post`, query and fragment modes are unchanged:
+  the wallet returns `vp_token` and the engine builds the rest. Cross-checked against go-jose
+  v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **Engine-blind issuance: the wallet decrypts the issuer's Credential Response.** The engine (remote
   or embedded) relays ciphertext and never sees a credential, the `secret_seed` or any other
   `credential_metadata`; this replaces the earlier approach of the engine relaying
