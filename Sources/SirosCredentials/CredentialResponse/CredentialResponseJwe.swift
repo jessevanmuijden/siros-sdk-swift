@@ -105,7 +105,7 @@ public enum CredentialResponseJwe {
             }
             let kekBytes = alg == "ECDH-ES+A128KW" ? 16 : 32
             let kek = concatKdf(z: z, algorithmId: alg, apu: apu, apv: apv, keyBits: kekBytes * 8)
-            guard let unwrapped = try? AesKeyWrap.unwrap(kek: kek, wrapped: Array(encryptedKey)),
+            guard let unwrapped = try? AesBlock.keyUnwrap(kek: kek, wrapped: Array(encryptedKey)),
                   unwrapped.count == content.keyBytes else {
                 throw CredentialResponseJweError.authenticationFailed
             }
@@ -151,7 +151,10 @@ public enum CredentialResponseJwe {
                 guard iv.count == 16, tag.count == tagLength, ciphertext.count % 16 == 0, !ciphertext.isEmpty else { return nil }
                 var al = [UInt8](repeating: 0, count: 8)
                 var bits = UInt64(aad.count) * 8
-                for index in (0..<8).reversed() { al[index] = UInt8(bits & 0xff); bits >>= 8 }
+                for index in (0..<8).reversed() {
+                    al[index] = UInt8(bits & 0xff)
+                    bits >>= 8
+                }
                 let macInput = Data(aad + iv + ciphertext + al)
                 let mac: [UInt8]
                 if self == .a128cbcHs256 {
@@ -161,29 +164,9 @@ public enum CredentialResponseJwe {
                 }
                 // The tag is checked before anything is decrypted, in constant time.
                 guard constantTimeEqual(Array(mac.prefix(tagLength)), tag) else { return nil }
-                guard let padded = try? cbcDecrypt(key: encKey, iv: iv, ciphertext: ciphertext) else { return nil }
-                return pkcs7Unpad(padded)
+                return try? AesBlock.cbcDecryptPkcs7(key: encKey, iv: iv, ciphertext: ciphertext)
             }
         }
-    }
-
-    private static func cbcDecrypt(key: [UInt8], iv: [UInt8], ciphertext: [UInt8]) throws -> [UInt8] {
-        let blocks = try AesBlock.decryptBlocks(key: key, data: ciphertext)
-        var previous = iv
-        var out = [UInt8]()
-        out.reserveCapacity(blocks.count)
-        for start in stride(from: 0, to: blocks.count, by: 16) {
-            for offset in 0..<16 { out.append(blocks[start + offset] ^ previous[offset]) }
-            previous = Array(ciphertext[start..<(start + 16)])
-        }
-        return out
-    }
-
-    private static func pkcs7Unpad(_ data: [UInt8]) -> [UInt8]? {
-        guard let last = data.last, last >= 1, last <= 16, Int(last) <= data.count else { return nil }
-        let padding = data.suffix(Int(last))
-        guard padding.allSatisfy({ $0 == last }) else { return nil }
-        return Array(data.dropLast(Int(last)))
     }
 
     // MARK: - Key agreement
@@ -227,35 +210,5 @@ public enum CredentialResponseJwe {
         var difference: UInt8 = 0
         for index in a.indices { difference |= a[index] ^ b[index] }
         return difference == 0
-    }
-}
-
-/// RFC 3394 AES Key Wrap, unwrap only (a wallet never wraps a key for an issuer here).
-enum AesKeyWrap {
-    static let defaultIv: [UInt8] = [0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6, 0xA6]
-
-    enum Failure: Error { case badLength, integrity }
-
-    static func unwrap(kek: [UInt8], wrapped: [UInt8]) throws -> [UInt8] {
-        guard wrapped.count >= 24, wrapped.count % 8 == 0 else { throw Failure.badLength }
-        let n = wrapped.count / 8 - 1
-        var a = Array(wrapped[0..<8])
-        var r = (0..<n).map { Array(wrapped[(8 * ($0 + 1))..<(8 * ($0 + 2))]) }
-        for j in stride(from: 5, through: 0, by: -1) {
-            for i in stride(from: n, through: 1, by: -1) {
-                let t = UInt64(n * j + i)
-                var tBytes = [UInt8](repeating: 0, count: 8)
-                var tv = t
-                for index in (0..<8).reversed() { tBytes[index] = UInt8(tv & 0xff); tv >>= 8 }
-                let xored = zip(a, tBytes).map { $0 ^ $1 }
-                let block = try AesBlock.decryptBlocks(key: kek, data: xored + r[i - 1])
-                a = Array(block[0..<8])
-                r[i - 1] = Array(block[8..<16])
-            }
-        }
-        var difference: UInt8 = 0
-        for index in 0..<8 { difference |= a[index] ^ defaultIv[index] }
-        guard difference == 0 else { throw Failure.integrity }
-        return r.flatMap { $0 }
     }
 }
