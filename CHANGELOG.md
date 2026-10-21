@@ -77,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
   provider is gone.
 
+### Fixed
+- **WMP: the wallet answered the orchestrator's `sign` and `match` requests on a route the orchestrator
+  never reads.** The orchestrator (go-wallet-backend, WMP openid4x section 3.1.5) starts them as CHILD
+  flows (`wmp.flow.start`, `flow_type` `sign` or `match`, the issuance or presentation in
+  `parent_flow_id`) and waits for `wmp.flow.complete` ON THE CHILD flow id with the response JSON as
+  `result`; a refusal is `wmp.flow.error` on the child flow with `data.reason` `rejected`. The profile
+  registered only `oid4vci` and `oid4vp`, ignored the child `wmp.flow.start`, and answered a
+  `wmp.flow.progress` step with `wmp.flow.action` `sign_response` on the parent, which the orchestrator
+  parks until its sign timeout. `OpenID4xProfile` now registers `sign` and `match`, runs each child
+  flow (the handler is given the PARENT flow id, which is what the wallet keys its state by) and
+  answers as above, without holding the start request while the user decides. The old progress-step
+  route is left as it was.
+
 ### Deprecated
 - **`FaceTecCaptureDelegate`.** It is written against the FaceTec 9 API
   (`createSessionVC` and the face-scan/ID-scan processors), which FaceTec 10

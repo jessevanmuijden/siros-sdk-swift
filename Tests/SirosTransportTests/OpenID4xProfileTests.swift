@@ -141,6 +141,89 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications[0].params?["dpop_proof"], .string("dpop"))
     }
 
+    // MARK: - Child flows (the orchestrator's nested sign / match flows)
+
+    private func childStart(flowType: String, flowId: String = "child-1", params: [String: AnyCodable]) -> FlowStartParams {
+        FlowStartParams(wmp: WmpMeta(version: "0.1", sessionId: "s"), flowId: flowId, flowType: flowType, params: .object_(params))
+    }
+
+    /// The orchestrator starts a `sign` child flow and expects `wmp.flow.complete` ON THE CHILD with the
+    /// response as `result` (not a `wmp.flow.action` `sign_response` on the parent).
+    func testASignChildFlowIsAnsweredWithFlowCompleteOnTheChild() async throws {
+        let ctx = MockPeerContext()
+        var handlerFlowId: String?
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { flowId, params in
+            handlerFlowId = flowId
+            XCTAssertEqual(params.action, "generate_proof")
+            return SignSubFlowResult(proofs: [ProofObject(proofType: "jwt", jwt: "a.b.c")])
+        }))
+        profile.initialize(ctx: ctx)
+        XCTAssertTrue(profile.flowTypes.contains("sign"))
+        XCTAssertTrue(profile.flowTypes.contains("match"))
+        await profile.runChildFlow(params: childStart(flowType: "sign", params: [
+            "action": .string("generate_proof"), "nonce": .string("n"), "audience": .string("a"),
+            "parent_flow_id": .string("parent-1"),
+        ]))
+        XCTAssertEqual(handlerFlowId, "parent-1", "the wallet's state belongs to the parent flow")
+        XCTAssertEqual(ctx.notifications.count, 1)
+        XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowComplete)
+        let params = ctx.notifications[0].params
+        XCTAssertEqual(params?["flow_id"], .string("child-1"))
+        let result = try XCTUnwrap(params?["result"]?.objectValue)
+        XCTAssertNotNil(result["proofs"])
+        XCTAssertNil(result["action"], "the result is the response JSON, not an action")
+        XCTAssertNil(params?["action"])
+    }
+
+    func testARefusedSignChildFlowIsAFlowErrorOnTheChildWithReasonRejected() async throws {
+        struct Refused: Error, WmpErrorCodeProviding { var wmpErrorCode: String? { "DECRYPT_FAILED" } }
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in throw Refused() }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "sign", params: ["action": .string("sign_presentation")]))
+        XCTAssertEqual(ctx.notifications.count, 1)
+        XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
+        let params = ctx.notifications[0].params
+        XCTAssertEqual(params?["flow_id"], .string("child-1"))
+        XCTAssertEqual(params?["code"], .string("DECRYPT_FAILED"))
+        XCTAssertEqual(params?["data"]?.objectValue?["reason"], .string("rejected"))
+    }
+
+    func testAMatchChildFlowIsAnsweredWithTheMatchesAsTheResult() async throws {
+        let ctx = MockPeerContext()
+        var seenParent: String?
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onMatchRequest: { flowId, payload in
+            seenParent = flowId
+            XCTAssertNotNil(payload?.objectValue?["dcql_query"])
+            return MatchResult(matches: [CredentialMatch(credentialQueryId: "pid", credentialId: "7", format: "dc+sd-jwt")])
+        }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "match", flowId: "m-1", params: [
+            "dcql_query": .object_(["credentials": .array([])]), "parent_flow_id": .string("vp-1"),
+        ]))
+        XCTAssertEqual(seenParent, "vp-1")
+        XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowComplete)
+        XCTAssertEqual(ctx.notifications[0].params?["flow_id"], .string("m-1"))
+        let matches = ctx.notifications[0].params?["result"]?.objectValue?["matches"]?.arrayValue
+        XCTAssertEqual(matches?.count, 1)
+        XCTAssertEqual(matches?.first?.objectValue?["credential_id"], .string("7"))
+    }
+
+    func testStartingAChildFlowReturnsAtOnceAndAnswersLater() async throws {
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return SignSubFlowResult(vpToken: "tok")
+        }))
+        profile.initialize(ctx: ctx)
+        let started = try await profile.startFlow(params: childStart(flowType: "sign", params: ["action": .string("sign_presentation")]))
+        XCTAssertEqual(started.flowId, "child-1")
+        XCTAssertTrue(ctx.notifications.isEmpty, "the start request is not held until the user answers")
+        for _ in 0..<100 where ctx.notifications.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(ctx.notifications.first?.method, WmpMethods.flowComplete)
+        XCTAssertEqual(ctx.notifications.first?.params?["result"]?.objectValue?["vp_token"], .string("tok"))
+    }
+
     func testHandleProgressMatchRequestCallsOnMatchRequest() async throws {
         let ctx = MockPeerContext()
         var receivedFlowId: String?
