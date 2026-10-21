@@ -514,4 +514,40 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertNil(plain.credentialResponseEncrypted)
         XCTAssertEqual(plain.credentials?.first?.credential, "x.y.z")
     }
+
+    func testFlowCompleteKeepsOnlyDisplayAndClaimsOfCredentialMetadata() throws {
+        let message = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"""
+        {"type":"flow_complete","flow_id":"f","credentials":[{"format":"dc+sd-jwt","credential":"x.y.z"}],
+         "credential_metadata":{
+           "display":[{"name":"Nym","locale":"en"}],
+           "claims":[{"path":["a"]}],
+           "org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},
+           "x-other":{"k":1}}}
+        """#.utf8))
+        let metadata = try XCTUnwrap(message.credentialMetadata)
+        XCTAssertEqual(metadata.display?.arrayValue?.first?.objectValue?["name"]?.stringValue, "Nym")
+        XCTAssertNotNil(metadata.claims)
+        // Nothing but display and claims is held, so nothing else can be logged or re-encoded from it.
+        let reencoded = String(decoding: try JSONEncoder().encode(metadata), as: UTF8.self)
+        XCTAssertFalse(reencoded.contains("secret_seed"))
+        XCTAssertFalse(reencoded.contains("00112233445566778899aabbccddeeff"))
+        XCTAssertFalse(reencoded.contains("x-other"))
+        let whole = String(decoding: try JSONEncoder().encode(message), as: UTF8.self)
+        XCTAssertFalse(whole.contains("00112233445566778899aabbccddeeff"))
+    }
+
+    func testCredentialMetadataOfTheWrongShapeNeverFailsTheFlow() throws {
+        for raw in ["null", "[1]", "\"s\"", "7", #"{"display":"not an array","claims":3}"#, "{}"] {
+            let message = try JSONDecoder().decode(
+                FlowCompleteMessage.self,
+                from: Data(#"{"type":"flow_complete","flow_id":"f","credential_metadata":\#(raw)}"#.utf8)
+            )
+            if !raw.hasPrefix("{") {
+                XCTAssertNil(message.credentialMetadata?.display, raw)
+                XCTAssertNil(message.credentialMetadata?.claims, raw)
+            }
+        }
+        let absent = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"{"type":"flow_complete","flow_id":"f"}"#.utf8))
+        XCTAssertNil(absent.credentialMetadata)
+    }
 }

@@ -558,10 +558,16 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// `credentials` then carry no `credential` value, and entry i belongs to the i-th credential
     /// the wallet decrypted for this flow (`decrypt_credential_response`).
     public var credentialResponseEncrypted: Bool?
+    /// Display-only response-level `credential_metadata` of a PLAIN issuer response, when the engine
+    /// relays it: only `display` and `claims`. Every other member is dropped at decoding, so an
+    /// extension member such as `org.siros.secret_seed` can never arrive this way: those come only
+    /// from the wallet's own decryption of an encrypted response.
+    public var credentialMetadata: CredentialDisplayMetadata?
     public var timestamp: String?
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp
+        case credentialMetadata = "credential_metadata"
         case credentialResponseEncrypted = "credential_response_encrypted"
         case flowId = "flow_id"
         case redirectUri = "redirect_uri"
@@ -571,6 +577,34 @@ public struct FlowCompleteMessage: Codable, Sendable {
         case refreshToken = "refresh_token"
         case dpopJwk = "dpop_jwk"
         case dpopKeyId = "dpop_key_id"
+    }
+}
+
+/// The display-only part of a response-level `credential_metadata` object: `display` and `claims`,
+/// kept as received. Decoding looks at those two members and nothing else, so no other member (a
+/// delivered secret, an unknown extension) is ever held in this type, logged from it or re-encoded
+/// from it. Anything that is not an object decodes to an empty value.
+public struct CredentialDisplayMetadata: Codable, Sendable, Equatable {
+    public var display: AnyCodable?
+    public var claims: AnyCodable?
+
+    enum CodingKeys: String, CodingKey { case display, claims }
+
+    public init(display: AnyCodable? = nil, claims: AnyCodable? = nil) {
+        self.display = display
+        self.claims = claims
+    }
+
+    public init(from decoder: Decoder) throws {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.init()
+            return
+        }
+        // A member of the wrong shape is ignored, not an error: display metadata must never fail a flow.
+        self.init(
+            display: try? container.decodeIfPresent(AnyCodable.self, forKey: .display),
+            claims: try? container.decodeIfPresent(AnyCodable.self, forKey: .claims)
+        )
     }
 }
 

@@ -11,8 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Engine-blind issuance: the wallet decrypts the issuer's Credential Response.** The engine (remote
   or embedded) relays ciphertext and never sees a credential, the `secret_seed` or any other
   `credential_metadata`; this replaces the earlier approach of the engine relaying
-  `credential_metadata` in `flow_complete` (that DTO and the WMP `redacted_members` marker are gone,
-  never released). On BOTH the engine WebSocket and WMP:
+  `credential_metadata` in `flow_complete` (that relay of arbitrary members and the WMP
+  `redacted_members` marker are gone, never released). For PLAIN issuer responses the engine may
+  still relay display-only `credential_metadata`: `FlowCompleteMessage.credentialMetadata` decodes
+  `display` and `claims` and nothing else, so an extension member such as `org.siros.secret_seed`
+  can only ever come from the wallet's own decryption. On BOTH the engine WebSocket and WMP:
   - `generate_proof` may carry `credential_response_encryption {alg, enc, required}`. The wallet
     generates a FRESH in-memory P-256 key per proof request (so per c_nonce retry), keeps it per
     flow id, and answers with `credential_response_encryption_jwk` (public JWK: `kty` EC, `crv`
