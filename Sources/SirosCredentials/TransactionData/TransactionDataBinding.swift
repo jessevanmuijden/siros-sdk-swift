@@ -4,12 +4,30 @@ import Foundation
 
 /// One authentication factor applied for an operation, in TS12 vocabulary
 /// (TS12 v1.0.1 section 3.6).
-public struct AuthenticationFactor: Sendable, Equatable {
+///
+/// `Hashable` so a reported factor list can be compared against a claimed one
+/// as a true SET (see `ScaSignFlow.run`'s final check) rather than by count
+/// and containment, which a duplicated factor could satisfy with the wrong
+/// composition. Mirrors `siros-sdk-kotlin`'s `AuthenticationFactor`
+/// (`sdk/keystore/src/main/kotlin/org/siros/sdk/keystore/TransactionBinding.kt`),
+/// which overrides `equals`/`hashCode` on exactly `category` and `method` for
+/// the same reason (`ScaSignSession.requireMatching` there compares as sets).
+public struct AuthenticationFactor: Sendable, Equatable, Hashable {
     public enum Category: String, Sendable, CaseIterable {
         case knowledge, possession, inherence
     }
 
     /// The method values TS12 defines per category (section 3.6).
+    ///
+    /// MUST stay in sync with its two siblings, which this SDK cannot edit:
+    /// the vocabulary `siros-wscd-manager` enforces in its own
+    /// `classify_secret`/possession-method mapping (`src/factors.rs`), and
+    /// `AuthenticationFactor.METHODS` in `siros-sdk-kotlin`
+    /// (`sdk/keystore/src/main/kotlin/org/siros/sdk/keystore/TransactionBinding.kt`).
+    /// A method value present here but not in one of those siblings (or vice
+    /// versa) lets this SDK claim (or accept) an `amr` entry a verifier
+    /// following the same spec from the Rust manager or the Kotlin SDK would
+    /// never produce.
     public static let methods: [Category: Set<String>] = [
         .knowledge: ["pin_less_than_6_digits", "pin_6_or_more_digits", "passphrase_less_than_8_chars",
                      "passphrase_8_to_11_chars", "passphrase_12_or_more_chars", "pattern", "other"],
