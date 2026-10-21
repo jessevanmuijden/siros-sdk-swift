@@ -53,11 +53,8 @@ struct ProximityEngagementContent: View {
     @State private var peripheralOutcome: Bool?
     @State private var centralOutcome: Bool?
     @State private var pendingConsent: PendingConsent?
-    /// The continuation box backing the CURRENTLY shown `pendingConsent`, if
-    /// any - lets `.sheet(item:onDismiss:)`'s `onDismiss` resolve it if the
-    /// sheet is dismissed WITHOUT the user tapping Share/Decline (e.g.
-    /// swiping it away). See `requestConsent`'s doc comment.
-    @State private var activeConsentBox: ConsentContinuationBox?
+    /// The SDK prompt behind `pendingConsent`: exactly one answer, denied on dismiss, supersede and cancellation.
+    @State private var consentPrompt = ConsentPrompt<ProximityConsentQuestion, ProximityConsentResult>(decline: .denied)
 
     var body: some View {
         Group {
@@ -74,20 +71,21 @@ struct ProximityEngagementContent: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear(perform: setUpIfNeeded)
+        .onAppear {
+            // Show the SDK prompt's current question (read on the main actor, so the order is the truth).
+            consentPrompt.onChange = { _ in
+                Task { @MainActor in pendingConsent = consentPrompt.current }
+            }
+            setUpIfNeeded()
+        }
         .onDisappear {
             server?.stop()
             centralClient?.stop()
         }
         .sheet(item: $pendingConsent, onDismiss: {
-            // Covers the sheet being dismissed WITHOUT the user tapping
-            // Share/Decline (e.g. swiping it away) - the continuation would
-            // otherwise hang forever with no way to resolve it. `resumeOnce`
-            // is a no-op if the user already tapped Share/Decline (`respond`
-            // already resumed it, which is what triggered this dismissal in
-            // the first place) - see `requestConsent`'s doc comment.
-            activeConsentBox?.resumeOnce(.denied)
-            activeConsentBox = nil
+            // The sheet went away without Share/Decline (e.g. swiped away): the SDK prompt declines. A no-op when
+            // the user already answered.
+            consentPrompt.dismiss()
         }) { consent in
             ProximityConsentSheet(
                 consent: consent,
@@ -251,90 +249,17 @@ struct ProximityEngagementContent: View {
         central?.start()
     }
 
-    /// Bridges `BlePeripheralServer`/`BleCentralClient`'s async consent
-    /// request to this screen's consent sheet: suspends the caller until the
-    /// user taps Share or Decline in `ProximityConsentSheet`. Mirrors the
-    /// Kotlin screen's `suspendCancellableCoroutine` bridge to a Compose
-    /// `AlertDialog`.
-    ///
-    /// Thread-safety note: `BlePeripheralServer`/`BleCentralClient` create
-    /// their `CBPeripheralManager`/`CBCentralManager` with `queue: nil`, so
-    /// CoreBluetooth's OWN delegate callbacks are delivered on the main
-    /// queue - but the plain `Task { ... }` spawned from those callbacks
-    /// (see `BlePeripheralServer.handleDataWrite`) is NOT MainActor-isolated,
-    /// so once this function is reached (after several `await`s inside that
-    /// Task - parsing, `getCredentials()`, etc.) execution may already have
-    /// hopped off the main thread, matching a real Copilot-review finding
-    /// against this same pattern in `startProximityEngagement`'s
-    /// `onStep`/`onComplete` closures. Explicitly hop the `@State` mutation
-    /// onto the main actor below rather than assuming thread affinity.
-    ///
-    /// Cancellation note (Kotlin's fix used `suspendCancellableCoroutine`'s
-    /// `invokeOnCancellation` to clear `pendingConsent` and guard `resume()`
-    /// with an `isActive` check, for when the underlying BLE coroutine scope
-    /// is torn down while the user hasn't answered yet): this screen never
-    /// actually calls `Task.cancel()` on the BLE `Task`s awaiting this
-    /// function (`stop()` only tears down the CoreBluetooth managers, not the
-    /// Swift `Task` itself), so `withTaskCancellationHandler` would have
-    /// nothing to hook here - Kotlin's specific trigger has no real Swift
-    /// equivalent in this screen. The GENUINE equivalent gap in THIS SwiftUI
-    /// screen is the user dismissing the consent sheet by swiping it away
-    /// instead of tapping Share/Decline, which would otherwise leave this
-    /// continuation suspended forever with no way to resolve it - handled via
-    /// `.sheet(item:onDismiss:)`'s `onDismiss` (see `body`), which resumes
-    /// `activeConsentBox` with `.denied` in that case. `ConsentContinuationBox`
-    /// guards the resulting race the same way Kotlin's `isActive` check does:
-    /// whichever of `respond`/`onDismiss` runs first wins, the other is a
-    /// no-op.
+    /// Puts a proximity presentation request to the user through the SDK's `ConsentPrompt` and shows it in
+    /// `ProximityConsentSheet`: one answer; denied when the sheet is dismissed, a newer request arrives or the
+    /// task is cancelled.
     private func requestConsent(
         _ docType: String,
         _ requestedClaims: [String],
         _ matchingFamilies: [CredentialFamily],
         _ readerTrust: ReaderTrustResult?
     ) async -> ProximityConsentResult {
-        await withCheckedContinuation { (continuation: CheckedContinuation<ProximityConsentResult, Never>) in
-            let box = ConsentContinuationBox()
-            box.set(continuation)
-            Task { @MainActor in
-                activeConsentBox = box
-                pendingConsent = PendingConsent(
-                    docType: docType,
-                    requestedClaims: requestedClaims,
-                    matchingFamilies: matchingFamilies,
-                    readerTrust: readerTrust,
-                    respond: { chosen in
-                        // Triggers `.sheet(item:onDismiss:)`'s onDismiss too
-                        // (setting the bound item to nil dismisses the sheet) -
-                        // that's fine: `box.resumeOnce` below already wins the
-                        // race, so onDismiss's own `resumeOnce(.denied)` call is
-                        // a harmless no-op by the time it runs.
-                        pendingConsent = nil
-                        box.resumeOnce(chosen.map { ProximityConsentResult.approved($0) } ?? .denied)
-                    }
-                )
-            }
-        }
-    }
-}
-
-/// Resumes a `ProximityConsentResult` continuation at most once, guarding
-/// the race between the user answering via `PendingConsent.respond` and the
-/// consent sheet being dismissed some other way (see `.sheet(item:onDismiss:)`
-/// in `ProximityEngagementContent.body`, and `requestConsent`'s doc comment).
-/// Both call sites run on the main actor (SwiftUI button actions and
-/// `onDismiss` alike), so no locking is needed here - just the
-/// resume-at-most-once guard itself.
-private final class ConsentContinuationBox {
-    private var continuation: CheckedContinuation<ProximityConsentResult, Never>?
-
-    func set(_ continuation: CheckedContinuation<ProximityConsentResult, Never>) {
-        self.continuation = continuation
-    }
-
-    func resumeOnce(_ result: ProximityConsentResult) {
-        let continuation = self.continuation
-        self.continuation = nil
-        continuation?.resume(returning: result)
+        await consentPrompt.ask(ProximityConsentQuestion(
+            docType: docType, requestedClaims: requestedClaims, matchingFamilies: matchingFamilies, readerTrust: readerTrust))
     }
 }
 
@@ -405,16 +330,16 @@ private struct ProximityTerminalView: View {
 /// Holds one in-flight consent request's details plus how to answer it - see
 /// `RequestProximityConsent`. `Identifiable` so it can drive a
 /// `.sheet(item:)` presentation directly.
-private struct PendingConsent: Identifiable {
-    let id = UUID()
+private struct ProximityConsentQuestion {
     let docType: String
     let requestedClaims: [String]
     let matchingFamilies: [CredentialFamily]
     /// See `RequestProximityConsent`'s `readerTrust` parameter doc comment.
     let readerTrust: ReaderTrustResult?
-    /// Call with the chosen family to approve, or nil to deny.
-    let respond: (CredentialFamily?) -> Void
 }
+
+/// The SDK prompt's question: `answer(.approved(family))` shares, `decline()` denies.
+private typealias PendingConsent = ConsentPrompt<ProximityConsentQuestion, ProximityConsentResult>.Pending
 
 /// Consent sheet shown before a proximity presentation is signed and sent:
 /// a recognizable preview of the actual credential (not just its raw
@@ -437,8 +362,8 @@ private struct ProximityConsentSheet: View {
     init(consent: PendingConsent, filterEligible: @escaping ([StoredCredential]) -> [StoredCredential]) {
         self.consent = consent
         self.filterEligible = filterEligible
-        let eligible = consent.matchingFamilies.first(where: { !filterEligible($0.instances).isEmpty })
-        _selected = State(initialValue: eligible ?? consent.matchingFamilies.first!)
+        let eligible = consent.request.matchingFamilies.first(where: { !filterEligible($0.instances).isEmpty })
+        _selected = State(initialValue: eligible ?? consent.request.matchingFamilies.first!)
     }
 
     private func isEligible(_ family: CredentialFamily) -> Bool {
@@ -453,17 +378,17 @@ private struct ProximityConsentSheet: View {
                 VStack(alignment: .leading, spacing: 16) {
                     CredentialCardView(credential: selected.representative)
 
-                    ReaderTrustBadge(readerTrust: consent.readerTrust)
+                    ReaderTrustBadge(readerTrust: consent.request.readerTrust)
 
                     Text(L10n.string("proximity.requestingClaims"))
                         .font(.subheadline)
                         .foregroundColor(SirosTheme.onSurfaceVariant)
-                    ForEach(consent.requestedClaims, id: \.self) { claim in
+                    ForEach(consent.request.requestedClaims, id: \.self) { claim in
                         Text("• \(claim)")
                             .font(.body)
                     }
 
-                    if consent.matchingFamilies.count > 1 {
+                    if consent.request.matchingFamilies.count > 1 {
                         Divider()
                         Text(L10n.string("proximity.multipleMatches"))
                             .font(.subheadline.weight(.semibold))
@@ -474,14 +399,14 @@ private struct ProximityConsentSheet: View {
                         // lists (see `WscdSettingsView.swift`'s
                         // `PluginChip`), adapted to full-width rows since
                         // each option here needs a full credential name.
-                        ForEach(consent.matchingFamilies, id: \.representative.id) { family in
+                        ForEach(consent.request.matchingFamilies, id: \.representative.id) { family in
                             let eligible = isEligible(family)
                             Button(action: { if eligible { selected = family } }) {
                                 HStack {
                                     Image(systemName: family == selected ? "checkmark.circle.fill" : "circle")
                                         .foregroundColor(family == selected ? SirosTheme.brand : SirosTheme.onSurfaceVariant)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(family.representative.metadata?.vct ?? family.representative.metadata?.doctype ?? consent.docType)
+                                        Text(family.representative.metadata?.vct ?? family.representative.metadata?.doctype ?? consent.request.docType)
                                             .foregroundColor(eligible ? .primary : SirosTheme.onSurfaceVariant)
                                         if !eligible {
                                             Text(L10n.string("proximity.noCopiesLeft"))
@@ -503,10 +428,10 @@ private struct ProximityConsentSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(L10n.string("proximity.declineButton")) { consent.respond(nil) }
+                    Button(L10n.string("proximity.declineButton")) { consent.decline() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(L10n.string("proximity.shareButton")) { consent.respond(selected) }
+                    Button(L10n.string("proximity.shareButton")) { consent.answer(.approved(selected)) }
                         .disabled(!selectedIsEligible)
                 }
             }
