@@ -366,13 +366,6 @@ final class WalletViewModel: ObservableObject {
     private var autoEnrollOffered = false
 
     init() {
-        // The SDK prompts publish their current question; read it on the main actor so the order is the truth.
-        transactionConsent.onChange = { [weak self] _ in
-            Task { @MainActor in self?.pendingTransactionConsent = self?.transactionConsent.current }
-        }
-        wscdChoice.onChange = { [weak self] _ in
-            Task { @MainActor in self?.pendingWscdChoice = self?.wscdChoice.current }
-        }
         let defaults = UserDefaults.standard
         var backendUrl = defaults.string(forKey: "siros_backend_url") ?? defaultBackendUrl
         var tenantId = defaults.string(forKey: "siros_tenant_id") ?? defaultTenantId
@@ -419,6 +412,14 @@ final class WalletViewModel: ObservableObject {
         #if DEBUG
         applyFixtureCredentialsIfRequested()
         #endif
+
+        // The SDK prompts publish their current question; read it on the main actor so the order is the truth.
+        transactionConsent.onChange = { [weak self] _ in
+            Task { @MainActor in self?.pendingTransactionConsent = self?.transactionConsent.current }
+        }
+        wscdChoice.onChange = { [weak self] _ in
+            Task { @MainActor in self?.pendingWscdChoice = self?.wscdChoice.current }
+        }
     }
 
     // MARK: - Public actions

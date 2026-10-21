@@ -145,8 +145,10 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
         }
         guard let (resolved, continuation) = taken else { return false }
         resolved.timeout?.cancel()
-        continuation?.resume(returning: answer ?? declineAnswer)
+        // The host hears the question is gone BEFORE the asking call continues, so what it shows never outlives
+        // the answer the SDK acts on.
         notify(nil)
+        continuation?.resume(returning: answer ?? declineAnswer)
         return true
     }
 
