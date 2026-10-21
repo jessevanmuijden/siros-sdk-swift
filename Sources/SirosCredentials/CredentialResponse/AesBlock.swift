@@ -41,9 +41,10 @@ enum AesBlock {
         #if canImport(CommonCrypto)
         var plain = [UInt8](repeating: 0, count: ciphertext.count + 16)
         var written = 0
+        // CBC with PKCS#7 padding (the options value is `kCCOptionPKCS7Padding`; ECB is not selected).
         let status = plain.withUnsafeMutableBytes { outPtr in
             CCCrypt(
-                CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
+                UInt32(kCCDecrypt), UInt32(kCCAlgorithmAES), UInt32(kCCOptionPKCS7Padding),
                 key, key.count, iv, ciphertext, ciphertext.count, outPtr.baseAddress, outPtr.count, &written
             )
         }

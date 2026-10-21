@@ -146,7 +146,8 @@ public enum CredentialResponseJwe {
             case .a128cbcHs256, .a256cbcHs512:
                 // RFC 7518 section 5.2: MAC_KEY is the first half, ENC_KEY the second.
                 let half = cek.count / 2
-                let macKey = Array(cek[0..<half]), encKey = Array(cek[half...])
+                let macKey = Array(cek[0..<half])
+                let encKey = Array(cek[half...])
                 let tagLength = half
                 guard iv.count == 16, tag.count == tagLength, ciphertext.count % 16 == 0, !ciphertext.isEmpty else { return nil }
                 var al = [UInt8](repeating: 0, count: 8)
