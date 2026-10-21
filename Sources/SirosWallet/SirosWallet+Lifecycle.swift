@@ -207,6 +207,7 @@ extension SirosWallet {
         lock.unlock()
         engine?.disconnect()
         cancelEngineTasks()
+        clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
         // Same reason as logout()'s: a self-driven re-login still awaiting the

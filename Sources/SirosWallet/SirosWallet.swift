@@ -1319,6 +1319,7 @@ public final class SirosWallet: @unchecked Sendable {
         if let peer { Task { try? await peer.close() } }
         cancelEngineTasks()
         releaseZkProvers()
+        clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
         sessionStore.clear()  // clears active account's session only

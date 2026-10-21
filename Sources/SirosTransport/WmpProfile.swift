@@ -27,6 +27,15 @@ public protocol WmpPeerContext: AnyObject {
 
     /// The codec used for encoding/decoding messages.
     var codec: WmpCodec { get }
+
+    /// Stop routing a flow that this side has finished (it sent its terminal `wmp.flow.complete` or
+    /// `wmp.flow.error`): the peer only forgets a flow on an INCOMING terminal message, so a locally
+    /// finished child would otherwise stay tracked for the session.
+    func releaseFlow(flowId: String)
+}
+
+public extension WmpPeerContext {
+    func releaseFlow(flowId: String) {}
 }
 
 /// Handles profile-specific flow types. The Peer dispatches flow operations

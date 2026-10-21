@@ -109,10 +109,47 @@ public struct DecryptedCredentialResponse: Sendable, Equatable {
         }
         let notificationId = object["notification_id"]?.stringValue
         if object["notification_id"] != nil && notificationId == nil { throw ParseError.malformed("notification_id is not a string") }
+        let metadata = object["credential_metadata"]
+        if let metadata { try checkLimits(metadata) }
         return DecryptedCredentialResponse(
             credentials: credentials, notificationId: notificationId, transactionId: transactionId,
-            interval: interval, credentialMetadata: object["credential_metadata"]
+            interval: interval, credentialMetadata: metadata
         )
+    }
+
+    /// The `notification_id` of a response, read leniently, so a response rejected for any other reason
+    /// can still be reported to the issuer as `credential_failure`. nil when the plaintext has none.
+    public static func notificationId(in plaintext: Data) -> String? {
+        // Lenient on purpose (a duplicate member is exactly what may have got the response rejected): this
+        // reads one string and nothing else from the document.
+        guard let object = (try? JSONSerialization.jsonObject(with: plaintext)) as? [String: Any],
+              let id = object["notification_id"] as? String, !id.isEmpty else { return nil }
+        return id
+    }
+
+    // The limits the engine used to enforce on `credential_metadata` before it stopped seeing it. The JSON
+    // is parsed strictly, so a duplicate member never gets this far.
+    public static let maxMetadataBytes = 1_048_576
+    public static let maxMetadataDepth = 16
+    public static let maxMetadataMembers = 256
+    public static let maxMemberNameBytes = 256
+
+    private static func checkLimits(_ metadata: JSONValue) throws {
+        func walk(_ value: JSONValue, depth: Int) throws {
+            guard depth <= maxMetadataDepth else { throw ParseError.malformed("credential_metadata is nested too deeply") }
+            switch value {
+            case .array(let items): for item in items { try walk(item, depth: depth + 1) }
+            case .object(let members):
+                guard members.count <= maxMetadataMembers else { throw ParseError.malformed("credential_metadata has too many members") }
+                for (name, member) in members {
+                    guard name.utf8.count <= maxMemberNameBytes else { throw ParseError.malformed("a member name is too long") }
+                    try walk(member, depth: depth + 1)
+                }
+            default: break
+            }
+        }
+        try walk(metadata, depth: 1)
+        guard try json(metadata).utf8.count <= maxMetadataBytes else { throw ParseError.malformed("credential_metadata is too large") }
     }
 
     private static func stored(_ value: JSONValue) throws -> String {
@@ -127,21 +164,28 @@ public struct DecryptedCredentialResponse: Sendable, Equatable {
         }
     }
 
-    /// Compact JSON with sorted members, for an object-valued credential.
+    /// Compact JSON with sorted members, for an object-valued credential. Numbers are written as the
+    /// token the strict parser validated, so no value is rounded or re-typed on the way through.
     private static func json(_ value: JSONValue) throws -> String {
-        func any(_ v: JSONValue) -> Any {
-            switch v {
-            case .null: return NSNull()
-            case .bool(let b): return b
-            case .int(let i): return i
-            case .double(let d): return d
-            case .decimal(let s): return Decimal(string: s) ?? s
-            case .string(let s): return s
-            case .array(let a): return a.map(any)
-            case .object(let o): return o.mapValues(any)
-            }
+        switch value {
+        case .null: return "null"
+        case .bool(let flag): return flag ? "true" : "false"
+        case .int(let number): return String(number)
+        case .decimal(let token): return token
+        case .double(let number):
+            guard number.isFinite else { throw ParseError.malformed("a number is not finite") }
+            return "\(number)"
+        case .string(let text): return try quoted(text)
+        case .array(let items): return "[" + (try items.map(json).joined(separator: ",")) + "]"
+        case .object(let members):
+            let pairs = try members.keys.sorted().map { key in try quoted(key) + ":" + json(members[key] ?? .null) }
+            return "{" + pairs.joined(separator: ",") + "}"
         }
-        let data = try JSONSerialization.data(withJSONObject: any(value), options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed])
-        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func quoted(_ text: String) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return String(decoding: try encoder.encode(text), as: UTF8.self)
     }
 }

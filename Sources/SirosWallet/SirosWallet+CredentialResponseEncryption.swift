@@ -102,20 +102,26 @@ extension SirosWallet {
     func decryptCredentialResponse(
         flowId: String, jwe: String?, deferred: Bool
     ) async throws -> CredentialResponseControl {
-        lock.lock(); let key = credentialResponseKeys[flowId]; lock.unlock()
+        lock.lock()
+        let key = credentialResponseKeys[flowId]
+        let generation = credentialResponseGenerationLocked(flowId: flowId)
+        lock.unlock()
         guard let key else { throw CredentialResponseError.noKey }
         guard let jwe, !jwe.isEmpty else { throw CredentialResponseError.malformedResponse }
+        let plaintext: Data
+        do { plaintext = try key.decrypt(jwe) } catch { throw CredentialResponseError.decryptFailed }
         let response: DecryptedCredentialResponse
         do {
-            response = try DecryptedCredentialResponse.parse(try key.decrypt(jwe))
-        } catch is DecryptedCredentialResponse.ParseError {
-            throw CredentialResponseError.malformedResponse
+            response = try DecryptedCredentialResponse.parse(plaintext)
         } catch {
-            throw CredentialResponseError.decryptFailed
+            // Read but rejected: the issuer is owed a credential_failure for it, and the id is in the body.
+            sendCredentialFailure(flowId: flowId, notificationId: DecryptedCredentialResponse.notificationId(in: plaintext))
+            throw CredentialResponseError.malformedResponse
         }
         // Exactly one of: credentials (1 to 256) or a transaction_id. Both, neither or too many is not a
         // response this wallet accepts.
         guard response.credentials.isEmpty != (response.transactionId == nil), response.credentials.count <= 256 else {
+            sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
             throw CredentialResponseError.malformedResponse
         }
         if let receiver = credentialMetadataReceiver {
@@ -129,10 +135,13 @@ extension SirosWallet {
             }
         }
         lock.lock()
-        // A flow that ended while this was decrypting must not leave a response behind.
-        if credentialResponseKeys[flowId] != nil {
-            decryptedCredentialResponses[flowId, default: []].append(response)
+        // The flow may have ended, been cancelled, or been given a new key while the receiver was
+        // suspended: that response is stale and is neither kept nor reported as taken.
+        guard credentialResponseKeys[flowId] === key, generation == credentialResponseGenerationLocked(flowId: flowId) else {
+            lock.unlock()
+            throw CredentialResponseError.noKey
         }
+        decryptedCredentialResponses[flowId, default: []].append(response)
         lock.unlock()
         if let transactionId = response.transactionId {
             return CredentialResponseControl(transactionId: transactionId, interval: response.interval)
@@ -153,6 +162,16 @@ extension SirosWallet {
     func takeDecryptedCredentialResponses(flowId: String) -> [DecryptedCredentialResponse] {
         lock.lock(); defer { lock.unlock() }
         return decryptedCredentialResponses.removeValue(forKey: flowId) ?? []
+    }
+
+    /// Nothing of blind issuance stays reachable once the wallet is locked or the session ends: every
+    /// flow's private response key and everything opened with it (credentials, a delivered seed).
+    func clearBlindIssuanceState() {
+        lock.lock()
+        credentialResponseKeys.removeAll()
+        decryptedCredentialResponses.removeAll()
+        credentialResponseEpoch += 1
+        lock.unlock()
     }
 
     /// Forget this flow's key and anything decrypted for it.
@@ -288,15 +307,15 @@ extension SirosWallet {
         )
     }
 
-    /// The same over WMP. WMP carries `proof_types_supported` only when the peer sends it: an explicit
-    /// empty object with response encryption is the key-only request; absence means proofs as before.
+    /// The same over WMP: response encryption without `proof_types_supported` is the key-only request
+    /// (WMP openid4x section 3.1.5.1), and a supplied list is forwarded to the proof selection.
     func wmpGenerateProof(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
         let generation = credentialResponseGeneration(flowId: flowId)
         let encryption = params.credentialResponseEncryption
-        let keyOnly = encryption != nil && params.proofTypesSupported?.isEmpty == true
+        let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: params.proofTypesSupported)
         let proofs = keyOnly ? [] : try await proofObjects(
             audience: params.audience, nonce: params.nonce, count: params.count ?? 1,
-            proofTypesSupported: nil, proofTypeHint: params.proofType
+            proofTypesSupported: params.proofTypesSupported, proofTypeHint: params.proofType
         )
         let jwk = credentialResponseEncryptionJwk(flowId: flowId, request: encryption, generation: generation)
         return SignSubFlowResult(proofs: proofs.isEmpty ? nil : proofs, credentialResponseEncryptionJwk: jwk)
