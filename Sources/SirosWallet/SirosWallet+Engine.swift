@@ -40,8 +40,8 @@ extension SignResponseSender {
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
-        credentialResponseEncryptionJwk: [String: String]? = nil, transactionId: String? = nil, interval: Int? = nil,
-        error: String? = nil, errorCode: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil, credentialCount: Int? = nil,
+        transactionId: String? = nil, interval: Int? = nil, error: String? = nil, errorCode: String? = nil,
         messageId: String? = nil
     ) {
         sendSignResponse(SignResponseMessage(
@@ -54,8 +54,8 @@ extension SignResponseSender {
             clientAttestationPoP: clientAttestationPoP,
             dpopKeyId: dpopKeyId,
             dpopProof: dpopProof,
-            credentialResponseEncryptionJwk: credentialResponseEncryptionJwk, transactionId: transactionId,
-            interval: interval, error: error, errorCode: errorCode
+            credentialResponseEncryptionJwk: credentialResponseEncryptionJwk, credentialCount: credentialCount,
+            transactionId: transactionId, interval: interval, error: error, errorCode: errorCode
         ))
     }
 }
@@ -71,8 +71,8 @@ extension WalletEngineSession: SignResponseSender {
             clientAttestationPoP: message.clientAttestationPoP,
             dpopKeyId: message.dpopKeyId,
             dpopProof: message.dpopProof,
-            credentialResponseEncryptionJwk: message.credentialResponseEncryptionJwk, transactionId: message.transactionId,
-            interval: message.interval, error: message.error, errorCode: message.errorCode,
+            credentialResponseEncryptionJwk: message.credentialResponseEncryptionJwk, credentialCount: message.credentialCount,
+            transactionId: message.transactionId, interval: message.interval, error: message.error, errorCode: message.errorCode,
             messageId: message.messageId
         )
     }
@@ -137,7 +137,12 @@ extension SirosWallet {
             },
             onComplete: { [weak self] flowId, result in
                 // Encrypted-to-the-wallet issuance: same pairing as the WebSocket's flow_complete.
-                if let self, let message = Self.encryptedFlowComplete(flowId: flowId, result: result) {
+                if let self, Self.claimsEncryptedResponse(result) {
+                    guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {
+                        // Encrypted but unreadable: an error, not a plain completion that drops what was decrypted.
+                        self.failIssuanceLocally(flowId: flowId, message: "The completion could not be read")
+                        return
+                    }
                     await self.handleFlowComplete(msg: message)
                     return
                 }
@@ -146,6 +151,12 @@ extension SirosWallet {
                 self?.resetIssuanceGuards()
                 self?.cancelTransactionTasks(flowId: flowId)
                 self?.eventListener?.onFlowComplete(flowId: flowId, redirectUri: nil)
+            },
+            onCancel: { [weak self] flowId in
+                // `wmp.flow.cancel` from the peer: the same terminal cleanup as an error.
+                self?.cancelTransactionTasks(flowId: flowId)
+                self?.discardCredentialResponseState(flowId: flowId)
+                self?.resetIssuanceGuards()
             },
             onError: { [weak self] flowId, code, message in
                 self?.resetIssuanceGuards()
@@ -160,7 +171,7 @@ extension SirosWallet {
             authToken: appToken,
             capabilitiesOffered: TransactionDataDeclaration.wmpCapabilitiesOffered(enabled: offerTransactionData)
         )
-        lock.lock(); wmpPeer = peer; lock.unlock()
+        lock.lock(); wmpPeer = peer; credentialNotifier = WmpCredentialNotifier(peer: peer); lock.unlock()
 
         #if canImport(os)
         logger.info("Connected via WMP protocol to \(wsUrl)")
@@ -318,26 +329,7 @@ extension SirosWallet {
     func handleWmpSignRequest(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
         switch params.action {
         case "generate_proof":
-            let count = params.count ?? 1
-            let generated = try await generateProofs(
-                audience: params.audience,
-                nonce: params.nonce,
-                count: count,
-                proofTypesSupported: nil,
-                proofTypeHint: params.proofType
-            )
-            // The "attestation" proof type returns a single GeneratedProofData
-            // whose attestedKeyIds already covers the whole batch in order; the
-            // "jwt" proof type returns one GeneratedProofData PER credential,
-            // each carrying its own single-element attestedKeyIds - flatMap
-            // concatenates either shape into one batch-order list. Taking only
-            // the first entry's list (as this used to) silently dropped every
-            // index past 0 for a "jwt" batch of more than one credential.
-            let flattenedKeyIds = generated.flatMap { $0.attestedKeyIds ?? [] }
-            lock.lock(); activeAttestedKeyIds = flattenedKeyIds.isEmpty ? nil : flattenedKeyIds; lock.unlock()
-            let proofs = generated.map { ProofObject(proofType: $0.proofType, jwt: $0.jwt, attestation: $0.attestation) }
-            let jwk = credentialResponseEncryptionJwk(flowId: flowId, request: params.credentialResponseEncryption)
-            return SignSubFlowResult(proofs: proofs, credentialResponseEncryptionJwk: jwk)
+            return try await wmpGenerateProof(flowId: flowId, params: params)
 
         case "decrypt_credential_response":
             return try await wmpDecryptCredentialResponse(flowId: flowId, params: params)
@@ -721,26 +713,7 @@ extension SirosWallet {
         do {
             switch msg.action {
             case "generate_proof":
-                let count = msg.params.count ?? 1
-                let generated = try await generateProofs(
-                    audience: msg.params.audience ?? "",
-                    nonce: msg.params.nonce ?? "",
-                    count: count,
-                    proofTypesSupported: msg.params.proofTypesSupported,
-                    proofTypeHint: msg.params.proofType
-                )
-                // The "attestation" proof type returns a single GeneratedProofData
-                // whose attestedKeyIds already covers the whole batch in order; the
-                // "jwt" proof type returns one GeneratedProofData PER credential,
-                // each carrying its own single-element attestedKeyIds - flatMap
-                // concatenates either shape into one batch-order list. Taking only
-                // the first entry's list (as this used to) silently dropped every
-                // index past 0 for a "jwt" batch of more than one credential.
-                let flattenedKeyIds = generated.flatMap { $0.attestedKeyIds ?? [] }
-                lock.lock(); activeAttestedKeyIds = flattenedKeyIds.isEmpty ? nil : flattenedKeyIds; lock.unlock()
-                let proofs = generated.map { ProofObject(proofType: $0.proofType, jwt: $0.jwt, attestation: $0.attestation) }
-                let responseJwk = credentialResponseEncryptionJwk(flowId: msg.flowId, request: msg.params.credentialResponseEncryption)
-                engine.sendSignResponse(flowId: msg.flowId, proofs: proofs, credentialResponseEncryptionJwk: responseJwk, messageId: msg.messageId)
+                try await answerGenerateProof(engine: engine, msg: msg)
 
             case "decrypt_credential_response":
                 await answerDecryptCredentialResponse(engine: engine, msg: msg)
@@ -1355,6 +1328,8 @@ extension SirosWallet {
         let listener = eventListener
         pendingMatchResultsByFlow.removeValue(forKey: flowId)
         legacyFlowSnapshots.removeValue(forKey: flowId)
+        credentialResponseKeys.removeValue(forKey: flowId)
+        decryptedCredentialResponses.removeValue(forKey: flowId)
         lock.unlock()
         if notifyError { listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil) }
 

@@ -324,6 +324,9 @@ public struct SignResponseMessage: Codable, Sendable {
     public var credentialResponseEncryptionJwk: [String: String]?
     /// Answer to `decrypt_credential_response`: ONLY the control fields of the decrypted
     /// response. The credentials, `credential_metadata` and `notification_id` stay in the wallet.
+    /// `decrypt_credential_response` answers exactly ONE of: `credentialCount` (credentials were
+    /// issued, 1 to 256), `transactionId` with `interval` (deferred), or `error`.
+    public var credentialCount: Int?
     public var transactionId: String?
     public var interval: Int?
     /// Set when the wallet could not do what the request asked (for example a response it could
@@ -345,12 +348,14 @@ public struct SignResponseMessage: Codable, Sendable {
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
         credentialResponseEncryptionJwk: [String: String]? = nil,
+        credentialCount: Int? = nil,
         transactionId: String? = nil,
         interval: Int? = nil,
         error: String? = nil,
         errorCode: String? = nil,
         timestamp: String? = nil
     ) {
+        self.credentialCount = credentialCount
         self.type = type
         self.flowId = flowId
         self.messageId = messageId
@@ -373,6 +378,7 @@ public struct SignResponseMessage: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case type, proofs, timestamp, interval, error
         case transactionId = "transaction_id"
+        case credentialCount = "credential_count"
         case errorCode = "error_code"
         case credentialResponseEncryptionJwk = "credential_response_encryption_jwk"
         case flowId = "flow_id"

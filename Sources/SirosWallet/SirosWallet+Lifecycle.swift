@@ -58,10 +58,6 @@ extension SirosWallet {
         // (success or error) routes through here, same as `activeOffer`
         // etc. above.
         pendingRenewalSourceBatchId = nil
-        // The response-encryption keys and anything decrypted with them belong to the flow that
-        // just ended (or was cancelled, or failed).
-        credentialResponseKeys.removeAll()
-        decryptedCredentialResponses.removeAll()
         lock.unlock()
     }
 
@@ -86,6 +82,13 @@ extension SirosWallet {
             try? engineSession?.cancelFlow(flowId: flowId)
             setState(.ready(userId: userId, displayName: displayName, credentials: creds))
         }
+        // Only the issuance being cancelled holds response keys; a flow that ends for other reasons drops
+        // its own state per flow id, and an unrelated presentation ending must not touch it.
+        lock.lock()
+        credentialResponseKeys.removeAll()
+        decryptedCredentialResponses.removeAll()
+        credentialResponseEpoch += 1
+        lock.unlock()
         resetIssuanceGuards()
     }
 
@@ -407,6 +410,7 @@ extension SirosWallet {
         legacyFlowSnapshots.removeAll()
         credentialResponseKeys.removeAll()
         decryptedCredentialResponses.removeAll()
+        credentialResponseEpoch += 1
         lock.unlock()
         for cancel in consentTasks { cancel() }
     }

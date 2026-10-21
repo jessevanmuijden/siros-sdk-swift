@@ -72,6 +72,9 @@ public final class SirosWallet: @unchecked Sendable {
     // the flow, awaiting `flow_complete`. Both are dropped on every terminal path.
     var credentialResponseKeys: [String: CredentialResponseKey] = [:]
     var decryptedCredentialResponses: [String: [DecryptedCredentialResponse]] = [:]
+    /// Bumped when the session is torn down or the current flow is cancelled, so a late `generate_proof`
+    /// result cannot recreate a key for a flow that is gone.
+    var credentialResponseEpoch = 0
     /// Validates and splits a decrypted response's `credential_metadata` (see `CredentialMetadataReceiver`).
     public var credentialMetadataReceiver: CredentialMetadataReceiver?
     var wmpSessionSnapshot = false

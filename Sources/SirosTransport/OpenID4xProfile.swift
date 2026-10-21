@@ -292,9 +292,13 @@ public struct SignSubFlowParams: Codable, Sendable {
     /// `decrypt_credential_response`: the Credential Response JWE and whether it is a deferred one.
     public var jwe: String?
     public var deferred: Bool?
+    /// `generate_proof` over WMP, when the peer sends it: an EMPTY object with
+    /// `credential_response_encryption` means the request is for the key alone (no proofs).
+    public var proofTypesSupported: [String: AnyCodable]?
 
     enum CodingKeys: String, CodingKey {
         case action, nonce, audience, count, issuer, htm, htu, ath, jwe, deferred
+        case proofTypesSupported = "proof_types_supported"
         case credentialResponseEncryption = "credential_response_encryption"
         case proofType = "proof_type"
         case parentFlowId = "parent_flow_id"
@@ -325,8 +329,10 @@ public struct SignSubFlowParams: Codable, Sendable {
         keyId: String? = nil,
         credentialResponseEncryption: CredentialResponseEncryptionRequest? = nil,
         jwe: String? = nil,
-        deferred: Bool? = nil
+        deferred: Bool? = nil,
+        proofTypesSupported: [String: AnyCodable]? = nil
     ) {
+        self.proofTypesSupported = proofTypesSupported
         self.credentialResponseEncryption = credentialResponseEncryption
         self.jwe = jwe
         self.deferred = deferred
@@ -375,6 +381,7 @@ public struct SignSubFlowParams: Codable, Sendable {
         credentialResponseEncryption = try c.decodeIfPresent(CredentialResponseEncryptionRequest.self, forKey: .credentialResponseEncryption)
         jwe = try c.decodeIfPresent(String.self, forKey: .jwe)
         deferred = try c.decodeIfPresent(Bool.self, forKey: .deferred)
+        proofTypesSupported = try? c.decodeIfPresent([String: AnyCodable].self, forKey: .proofTypesSupported)
     }
 }
 
@@ -431,6 +438,7 @@ public struct SignSubFlowResult: Sendable {
     /// `generate_proof`: the public JWK of this proof request's response-encryption key.
     public var credentialResponseEncryptionJwk: [String: String]?
     /// `decrypt_credential_response`: only the control fields of the decrypted response.
+    public var credentialCount: Int?
     public var transactionId: String?
     public var interval: Int?
 
@@ -444,8 +452,10 @@ public struct SignSubFlowResult: Sendable {
         dpopProof: String? = nil,
         credentialResponseEncryptionJwk: [String: String]? = nil,
         transactionId: String? = nil,
-        interval: Int? = nil
+        interval: Int? = nil,
+        credentialCount: Int? = nil
     ) {
+        self.credentialCount = credentialCount
         self.credentialResponseEncryptionJwk = credentialResponseEncryptionJwk
         self.transactionId = transactionId
         self.interval = interval
@@ -499,6 +509,8 @@ public struct OpenID4xConfig: @unchecked Sendable {
     public var onTrustEvaluation: ((String, AnyCodable?) async throws -> TrustResult)?
     public var onComplete: ((String, AnyCodable?) async -> Void)?
     public var onError: ((String, String?, String?) async -> Void)?
+    /// The peer cancelled the flow (`wmp.flow.cancel`).
+    public var onCancel: ((String) async -> Void)?
     public var attestationProvider: ClientAttestationProvider?
 
     public init(
@@ -507,9 +519,11 @@ public struct OpenID4xConfig: @unchecked Sendable {
         onMatchRequest: ((String, AnyCodable?) async throws -> MatchResult)? = nil,
         onTrustEvaluation: ((String, AnyCodable?) async throws -> TrustResult)? = nil,
         onComplete: ((String, AnyCodable?) async -> Void)? = nil,
+        onCancel: ((String) async -> Void)? = nil,
         onError: ((String, String?, String?) async -> Void)? = nil,
         attestationProvider: ClientAttestationProvider? = nil
     ) {
+        self.onCancel = onCancel
         self.onProgress = onProgress
         self.onSignRequest = onSignRequest
         self.onMatchRequest = onMatchRequest
@@ -585,7 +599,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
     }
 
     public func handleCancel(params: FlowCancelParams) async {
-        // No-op for now
+        await config.onCancel?(params.flowId)
     }
 
     // MARK: - Sub-flow Handlers
@@ -676,6 +690,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         if let jwk = result.credentialResponseEncryptionJwk {
             params["credential_response_encryption_jwk"] = .object_(jwk.mapValues { .string($0) })
         }
+        if let count = result.credentialCount { params["credential_count"] = .int(count) }
         if let transactionId = result.transactionId { params["transaction_id"] = .string(transactionId) }
         if let interval = result.interval { params["interval"] = .int(interval) }
         try? await peer.notify(method: WmpMethods.flowAction, params: params)

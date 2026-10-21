@@ -98,6 +98,11 @@ public enum CredentialResponseJwe {
             guard encryptedKey.isEmpty else { throw CredentialResponseJweError.malformed("ECDH-ES carries no encrypted key") }
             cek = concatKdf(z: z, algorithmId: enc, apu: apu, apv: apv, keyBits: content.keyBytes * 8)
         } else {
+            // RFC 3394 adds exactly eight bytes, so the negotiated content encryption fixes the length;
+            // anything else is refused before any of the 6n block decryptions run.
+            guard encryptedKey.count == content.keyBytes + 8 else {
+                throw CredentialResponseJweError.malformed("the encrypted key has the wrong length")
+            }
             let kekBytes = alg == "ECDH-ES+A128KW" ? 16 : 32
             let kek = concatKdf(z: z, algorithmId: alg, apu: apu, apv: apv, keyBits: kekBytes * 8)
             guard let unwrapped = try? AesKeyWrap.unwrap(kek: kek, wrapped: Array(encryptedKey)),

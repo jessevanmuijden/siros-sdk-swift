@@ -36,3 +36,25 @@ public extension CredentialNotifier {
         )
     }
 }
+
+/// Sends OID4VCI section 10 notifications over a WMP peer (`wmp.credential.notification`), so the
+/// wallet's acceptance or `credential_failure` reaches the issuer on this transport as it does on the
+/// engine WebSocket. A failed send is dropped, as there: the notification is best effort.
+public final class WmpCredentialNotifier: CredentialNotifier, @unchecked Sendable {
+    private let peer: WmpPeerContext
+
+    public init(peer: WmpPeerContext) {
+        self.peer = peer
+    }
+
+    public func sendCredentialNotification(flowId: String, notificationId: String, event: String, eventDescription: String?) {
+        var params: [String: AnyCodable] = [
+            "flow_id": .string(flowId),
+            "notification_id": .string(notificationId),
+            "event": .string(event),
+        ]
+        if let eventDescription { params["event_description"] = .string(eventDescription) }
+        let peer = self.peer
+        Task { try? await peer.notify(method: WmpMethods.credentialNotification, params: params) }
+    }
+}

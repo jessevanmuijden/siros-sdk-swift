@@ -28,17 +28,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     exactly the negotiated `alg`/`enc`; `zip`, `crit` and any curve but P-256 are refused; the
     CBC-HMAC tag is verified, in constant time, before anything is decrypted. The wallet parses
     the Credential Response strictly, keeps the credentials and the response-level
-    `credential_metadata` itself, and answers `sign_response` with ONLY `{transaction_id?,
-    interval?}`, or `error`/`error_code` (a code, never any plaintext). On WMP a failure is a flow
-    error with that code.
+    `credential_metadata` itself, and answers `sign_response` with exactly ONE of `{credential_count: N}`
+    (1 to 256), `{transaction_id, interval}` (deferred) or `{error, error_code}` (a code, never any
+    plaintext); credentials together with a `transaction_id` are refused. A key-only `generate_proof`
+    (response encryption wanted, no `proof_types_supported`) returns the JWK and no proofs. The
+    encrypted key length is checked before any unwrapping. On WMP a failure is a flow error with that
+    code, and the wallet ends the issuance locally too.
   - `flow_complete.credentials[i]` of an encrypted response has no `credential`
     (`credential_response_encrypted: true`); entry i is paired with the i-th decrypted credential
     (immediate and deferred answers in order), a count mismatch is a flow error and stores
-    nothing, and the `notification_id` for `credential_notification` comes from the decrypted body.
+    nothing, and the `notification_id` for `credential_notification` comes from the decrypted body
+    ONLY (the engine sees none). A response the wallet rejects after reading it (the receiver below
+    refuses it) is reported to the issuer as `credential_failure`. State is dropped per flow id on
+    completion, error, sign failure and `wmp.flow.cancel`, everywhere on cancel and logout, and
+    never by an unrelated flow ending; a key is not created for a flow that ended while proofs
+    were being generated. WMP now installs a notifier, so acceptance and failure notifications are
+    sent on that transport too.
     `CredentialResult.credential` is therefore optional.
   - `SirosWallet.credentialMetadataReceiver` is the seam for delivered-secret validation
-    (`DeliveredSecretReceipt`, privatedata-spec 5A): it sees each response's `credential_metadata`
-    with the facts (encrypted, deferred, has notification id) and may refuse the whole response.
+    (`DeliveredSecretReceipt`, privatedata-spec 5A): it gets each whole decrypted response (the
+    credentials, so a commitment can be checked against every one of a batch, the `notification_id`
+    and the `credential_metadata`) and whether it is deferred, and may refuse the whole response.
     Nothing is wired by default; storing the metadata into the container needs #202.
   The AES block primitive is CommonCrypto on Apple platforms and a FIPS 197 reference elsewhere (CI);
   the unwrap and CBC are built on it. Tests: 12 JWEs from go-jose v4.1.6 (every alg/enc pair, vendored

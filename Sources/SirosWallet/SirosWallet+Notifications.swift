@@ -80,13 +80,10 @@ extension SirosWallet {
             // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
             guard let entries = msg.credentials,
                   let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
-                cancelTransactionTasks(flowId: msg.flowId)
-                resetIssuanceGuards()
-                lock.lock(); let listener = eventListener; lock.unlock()
-                listener?.onFlowError(
-                    flowId: msg.flowId,
-                    errorMessage: "The credentials the issuer sent do not match what the engine reported", redirectUri: nil
+                failIssuanceLocally(
+                    flowId: msg.flowId, message: "The credentials the issuer sent do not match what the engine reported"
                 )
+                await restoreReadyState()
                 return
             }
             credentialsToStore = paired
@@ -139,6 +136,11 @@ extension SirosWallet {
             listener?.onFlowComplete(flowId: msg.flowId, redirectUri: msg.redirectUri)
         }
 
+        await restoreReadyState()
+    }
+
+    /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
+    func restoreReadyState() async {
         switch state {
         case .flowActive(let userId, let displayName, _, _, _, _),
              .ready(let userId, let displayName, _, _):
