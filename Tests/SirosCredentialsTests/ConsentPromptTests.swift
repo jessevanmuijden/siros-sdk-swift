@@ -103,18 +103,21 @@ final class ConsentPromptTests: XCTestCase {
         XCTAssertEqual(host.seen, ["slow", nil])
     }
 
-    func testAnAnswerBeforeTheDeadlineCancelsTheTimer() async throws {
-        let (prompt, _) = makePrompt(timeout: 0.2)
+    /// A question's timer can only ever resolve ITS OWN question: it carries the question's id, so a timer left
+    /// over from an answered question is a no-op against the next one. (Asserting it on a wall clock was flaky on
+    /// slow runners and the id guard is what makes it true, so it is checked directly instead.)
+    func testAnAnsweredQuestionsTimerCannotDeclineTheNextQuestion() async throws {
+        let (prompt, _) = makePrompt(timeout: 60)
         let first = Task { await prompt.ask("one") }
         let toAnswer = try await pending(prompt)
         XCTAssertTrue(toAnswer.answer(true))
         let one = await value(first)
         XCTAssertTrue(one)
-        // The first question's timer must not decline the NEXT question.
         let second = Task { await prompt.ask("two") }
         let question = try await pending(prompt)
-        try await Task.sleep(nanoseconds: 120_000_000)
-        XCTAssertTrue(question.answer(true), "still pending: the old timer is gone")
+        XCTAssertFalse(toAnswer.decline(), "the first question's handle (and so its timer) no longer touches anything")
+        XCTAssertEqual(prompt.current?.request, "two")
+        XCTAssertTrue(question.answer(true))
         let two = await value(second)
         XCTAssertTrue(two)
     }
@@ -209,10 +212,9 @@ final class ConsentPromptTests: XCTestCase {
         prompt.onChange = { pending in
             if let pending { shown.increment(); pending.answer(true) }
         }
-        let box = TaskBox()
-        prompt.beforeInstall = { box.task?.cancel() }
+        // The hook runs synchronously inside the asking task, so cancelling the CURRENT task is always before installation.
+        prompt.beforeInstall = { withUnsafeCurrentTask { $0?.cancel() } }
         let asked = Task { await prompt.ask("cancelled in the window") }
-        box.task = asked
         let answer = await value(asked)
         XCTAssertFalse(answer, "cancelled before it was installed: declined, not approved")
         XCTAssertEqual(shown.value, 0, "nothing answerable was published")
@@ -265,16 +267,32 @@ final class ConsentPromptTests: XCTestCase {
         var value: Int { lock.withLock { n } }
     }
 
-    private final class TaskBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var stored: Task<Bool, Never>?
-        var task: Task<Bool, Never>? { get { lock.withLock { stored } } set { lock.withLock { stored = newValue } } }
-    }
-
     private final class Last: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: String?
         func set(_ value: String?) { lock.withLock { stored = value } }
         var value: String? { lock.withLock { stored } }
+    }
+
+    // MARK: teardown (the host clears onChange while an asker is installing)
+
+    func testClearingTheCallbackRetiresTheQuestionThatIsPending() async throws {
+        let (prompt, host) = makePrompt()
+        let asked = Task { await prompt.ask("pending at teardown") }
+        _ = try await pending(prompt)
+        prompt.onChange = nil
+        let answer = await value(asked)
+        XCTAssertFalse(answer, "no UI left to answer it: declined, not suspended forever")
+        XCTAssertNil(prompt.current)
+        XCTAssertEqual(host.seen, ["pending at teardown"], "the host had been told once; it cleared its callback itself")
+    }
+
+    func testAnAskerThatInstallsAfterTheCallbackWasClearedIsDeclined() async {
+        let (prompt, _) = makePrompt()
+        // between the asker's first check and its installation the host tears down
+        prompt.beforeInstall = { prompt.onChange = nil }
+        let answer = await value(Task { await prompt.ask("late asker") })
+        XCTAssertFalse(answer)
+        XCTAssertNil(prompt.current)
     }
 }

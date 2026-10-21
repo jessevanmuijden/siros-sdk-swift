@@ -81,7 +81,14 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
     /// before the first question; with none set every question is declined at once.
     public var onChange: (@Sendable (Pending?) -> Void)? {
         get { lock.withLock { change } }
-        set { lock.withLock { change = newValue } }
+        set {
+            // Removing the callback leaves nobody to answer: the pending question is declined, not left suspended.
+            let retire: UUID? = lock.withLock {
+                change = newValue
+                return newValue == nil ? entry?.id : nil
+            }
+            if let retire { _ = resolve(id: retire, with: nil) }
+        }
     }
 
     /// The question waiting for an answer, if any.
@@ -97,7 +104,8 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
                 // Install atomically with the cancellation check: a cancellation that arrived first is recorded on
                 // the entry, and then nothing is published.
                 let installed: (superseded: Entry?, install: Bool) = lock.withLock {
-                    guard !new.cancelled else { new.resolved = true; return (nil, false) }
+                    // Cancelled, or the host removed its callback since the first check: nobody could answer.
+                    guard !new.cancelled, change != nil else { new.resolved = true; return (nil, false) }
                     new.continuation = continuation
                     let old = entry
                     entry = new
