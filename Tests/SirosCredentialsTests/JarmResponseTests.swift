@@ -115,6 +115,18 @@ final class JarmResponseTests: XCTestCase {
         XCTAssertThrowsError(try encrypt(jwk(), enc: "A128CBC-HS256")) { XCTAssertEqual($0 as? JarmResponseError, .unsupportedEncryption("A128CBC-HS256")) }
     }
 
+    func testTheSelfCheckRefusesWhatTheEngineWouldRefuse() {
+        func check(_ jwe: String, kid: String? = nil) throws { try JarmResponse.selfCheck(jwe, alg: "ECDH-ES", enc: "A128GCM", kid: kid) }
+        let header = CredentialResponseJwe.encode(Data(#"{"alg":"ECDH-ES","enc":"A128GCM"}"#.utf8))
+        XCTAssertNoThrow(try check("\(header)..a.b.c"))
+        XCTAssertThrowsError(try check("\(header).x.a.b.c"), "direct ECDH-ES has no encrypted key")
+        XCTAssertThrowsError(try check("\(header)..a.b"), "four segments")
+        XCTAssertThrowsError(try check("\(header)..a..c"), "an empty segment")
+        XCTAssertThrowsError(try check("\(header)..a.b.c", kid: "k1"), "the kid must be the JWK's")
+        XCTAssertThrowsError(try JarmResponse.selfCheck("\(header)..a.b.c", alg: "ECDH-ES", enc: "A256GCM", kid: nil), "the enc must be the request's")
+        XCTAssertThrowsError(try check("\(header)..a.b.\(String(repeating: "c", count: JarmResponse.maxResponseBytes))"), "over 4 MiB")
+    }
+
     func testAnotherKeyCannotOpenIt() throws {
         let jwe = try JarmResponse.encrypt(vpToken: .string("secret"), state: nil, audience: "a", recipientJwk: jwk(), alg: "ECDH-ES", enc: "A128GCM")
         XCTAssertThrowsError(try CredentialResponseJwe.decrypt(jwe, recipient: P256.KeyAgreement.PrivateKey()))

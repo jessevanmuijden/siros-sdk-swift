@@ -119,10 +119,29 @@ public enum JarmResponse {
         let cek = CredentialResponseJwe.concatKdf(z: z, algorithmId: enc, apu: Data(), apv: Data(), keyBits: keyBytes * 8)
         let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: cek), nonce: AES.GCM.Nonce(), authenticating: Data(protected.utf8))
         // Direct key agreement has no encrypted key: that segment is empty.
-        return [
+        let jwe = [
             protected, "", CredentialResponseJwe.encode(Data(box.nonce)),
             CredentialResponseJwe.encode(box.ciphertext), CredentialResponseJwe.encode(box.tag),
         ].joined(separator: ".")
+        try selfCheck(jwe, alg: alg, enc: enc, kid: recipientJwk["kid"])
+        return jwe
+    }
+
+    /// Largest response the engine accepts.
+    public static let maxResponseBytes = 4 * 1024 * 1024
+
+    /// What the engine checks before it posts, checked here first so a response it would refuse is never
+    /// sent: five segments, none empty except the encrypted key of direct ECDH-ES, no more than 4 MiB, and
+    /// a protected header whose `alg` and `enc` are the request's and whose `kid` is the JWK's.
+    static func selfCheck(_ jwe: String, alg: String, enc: String, kid: String?) throws {
+        let parts = jwe.split(separator: ".", omittingEmptySubsequences: false)
+        guard jwe.utf8.count <= maxResponseBytes, parts.count == 5,
+              [0, 2, 3, 4].allSatisfy({ !parts[$0].isEmpty }), parts[1].isEmpty == (alg == "ECDH-ES"),
+              let header = CredentialResponseJwe.decode(String(parts[0])),
+              let object = (try? JSONSerialization.jsonObject(with: header)) as? [String: Any],
+              object["alg"] as? String == alg, object["enc"] as? String == enc, object["kid"] as? String == kid else {
+            throw JarmResponseError.unusableKey("the response failed its own check")
+        }
     }
 
     private static func publicKey(from jwk: [String: String]) throws -> P256.KeyAgreement.PublicKey {

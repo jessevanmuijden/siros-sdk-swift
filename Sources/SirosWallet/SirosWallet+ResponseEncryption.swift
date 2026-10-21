@@ -17,6 +17,10 @@ extension SirosWallet {
     func encryptedPresentationResponse(
         parts: [PresentationPart], encryption: ResponseEncryptionRequest, state: String?, verifiedRequest: VerifiedRequest?
     ) throws -> String {
+        // Only for a request the engine verified as `direct_post.jwt`: any other mode wants the vp_token.
+        guard verifiedRequest?.responseMode == "direct_post.jwt" else {
+            throw SirosError.wallet(message: "The presentation response could not be encrypted")
+        }
         do {
             return try JarmResponse.encrypt(
                 vpToken: VpTokenValue.from(parts: parts), state: state, audience: verifiedRequest?.clientId,

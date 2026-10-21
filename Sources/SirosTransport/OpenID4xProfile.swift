@@ -4,6 +4,13 @@ import Foundation
 
 // MARK: - Flow Type Constants
 
+/// The nested flows the orchestrator starts for the wallet (WMP openid4x section 3.1.5): each arrives as
+/// `wmp.flow.start` on a CHILD flow id and is answered with `wmp.flow.complete` on that child flow.
+public enum WmpSubFlowTypes {
+    public static let sign = "sign"
+    public static let match = "match"
+}
+
 public enum OID4FlowTypes {
     public static let oid4vci = "oid4vci"
     public static let oid4vp = "oid4vp"
@@ -567,7 +574,7 @@ private let stepTrustEvaluation = "trust_evaluation_required"
 public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Sendable {
     public let name: String = "openid4x"
     public let capabilities: [String] = ["oid4vci", "oid4vp"]
-    public let flowTypes: [String] = [OID4FlowTypes.oid4vci, OID4FlowTypes.oid4vp]
+    public let flowTypes: [String] = [OID4FlowTypes.oid4vci, OID4FlowTypes.oid4vp, WmpSubFlowTypes.sign, WmpSubFlowTypes.match]
 
     private let config: OpenID4xConfig
     private weak var peer: WmpPeerContext?
@@ -585,7 +592,47 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
     // MARK: - WmpFlowHandler
 
     public func startFlow(params: FlowStartParams) async throws -> FlowStartResult {
+        // A sign or match sub-flow is answered when the wallet has an answer (it may wait for the user),
+        // not in the reply to the start request.
+        if params.flowType == WmpSubFlowTypes.sign || params.flowType == WmpSubFlowTypes.match {
+            Task { [self] in await runChildFlow(params: params) }
+        }
         return FlowStartResult(flowId: params.flowId, flowType: params.flowType)
+    }
+
+    /// Run one `sign` / `match` child flow to its answer: `wmp.flow.complete` on the CHILD flow with the
+    /// response as `result`, or `wmp.flow.error` on the child flow with `data.reason` `rejected` when
+    /// the wallet declines or fails. The handler is told the PARENT flow id (`parent_flow_id`), the
+    /// issuance or presentation the request belongs to, which is what the wallet keys its state by.
+    func runChildFlow(params: FlowStartParams) async {
+        let childId = params.flowId
+        let payload = params.params
+        let parentId = payload?.objectValue?["parent_flow_id"]?.stringValue ?? childId
+        do {
+            let members: [String: AnyCodable]
+            if params.flowType == WmpSubFlowTypes.sign {
+                guard let handler = config.onSignRequest, let payload else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
+                let signParams = try JSONDecoder().decode(SignSubFlowParams.self, from: try JSONEncoder().encode(payload))
+                members = signResponseMembers(try await handler(parentId, signParams))
+            } else {
+                guard let handler = config.onMatchRequest else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
+                members = matchResponseMembers(try await handler(parentId, payload))
+            }
+            try? await peer?.notify(method: WmpMethods.flowComplete, params: [
+                "flow_id": .string(childId), "result": .object_(members),
+            ])
+        } catch {
+            let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? "SIGN_ERROR"
+            try? await peer?.notify(method: WmpMethods.flowError, params: [
+                "flow_id": .string(childId), "code": .string(code), "message": .string(code),
+                "data": .object_(["reason": .string("rejected")]),
+            ])
+        }
+    }
+
+    private struct ChildFlowFailure: Error, WmpErrorCodeProviding {
+        let code: String
+        var wmpErrorCode: String? { code }
     }
 
     public func handleProgress(params: FlowProgressParams) async {
@@ -677,12 +724,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
 
     // MARK: - Response Helpers
 
-    private func sendSignResponse(flowId: String, result: SignSubFlowResult) async {
-        guard let peer else { return }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "action": .string("sign_response"),
-        ]
+    /// The members of a sign answer, under the names the legacy `sign_response` uses, so one backend path
+    /// reads them whichever route they arrive on.
+    private func signResponseMembers(_ result: SignSubFlowResult) -> [String: AnyCodable] {
+        var params: [String: AnyCodable] = [:]
         if let proofs = result.proofs {
             let encoded = proofs.map { proof -> [String: AnyCodable] in
                 var dict: [String: AnyCodable] = ["proof_type": .string(proof.proofType)]
@@ -713,11 +758,18 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         if let count = result.credentialCount { params["credential_count"] = .int(count) }
         if let transactionId = result.transactionId { params["transaction_id"] = .string(transactionId) }
         if let interval = result.interval { params["interval"] = .int(interval) }
+        return params
+    }
+
+    private func sendSignResponse(flowId: String, result: SignSubFlowResult) async {
+        guard let peer else { return }
+        var params = signResponseMembers(result)
+        params["flow_id"] = .string(flowId)
+        params["action"] = .string("sign_response")
         try? await peer.notify(method: WmpMethods.flowAction, params: params)
     }
 
-    private func sendMatchResponse(flowId: String, result: MatchResult) async {
-        guard let peer else { return }
+    private func matchResponseMembers(_ result: MatchResult) -> [String: AnyCodable] {
         let matchArray = result.matches.map { match -> [String: AnyCodable] in
             var dict: [String: AnyCodable] = [
                 "credential_id": .string(match.credentialId),
@@ -728,15 +780,19 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
             if let claims = match.availableClaims { dict["available_claims"] = .array(claims.map { .string($0) }) }
             return dict
         }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "action": .string("match_response"),
-            "matches": .array(matchArray.map { AnyCodable.object_($0) }),
-        ]
+        var params: [String: AnyCodable] = ["matches": .array(matchArray.map { AnyCodable.object_($0) })]
         // Without this an empty match set arrives as a bare "nothing matched"
         // and the reason - the only thing that can tell the user *which*
         // credential they are missing - is lost on this transport.
         if let reason = result.noMatchReason { params["no_match_reason"] = .string(reason) }
+        return params
+    }
+
+    private func sendMatchResponse(flowId: String, result: MatchResult) async {
+        guard let peer else { return }
+        var params = matchResponseMembers(result)
+        params["flow_id"] = .string(flowId)
+        params["action"] = .string("match_response")
         try? await peer.notify(method: WmpMethods.flowAction, params: params)
     }
 

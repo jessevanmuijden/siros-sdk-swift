@@ -80,12 +80,15 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
 
     private func signRequest(
         encrypted: Bool = true, clientId: String? = "x509_san_dns:verifier.example", state: String? = "st-1",
+        responseMode: String = "direct_post.jwt",
         credentials: [[String: Any]]? = nil
     ) throws -> SignRequestMessage {
         var params: [String: Any] = ["audience": "x509_san_dns:verifier.example", "nonce": "n-1"]
         if encrypted { params["response_encryption"] = ["jwk": verifierJwk, "alg": "ECDH-ES", "enc": "A128GCM"] as [String: Any] }
         if let state { params["state"] = state }
-        if let clientId { params["verified_request"] = ["client_id": clientId, "response_uri": "https://verifier.example/cb"] }
+        if let clientId { params["verified_request"] = [
+            "client_id": clientId, "response_mode": responseMode, "response_uri": "https://verifier.example/cb",
+        ] }
         if let credentials { params["credentials_to_include"] = credentials }
         let object: [String: Any] = ["type": "sign_request", "flow_id": "p1", "message_id": "m1", "action": "sign_presentation", "params": params]
         return try JSONDecoder().decode(SignRequestMessage.self, from: try JSONSerialization.data(withJSONObject: object))
@@ -138,6 +141,15 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(listener.errors.count, 1)
     }
 
+    func testOnlyAVerifiedDirectPostJwtRequestIsEncrypted() async throws {
+        let w = wallet()
+        for mode in ["direct_post", "fragment", "query"] {
+            let sender = RecordingSender()
+            await w.handleSignRequest(engine: sender, msg: try signRequest(responseMode: mode))
+            XCTAssertTrue(sender.sent.allSatisfy { $0.responseJwe == nil && $0.vpToken == nil }, mode)
+        }
+    }
+
     func testDcqlTokensAreBuiltByTheWalletPerQuery() async throws {
         let store = InMemoryCredentialStore()
         await store.save(StoredCredential(id: 1, format: "dc+sd-jwt", raw: "cred-1", kid: nil, batchId: 1, instanceId: 0))
@@ -162,7 +174,7 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
             responseEncryption: ResponseEncryptionRequest(
                 jwk: verifierJwk.mapValues { .string($0 as? String ?? "") }, alg: "ECDH-ES", enc: "A128GCM"
             ),
-            state: "st-2", verifiedRequest: VerifiedRequest(clientId: "client-2")
+            state: "st-2", verifiedRequest: VerifiedRequest(clientId: "client-2", responseMode: "direct_post.jwt")
         ))
         XCTAssertNil(encrypted.vpToken)
         let c = try claims(try XCTUnwrap(encrypted.responseJwe))
