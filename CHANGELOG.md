@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     credentials, so a commitment can be checked against every one of a batch, the `notification_id`
     and the `credential_metadata`) and whether it is deferred, and may refuse the whole response.
     Nothing is wired by default; storing the metadata into the container needs #202.
+  Over WMP the answers travel the orchestrator's child-flow route (`wmp.flow.complete` on the child flow
+  with the response as `result`; see the stand-alone fix in https://github.com/sirosfoundation/siros-sdk-swift/pull/220).
   The AES block primitive is CommonCrypto on Apple platforms and a FIPS 197 reference elsewhere (CI);
   the unwrap and CBC are built on it. Tests: 12 JWEs from go-jose v4.1.6 (every alg/enc pair, vendored
   with its generator), RFC 7518 Appendix C, RFC 3394, RFC 7516 A.3 and FIPS 197 vectors.
@@ -121,6 +123,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sign's), and `Signer` gains `authenticationCapability(keyId:)` and
   `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
   provider is gone.
+
+### Fixed
+- **WMP: the wallet answered the orchestrator's `sign` and `match` requests on a route the orchestrator
+  never reads.** The orchestrator (go-wallet-backend, WMP openid4x section 3.1.5) starts them as CHILD
+  flows (`wmp.flow.start`, `flow_type` `sign` or `match`, the issuance or presentation in
+  `parent_flow_id`) and waits for `wmp.flow.complete` ON THE CHILD flow id with the response JSON as
+  `result`; a refusal is `wmp.flow.error` on the child flow with `data.reason` `rejected`. The profile
+  registered only `oid4vci` and `oid4vp`, ignored the child `wmp.flow.start`, and answered a
+  `wmp.flow.progress` step with `wmp.flow.action` `sign_response` on the parent, which the orchestrator
+  parks until its sign timeout. `OpenID4xProfile` now registers `sign` and `match`, runs each child
+  flow (the handler is given the PARENT flow id, which is what the wallet keys its state by) and
+  answers as above, without holding the start request while the user decides. The old progress-step
+  route is left as it was.
 
 ### Deprecated
 - **`FaceTecCaptureDelegate`.** It is written against the FaceTec 9 API
