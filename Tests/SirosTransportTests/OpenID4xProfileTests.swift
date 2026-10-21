@@ -304,6 +304,26 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertNil(result?["vp_token"])
     }
 
+    /// A `response_encryption` that is present but unusable is an error, never "absent": absent would select
+    /// the plain vp_token path and hand the engine a presentation the verifier asked to be encrypted.
+    func testAPresentButMalformedResponseEncryptionNeverReachesTheSigner() async throws {
+        for bad in [AnyCodable.null_, .object_(["jwk": .object_([:]), "alg": .string("ECDH-ES")]), .string("x")] {
+            let ctx = MockPeerContext()
+            var signed = false
+            let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+                signed = true
+                return SignSubFlowResult(vpToken: "plain")
+            }))
+            profile.initialize(ctx: ctx)
+            await profile.runChildFlow(params: childStart(flowType: "sign", params: [
+                "action": .string("sign_presentation"), "response_encryption": bad,
+            ]))
+            XCTAssertFalse(signed, "\(bad)")
+            XCTAssertEqual(ctx.notifications.count, 1)
+            XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError, "\(bad)")
+        }
+    }
+
     func testARefusedSignChildFlowIsAFlowErrorOnTheChildWithReasonRejected() async throws {
         struct Refused: Error, WmpErrorCodeProviding { var wmpErrorCode: String? { "DECRYPT_FAILED" } }
         let ctx = MockPeerContext()

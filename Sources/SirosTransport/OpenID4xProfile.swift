@@ -306,9 +306,14 @@ public struct SignSubFlowParams: Codable, Sendable {
     public var responseEncryption: ResponseEncryptionRequest?
     public var state: String?
     public var verifiedRequest: VerifiedRequest?
+    /// `sign_presentation` over a ZK or mdoc credential: where the response goes and the verifier key's thumbprint.
+    public var responseUri: String?
+    public var verifierJwkThumbprint: String?
 
     enum CodingKeys: String, CodingKey {
         case action, nonce, audience, count, issuer, htm, htu, ath, jwe, deferred, state
+        case responseUri = "response_uri"
+        case verifierJwkThumbprint = "verifier_jwk_thumbprint"
         case responseEncryption = "response_encryption"
         case verifiedRequest = "verified_request"
         case proofTypesSupported = "proof_types_supported"
@@ -346,8 +351,12 @@ public struct SignSubFlowParams: Codable, Sendable {
         proofTypesSupported: [String: AnyCodable]? = nil,
         responseEncryption: ResponseEncryptionRequest? = nil,
         state: String? = nil,
-        verifiedRequest: VerifiedRequest? = nil
+        verifiedRequest: VerifiedRequest? = nil,
+        responseUri: String? = nil,
+        verifierJwkThumbprint: String? = nil
     ) {
+        self.responseUri = responseUri
+        self.verifierJwkThumbprint = verifierJwkThumbprint
         self.responseEncryption = responseEncryption
         self.state = state
         self.verifiedRequest = verifiedRequest
@@ -401,7 +410,18 @@ public struct SignSubFlowParams: Codable, Sendable {
         jwe = try c.decodeIfPresent(String.self, forKey: .jwe)
         deferred = try c.decodeIfPresent(Bool.self, forKey: .deferred)
         proofTypesSupported = try? c.decodeIfPresent([String: AnyCodable].self, forKey: .proofTypesSupported)
-        responseEncryption = try? c.decodeIfPresent(ResponseEncryptionRequest.self, forKey: .responseEncryption)
+        // Present but unusable (malformed, or null) is an error, never "absent": absent selects the plain
+        // vp_token path, which would hand the engine a presentation the verifier asked to be encrypted.
+        if c.contains(.responseEncryption) {
+            guard try !c.decodeNil(forKey: .responseEncryption) else {
+                throw DecodingError.dataCorruptedError(forKey: .responseEncryption, in: c, debugDescription: "null response_encryption")
+            }
+            responseEncryption = try c.decode(ResponseEncryptionRequest.self, forKey: .responseEncryption)
+        } else {
+            responseEncryption = nil
+        }
+        responseUri = try c.decodeIfPresent(String.self, forKey: .responseUri)
+        verifierJwkThumbprint = try c.decodeIfPresent(String.self, forKey: .verifierJwkThumbprint)
         state = try? c.decodeIfPresent(String.self, forKey: .state)
         verifiedRequest = try? c.decodeIfPresent(VerifiedRequest.self, forKey: .verifiedRequest)
     }

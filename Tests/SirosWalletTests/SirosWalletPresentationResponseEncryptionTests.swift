@@ -187,6 +187,21 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(plain.vpToken, "vp-token")
         XCTAssertNil(plain.responseJwe)
 
+        // Credentials the request names are presented one by one under their query ids (DCQL).
+        let store = InMemoryCredentialStore()
+        await store.save(StoredCredential(id: 1, format: "dc+sd-jwt", raw: "cred-1", kid: nil, batchId: 1, instanceId: 0))
+        let withStore = wallet(store: store)
+        let dcql = try await withStore.handleWmpSignRequest(flowId: "p5", params: SignSubFlowParams(
+            action: "sign_presentation", nonce: "n", audience: "x509_san_dns:verifier.example",
+            credentialsToInclude: [try JSONDecoder().decode(CredentialRef.self, from: Data(#"{"credential_id":"1","credential_query_id":"pid"}"#.utf8))],
+            responseEncryption: ResponseEncryptionRequest(
+                jwk: verifierJwk.mapValues { .string($0 as? String ?? "") }, alg: "ECDH-ES", enc: "A128GCM"
+            ),
+            verifiedRequest: VerifiedRequest(clientId: "client-5", responseMode: "direct_post.jwt")
+        ))
+        let token = try XCTUnwrap(try claims(try XCTUnwrap(dcql.responseJwe))["vp_token"] as? [String: [String]])
+        XCTAssertEqual(token, ["pid": ["vp:cred-1"]])
+
         do {
             _ = try await w.handleWmpSignRequest(flowId: "p4", params: SignSubFlowParams(
                 action: "sign_presentation", nonce: "n", audience: "x509_san_dns:verifier.example",

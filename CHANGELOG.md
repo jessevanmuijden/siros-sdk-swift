@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent as the engine will check it (five segments, none empty but the encrypted key of direct ECDH-ES,
   at most 4 MiB, header `alg`/`enc` the request's and `kid` the JWK's), and is built only for a
   request the engine verified as `direct_post.jwt`. Over WMP it is `response_jwe` in the `result` of
-  the child flow (https://github.com/sirosfoundation/siros-sdk-swift/pull/220). Cross-checked against go-jose
+  the child flow (https://github.com/sirosfoundation/siros-sdk-swift/pull/220). A `response_encryption`
+  that is present but unusable (malformed, `null`) is an error, never read as absent (which would send a
+  plain `vp_token`); a response that cannot be encrypted finalizes a transaction consent as failed; and a
+  WMP `sign_presentation` that names credentials now presents each one under its query id (it used to
+  sign a credential-less token), so the encrypted DCQL `vp_token` is real over WMP too. Cross-checked against go-jose
   v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **Engine-blind issuance: the wallet decrypts the issuer's Credential Response.** The engine (remote
   or embedded) relays ciphertext and never sees a credential, the `secret_seed` or any other
