@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different number of lookups than functions is false; float operands must be finite
   and exact. `requestSigned` is a required argument (the signature result, never
   defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
