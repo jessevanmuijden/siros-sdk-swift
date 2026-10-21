@@ -280,6 +280,10 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         return flowTypeMap[flowId] ?? "unknown"
     }
 
+    public func releaseFlow(flowId: String) {
+        removeFlowType(flowId: flowId)
+    }
+
     private func removeFlowType(flowId: String) {
         flowTypeLock.lock()
         flowTypeMap.removeValue(forKey: flowId)

@@ -111,6 +111,116 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         return try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
     }
 
+    // MARK: - Helpers for responses the wallet must reject
+
+    /// Encrypt `body` to the wallet's own key with ECDH-ES / A128GCM (independent of the decryptor under test
+    /// only in direction; the KDF is the one the go-jose and RFC vectors pin).
+    private func encrypt(_ body: String, to key: CredentialResponseKey) throws -> String {
+        let jwk = key.publicJwk
+        let x = try XCTUnwrap(jwk["x"].flatMap(CredentialResponseJwe.decode)), y = try XCTUnwrap(jwk["y"].flatMap(CredentialResponseJwe.decode))
+        let recipient = try P256.KeyAgreement.PublicKey(x963Representation: Data([4]) + x + y)
+        let ephemeral = P256.KeyAgreement.PrivateKey()
+        let point = ephemeral.publicKey.x963Representation
+        let header = ["alg": "ECDH-ES", "enc": "A128GCM", "epk": [
+            "kty": "EC", "crv": "P-256", "x": CredentialResponseJwe.encode(point.subdata(in: 1..<33)),
+            "y": CredentialResponseJwe.encode(point.subdata(in: 33..<65)),
+        ]] as [String: Any]
+        let protected = CredentialResponseJwe.encode(try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys]))
+        let z = try ephemeral.sharedSecretFromKeyAgreement(with: recipient).withUnsafeBytes { Array($0) }
+        let cek = CredentialResponseJwe.concatKdf(z: z, algorithmId: "A128GCM", apu: Data(), apv: Data(), keyBits: 128)
+        let box = try AES.GCM.seal(Data(body.utf8), using: SymmetricKey(data: cek), nonce: AES.GCM.Nonce(), authenticating: Data(protected.utf8))
+        return [protected, "", CredentialResponseJwe.encode(Data(box.nonce)), CredentialResponseJwe.encode(box.ciphertext), CredentialResponseJwe.encode(box.tag)].joined(separator: ".")
+    }
+
+    private func installOwnKey(_ w: SirosWallet, flowId: String) throws -> CredentialResponseKey {
+        let key = try XCTUnwrap(CredentialResponseKey(params: CredentialResponseEncryptionParams(alg: "ECDH-ES", enc: "A128GCM")))
+        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.lock.unlock()
+        return key
+    }
+
+    // MARK: - Limits on the decrypted credential_metadata (the engine used to enforce them)
+
+    func testAResponseBreakingTheMetadataLimitsIsRefusedAndTheIssuerIsTold() async throws {
+        func nested(_ depth: Int) -> String { String(repeating: "[", count: depth) + String(repeating: "]", count: depth) }
+        let members = (0..<257).map { "\"m\($0)\":1" }.joined(separator: ",")
+        let longName = String(repeating: "n", count: 257)
+        let big = String(repeating: "x", count: 1_048_600)
+        let bodies: [(String, String)] = [
+            ("depth 17", nested(17)),
+            ("257 members", "{\(members)}"),
+            ("a 257-byte member name", "{\"\(longName)\":1}"),
+            ("over 1 MiB", "\"\(big)\""),
+            ("a duplicate member", #"{"a":1,"a":2}"#),
+        ]
+        for (name, metadata) in bodies {
+            let w = wallet()
+            let notifier = RecordingNotifier()
+            w.credentialNotifier = notifier
+            let key = try installOwnKey(w, flowId: "l")
+            let body = #"{"credentials":[{"credential":"c"}],"notification_id":"n-1","credential_metadata":\#(metadata)}"#
+            do {
+                _ = try await w.decryptCredentialResponse(flowId: "l", jwe: try encrypt(body, to: key), deferred: false)
+                XCTFail("\(name) must be refused")
+            } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse, name) }
+            XCTAssertEqual(notifier.sent.map(\.event), [CredentialNotificationEvent.failure], name)
+            XCTAssertEqual(notifier.sent.first?.notificationId, "n-1", name)
+            XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "l").isEmpty, name)
+        }
+    }
+
+    func testMetadataAtTheLimitsIsAccepted() async throws {
+        let w = wallet()
+        let key = try installOwnKey(w, flowId: "ok")
+        let members = (0..<256).map { "\"m\($0)\":1" }.joined(separator: ",")
+        let name = String(repeating: "n", count: 256)
+        let nested = String(repeating: "[", count: 15) + String(repeating: "]", count: 15)   // depth 16 with the member holding it
+        let body = #"{"credentials":[{"credential":"c"}],"credential_metadata":{"deep":\#(nested),"\#(name)":1,"many":{\#(members)}}}"#
+        let control = try await w.decryptCredentialResponse(flowId: "ok", jwe: try encrypt(body, to: key), deferred: false)
+        XCTAssertEqual(control.credentialCount, 1)
+    }
+
+    func testARejectedResponseWithoutANotificationIdSendsNothing() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let key = try installOwnKey(w, flowId: "q")
+        do {
+            _ = try await w.decryptCredentialResponse(flowId: "q", jwe: try encrypt(#"{"credentials":[]}"#, to: key), deferred: false)
+            XCTFail("neither credentials nor a transaction_id")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse) }
+        XCTAssertTrue(notifier.sent.isEmpty)
+    }
+
+    // MARK: - Locking and an unsupported pair
+
+    func testNothingOfBlindIssuanceSurvivesLockingTheWallet() async throws {
+        let w = wallet()
+        try installKey(w, flowId: "z")
+        _ = try await w.decryptCredentialResponse(flowId: "z", jwe: Self.jwe, deferred: false)
+        try installKey(w, flowId: "z2")
+        w.clearBlindIssuanceState()
+        w.lock.lock()
+        let left = (w.credentialResponseKeys.count, w.decryptedCredentialResponses.count)
+        w.lock.unlock()
+        XCTAssertEqual(left.0, 0)
+        XCTAssertEqual(left.1, 0)
+    }
+
+    /// A required pair this build cannot open still gets an ANSWER (declined), so the engine fails the
+    /// issuance at once instead of waiting out its sign timeout.
+    func testARequiredButUnsupportedPairIsAnsweredNotLeftHanging() async throws {
+        let w = wallet()
+        let sender = RecordingSender()
+        let json = """
+        {"type":"sign_request","flow_id":"u1","message_id":"m","action":"generate_proof","params":{"audience":"a","nonce":"n",
+         "credential_response_encryption":{"alg":"ECDH-ES+A192KW","enc":"A256GCM","required":true}}}
+        """
+        try await w.answerGenerateProof(engine: sender, msg: try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8)))
+        XCTAssertEqual(sender.sent.count, 1)
+        XCTAssertNil(sender.sent.first?.credentialResponseEncryptionJwk, "declined")
+        XCTAssertEqual(sender.sent.first?.messageId, "m")
+    }
+
     // MARK: - generate_proof
 
     func testEachProofRequestGetsAFreshPublicJwkAndOnlyThePublicHalfLeaves() throws {
@@ -373,11 +483,14 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertNil(reply.proofs)
         XCTAssertEqual(reply.credentialResponseEncryptionJwk?["alg"], "ECDH-ES+A256KW")
 
-        let wmp = try await w.wmpGenerateProof(flowId: "k2", params: SignSubFlowParams(
-            action: "generate_proof", credentialResponseEncryption: request, proofTypesSupported: [:]
-        ))
-        XCTAssertNil(wmp.proofs)
-        XCTAssertEqual(wmp.credentialResponseEncryptionJwk?["use"], "enc")
+        // Over WMP too, whether `proof_types_supported` is empty or omitted.
+        for supported in [[:], nil] as [[String: AnyCodable]?] {
+            let wmp = try await w.wmpGenerateProof(flowId: "k2", params: SignSubFlowParams(
+                action: "generate_proof", credentialResponseEncryption: request, proofTypesSupported: supported
+            ))
+            XCTAssertNil(wmp.proofs)
+            XCTAssertEqual(wmp.credentialResponseEncryptionJwk?["use"], "enc")
+        }
     }
 
     /// A late generate_proof result must not recreate a key for a flow that ended, or one cancelled, while
@@ -404,6 +517,38 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertThrowsError(try CredentialResponseJwe.decrypt(parts.joined(separator: "."), recipient: key)) { error in
             guard case CredentialResponseJweError.malformed = error else { return XCTFail("\(error)") }
         }
+    }
+
+    /// Flow errors after a decryption drop the plaintext too, not only the key.
+    func testAFlowErrorDropsWhatWasDecrypted() async throws {
+        let w = wallet()
+        try installKey(w, flowId: "e1")
+        _ = try await w.decryptCredentialResponse(flowId: "e1", jwe: Self.jwe, deferred: false)
+        w.handleFlowError(msg: try JSONDecoder().decode(
+            FlowErrorMessage.self, from: Data(#"{"type":"flow_error","flow_id":"e1","error":{"code":"x","message":"y"}}"#.utf8)
+        ))
+        XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "e1").isEmpty)
+    }
+
+    /// A cancel while the metadata receiver is suspended makes the response stale: nothing is kept and no
+    /// success (count or transaction id) is reported.
+    func testACancelWhileTheReceiverIsSuspendedYieldsNoSuccess() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let w = wallet()
+        try installKey(w, flowId: "s1")
+        let gate = Gate()
+        w.credentialMetadataReceiver = { _, _, _ in
+            while await !gate.isOpen { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        let pending = Task { try await w.decryptCredentialResponse(flowId: "s1", jwe: Self.jwe, deferred: false) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        w.cancelCurrentFlow()
+        await gate.release()
+        do {
+            _ = try await pending.value
+            XCTFail("a stale response must not be reported as taken")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .noKey) }
+        XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "s1").isEmpty)
     }
 
     // MARK: - Lifecycle

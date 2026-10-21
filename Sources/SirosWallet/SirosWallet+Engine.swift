@@ -1358,7 +1358,9 @@ extension SirosWallet {
         flowEndSeq[flowId, default: 0] += 1      // a task for this flow still being registered sees that it ended
         let doomed = transactionTasks.filter { $0.value.flowId == flowId }
         for key in doomed.keys { transactionTasks.removeValue(forKey: key) }
+        // The flow's response key and anything decrypted with it end with the flow.
         credentialResponseKeys.removeValue(forKey: flowId)
+        decryptedCredentialResponses.removeValue(forKey: flowId)
         lock.unlock()
         for entry in doomed.values { entry.cancel() }
     }

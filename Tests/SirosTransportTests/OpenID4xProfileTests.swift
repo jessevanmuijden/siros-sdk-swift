@@ -17,6 +17,10 @@ private final class MockPeerContext: WmpPeerContext, @unchecked Sendable {
         return _notifications
     }
 
+    private var _released: [String] = []
+    var released: [String] { lock.lock(); defer { lock.unlock() }; return _released }
+    func releaseFlow(flowId: String) { lock.lock(); _released.append(flowId); lock.unlock() }
+
     func notify(method: String, params: [String: AnyCodable]?) async throws {
         lock.lock()
         _notifications.append((method, params))
@@ -257,8 +261,55 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
         let params = ctx.notifications[0].params
         XCTAssertEqual(params?["flow_id"], .string("child-1"))
-        XCTAssertEqual(params?["code"], .string("DECRYPT_FAILED"))
+        XCTAssertEqual(params?["code"], .int(-31006), "a number: go-wmp rejects a string code and the refusal would be lost")
+        XCTAssertEqual(params?["message"], .string("DECRYPT_FAILED"))
         XCTAssertEqual(params?["data"]?.objectValue?["reason"], .string("rejected"))
+        XCTAssertEqual(params?["data"]?.objectValue?["error_code"], .string("DECRYPT_FAILED"))
+        XCTAssertEqual(ctx.released, ["child-1"], "a finished child is no longer tracked by the peer")
+    }
+
+    /// A child cancelled while its handler is suspended gets no reply, even when the handler returns normally.
+    func testACancelledChildFlowAnswersNothing() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let ctx = MockPeerContext()
+        let gate = Gate()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            while await !gate.isOpen { try await Task.sleep(nanoseconds: 10_000_000) }
+            return SignSubFlowResult(vpToken: "late")        // returns normally despite the cancellation
+        }))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "c-x", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("vp-1"),
+        ]))
+        await profile.handleCancel(params: FlowCancelParams(flowId: "c-x"))
+        await gate.release()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(ctx.notifications.isEmpty, "no complete and no error for a cancelled child")
+    }
+
+    func testCancellingTheParentCancelsItsChildren() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let ctx = MockPeerContext()
+        let gate = Gate()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            while await !gate.isOpen { try await Task.sleep(nanoseconds: 10_000_000) }
+            return SignSubFlowResult(vpToken: "late")
+        }))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "c-y", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("vp-2"),
+        ]))
+        await profile.handleCancel(params: FlowCancelParams(flowId: "vp-2"))
+        await gate.release()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(ctx.notifications.isEmpty)
+    }
+
+    func testAnIntegerFlowErrorCodeFromThePeerDecodes() throws {
+        let params = try JSONDecoder().decode(FlowErrorParams.self, from: Data(#"{"flow_id":"f","code":-31006,"message":"m"}"#.utf8))
+        XCTAssertEqual(params.code, "-31006")
+        let text = try JSONDecoder().decode(FlowErrorParams.self, from: Data(#"{"flow_id":"f","code":"X","message":"m"}"#.utf8))
+        XCTAssertEqual(text.code, "X")
     }
 
     func testAMatchChildFlowIsAnsweredWithTheMatchesAsTheResult() async throws {
@@ -482,11 +533,8 @@ final class OpenID4xProfileTests: XCTestCase {
         // Should send wmp.flow.error
         XCTAssertEqual(ctx.notifications.count, 1)
         XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
-        if case .string(let code) = ctx.notifications[0].params?["code"] {
-            XCTAssertEqual(code, "SIGN_ERROR")
-        } else {
-            XCTFail("Expected code = SIGN_ERROR in flow error notification")
-        }
+        XCTAssertEqual(ctx.notifications[0].params?["code"], .int(-31006))
+        XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("SIGN_ERROR"))
     }
 
     /// An error that names its WMP code is reported with it, not as SIGN_ERROR.
@@ -500,11 +548,8 @@ final class OpenID4xProfileTests: XCTestCase {
         profile.initialize(ctx: ctx)
         await profile.handleProgress(params: FlowProgressParams(flowId: "flow-8", step: "sign_request", payload: try buildSignPayload()))
         XCTAssertEqual(ctx.notifications.count, 1)
-        if case .string(let code) = ctx.notifications[0].params?["code"] {
-            XCTAssertEqual(code, "invalid_transaction_data")
-        } else {
-            XCTFail("expected a code")
-        }
+        XCTAssertEqual(ctx.notifications[0].params?["code"], .int(-31006))
+        XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("invalid_transaction_data"))
         if case .string(let message) = ctx.notifications[0].params?["message"] {
             XCTAssertEqual(message, "invalid_transaction_data", "only the code goes to the peer, no developer text")
         } else {
@@ -580,11 +625,9 @@ final class OpenID4xProfileTests: XCTestCase {
 
         XCTAssertEqual(ctx.notifications.count, 1)
         XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
-        if case .string(let code) = ctx.notifications[0].params?["code"] {
-            XCTAssertEqual(code, "INVALID_PARAMS")
-        } else {
-            XCTFail("Expected code = INVALID_PARAMS in flow error")
-        }
+        // The wire code is the protocol's number (go-wmp reads an int); the application's is in data.
+        XCTAssertEqual(ctx.notifications[0].params?["code"], .int(-31006))
+        XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("INVALID_PARAMS"))
     }
 }
 

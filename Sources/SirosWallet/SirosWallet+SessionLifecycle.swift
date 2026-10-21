@@ -73,6 +73,7 @@ extension SirosWallet {
         // wallet must not be left holding an unlocked keystore whose
         // credentials are still signable. A successful login() unlocks it
         // again as part of its normal path.
+        clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
         // Same account/session-boundary reasoning as `endSessionLocally()`

@@ -208,6 +208,20 @@ final class CredentialResponseJweTests: XCTestCase {
         XCTAssertEqual(odd.credentialMetadata, .array([.int(1)]))
     }
 
+    /// Numbers inside an object-valued credential are written as the validated token, not rounded or re-typed.
+    func testObjectCredentialsKeepNumbersExactly() throws {
+        let plaintext = #"{"credentials":[{"credential":{"big":1e200,"precise":0.1234567890123456789012345678901234567890,"n":-0,"s":"a/b\n\u00e9","l":[1,2.50]}}]}"#
+        let response = try DecryptedCredentialResponse.parse(Data(plaintext.utf8))
+        let stored = try XCTUnwrap(response.credentials.first)
+        XCTAssertTrue(stored.contains("\"big\":1e200"), stored)
+        XCTAssertTrue(stored.contains("0.1234567890123456789012345678901234567890"), stored)
+        XCTAssertTrue(stored.contains("2.50"), stored)
+        XCTAssertTrue(stored.contains("a/b"), "slashes are not escaped")
+        // And it is the same document: parsing the stored text gives the original value.
+        let original = try StrictJSON.parse(Data(plaintext.utf8))["credentials"]?.arrayValue?.first?["credential"]
+        XCTAssertEqual(try StrictJSON.parse(stored), original)
+    }
+
     func testParseRefusesWhatIsNotACredentialResponse() {
         for bad in [
             "[]", "not json", "{}", #"{"credentials":[]}"#, #"{"credentials":"x"}"#, #"{"credentials":[{}]}"#,
