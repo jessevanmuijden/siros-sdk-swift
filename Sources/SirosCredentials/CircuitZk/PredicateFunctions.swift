@@ -176,7 +176,9 @@ enum PredicateOperand {
         switch type {
         case .number: return decimal(text).map { "\($0)" }
         case .date: return CivilDate(text).map { String($0.daysSinceEpoch) }
-        case .string, .bool: return text
+        // Exact UTF-8 bytes: Swift String equality treats canonically equivalent sequences (U+00E9 and U+0065 U+0301)
+        // as equal, which the other SDKs do not.
+        case .string, .bool: return Data(text.utf8).base64EncodedString()
         }
     }
 }
@@ -226,9 +228,9 @@ extension PredicateFunctions {
                 guard operands.count == condition.values.count, compare(condition.op, value, operands) else { return false }
             case .string, .bool:
                 switch condition.op {
-                case .eq: if text != condition.values.first { return false }
-                case .ne: if text == condition.values.first { return false }
-                case .in: if !condition.values.contains(text) { return false }
+                case .eq: if Array(text.utf8) != condition.values.first.map({ Array($0.utf8) }) { return false }
+                case .ne: if Array(text.utf8) == condition.values.first.map({ Array($0.utf8) }) { return false }
+                case .in: if !condition.values.contains(where: { Array($0.utf8) == Array(text.utf8) }) { return false }
                 default: return false // an ordering on a non-ordered type
                 }
             }
