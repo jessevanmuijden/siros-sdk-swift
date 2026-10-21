@@ -519,6 +519,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
 
     private let config: OpenID4xConfig
     private weak var peer: WmpPeerContext?
+    // Running sign / match child flows: the task, and the parent flow it belongs to.
+    private let childLock = NSLock()
+    private var childTasks: [String: (task: Task<Void, Never>, parent: String)] = [:]
+    private var cancelledChildren: Set<String> = []
 
     public init(config: OpenID4xConfig = OpenID4xConfig()) {
         self.config = config
@@ -536,7 +540,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         // A sign or match sub-flow is answered when the wallet has an answer (it may wait for the user),
         // not in the reply to the start request.
         if params.flowType == WmpSubFlowTypes.sign || params.flowType == WmpSubFlowTypes.match {
-            Task { [self] in await runChildFlow(params: params) }
+            let parent = params.params?.objectValue?["parent_flow_id"]?.stringValue ?? params.flowId
+            // Registered under the lock the task's own `finishChild` takes, so a fast child cannot finish first.
+            childLock.lock()
+            childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params) }, parent)
+            childLock.unlock()
         }
         return FlowStartResult(flowId: params.flowId, flowType: params.flowType)
     }
@@ -559,16 +567,29 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
                 guard let handler = config.onMatchRequest else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
                 members = matchResponseMembers(try await handler(parentId, payload))
             }
+            guard finishChild(childId) else { return }
             try? await peer?.notify(method: WmpMethods.flowComplete, params: [
                 "flow_id": .string(childId), "result": .object_(members),
             ])
+            peer?.releaseFlow(flowId: childId)
         } catch {
+            // A flow that was cancelled gets no reply, whether its handler ignored the cancellation, threw
+            // `CancellationError` or returned normally.
+            guard finishChild(childId) else { return }
             let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? "SIGN_ERROR"
             try? await peer?.notify(method: WmpMethods.flowError, params: [
-                "flow_id": .string(childId), "code": .string(code), "message": .string(code),
-                "data": .object_(["reason": .string("rejected")]),
+                "flow_id": .string(childId), "code": .int(FlowErrorParams.flowErrorCode), "message": .string(code),
+                "data": .object_(["reason": .string("rejected"), "error_code": .string(code)]),
             ])
+            peer?.releaseFlow(flowId: childId)
         }
+    }
+
+    /// Whether this child may still answer; forgets it either way.
+    private func finishChild(_ childId: String) -> Bool {
+        childLock.lock(); defer { childLock.unlock() }
+        childTasks.removeValue(forKey: childId)
+        return cancelledChildren.remove(childId) == nil
     }
 
     private struct ChildFlowFailure: Error, WmpErrorCodeProviding {
@@ -606,7 +627,16 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
     }
 
     public func handleCancel(params: FlowCancelParams) async {
-        // No-op for now
+        let id = params.flowId
+        childLock.lock()
+        var running: [Task<Void, Never>] = []
+        for (childId, child) in childTasks where childId == id || child.parent == id {
+            cancelledChildren.insert(childId)
+            running.append(child.task)
+        }
+        childLock.unlock()
+        // A cancelled child answers nothing, even if its handler ignores the cancellation.
+        for task in running { task.cancel() }
     }
 
     // MARK: - Sub-flow Handlers
@@ -744,11 +774,14 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
 
     private func sendFlowError(flowId: String, code: String, message: String?) async {
         guard let peer else { return }
-        var params: [String: AnyCodable] = [
+        // The wire `code` is the protocol's number (go-wmp reads an int); the application's code is
+        // `data.error_code` and the text is `message`.
+        let params: [String: AnyCodable] = [
             "flow_id": .string(flowId),
-            "code": .string(code),
+            "code": .int(FlowErrorParams.flowErrorCode),
+            "message": .string(message ?? code),
+            "data": .object_(["error_code": .string(code)]),
         ]
-        if let message { params["message"] = .string(message) }
         try? await peer.notify(method: WmpMethods.flowError, params: params)
     }
 }
