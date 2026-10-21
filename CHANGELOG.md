@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
+  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
+  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
+  with the four rulebook configs and the API-misuse errors, tested against the
+  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
+  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
+  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
+  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
+  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
+  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
+  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
+  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
+  over-65535-byte fields refused). Platform-neutral (swift-crypto
+  on Linux), no secret is logged or returned by a public API.
 - **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
   and a registry-driven builder.** The locale-free request a user approves before
   anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
@@ -24,52 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throw or a timeout is a decline, and with no handler a `circuit_zk` request is
   refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
   shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
-  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 17 merge cases, 22
-  pre-check cases). Not wired into the wallet yet.
-- **`circuit_zk` consent model: `PresentationConsentHandler`,
-  `PresentationConsentRequest` and `PresentationConsentBuilder`.** The
-  locale-free request a user approves before anything is signed or proved
-  (items `pseudonym`, `ageRange`, `claim`, `legacyPseudonym`, per credential,
-  with the verifier label and, for hosts and tests only, the trust framework
-  and `verifier_id_type`). The handler is a sibling of
-  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`,
-  a throw or a timeout is a decline, and with no handler a `circuit_zk` request
-  is refused. `PresentationConsentRequest.shortened(verifierId:)` is the
-  display shortening. The builder is tested against the shared
-  `circuit-zk-consent-vectors.json` (copied byte-for-byte from siros-sdk-kotlin,
-  32 cases). Not wired into the wallet yet.
   byte-for-byte from siros-sdk-kotlin: 62 consent cases, 18 merge cases, 22
   pre-check cases). Numbers are compared as exact decimals: a value Decimal would
   round (over 38 digits) is refused, `in` members are deduplicated by value, the
   merge span is refused when it cannot be computed exactly, and a pre-check with a
-  different number of lookups than functions is false. Not wired into the wallet yet.
-  pre-check cases). Not wired into the wallet yet.
-- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
-  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
-  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
-  with the four rulebook configs and the API-misuse errors, tested against the
-  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
-  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
-  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
-  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
-  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
-  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
-  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
-  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
-  over-65535-byte fields refused). Platform-neutral (swift-crypto
-  on Linux), no secret is logged or returned by a public API.
-- **`circuit_zk` consent model: `PresentationConsentHandler`,
-  `PresentationConsentRequest` and `PresentationConsentBuilder`.** The
-  locale-free request a user approves before anything is signed or proved
-  (items `pseudonym`, `ageRange`, `claim`, `legacyPseudonym`, per credential,
-  with the verifier label and, for hosts and tests only, the trust framework
-  and `verifier_id_type`). The handler is a sibling of
-  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`,
-  a throw or a timeout is a decline, and with no handler a `circuit_zk` request
-  is refused. `PresentationConsentRequest.shortened(verifierId:)` is the
-  display shortening. The builder is tested against the shared
-  `circuit-zk-consent-vectors.json` (copied byte-for-byte from siros-sdk-kotlin,
-  32 cases). Not wired into the wallet yet.
   different number of lookups than functions is false; float operands must be finite
   and exact. `requestSigned` is a required argument (the signature result, never
   defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
