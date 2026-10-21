@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
+  and a registry-driven builder.** The locale-free request a user approves before
+  anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
+  `legacyPseudonym`, per credential, with the verifier label and, for hosts and
+  tests only, the trust framework and `verifier_id_type`). Predicates apply to ANY
+  claim, and the function set is open-ended, so predicate functions are data:
+  `PredicateFunctions` (default: the nymauth `age_check`) declares per function id
+  its claim, value type, param-to-comparison map, an optional minimum span and
+  whether it reads as an age. Consent building, the local pre-check
+  (`precheck`) and the cross-query merge (`combinedBoundsOk`, the strictest
+  declared minimum span per credential and claim) are driven by it; a function not
+  in the registry is refused before consent. The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`, a
+  throw or a timeout is a decline, and with no handler a `circuit_zk` request is
+  refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
+  shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
+  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 18 merge cases, 22
+  pre-check cases). Numbers are compared as exact decimals: a value Decimal would
+  round (over 38 digits) is refused, `in` members are deduplicated by value, the
+  merge span is refused when it cannot be computed exactly, and a pre-check with a
+  different number of lookups than functions is false; float operands must be finite
+  and exact. `requestSigned` is a required argument (the signature result, never
+  defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
