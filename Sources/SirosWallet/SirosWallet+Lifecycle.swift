@@ -200,6 +200,7 @@ extension SirosWallet {
     /// Release all resources. Instance must not be reused after this.
     public func destroy() {
         lock.lock()
+        blindSessionEnded = true
         let engine = engineSession
         let peer = wmpPeer
         wmpPeer = nil

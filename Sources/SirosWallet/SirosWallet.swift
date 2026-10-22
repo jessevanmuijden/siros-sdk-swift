@@ -75,6 +75,8 @@ public final class SirosWallet: @unchecked Sendable {
     /// Bumped when the session is torn down or the current flow is cancelled, so a late `generate_proof`
     /// result cannot recreate a key for a flow that is gone.
     var credentialResponseEpoch = 0
+    /// Set when the session ends (logout, destroy, a refused installation); a new connection clears it.
+    var blindSessionEnded = false
     /// Validates and splits a decrypted response's `credential_metadata` (see `CredentialMetadataReceiver`).
     public var credentialMetadataReceiver: CredentialMetadataReceiver?
     var wmpSessionSnapshot = false
@@ -1325,6 +1327,7 @@ public final class SirosWallet: @unchecked Sendable {
     /// refused this installation.
     func endSessionLocally() {
         lock.lock()
+        blindSessionEnded = true
         let engine = engineSession
         let peer = wmpPeer
         engineSession = nil

@@ -46,6 +46,7 @@ extension SirosWallet {
         // `handleLifecycleRefusal(_:forAccount:)`.
         let replacedAccountId = accountRegistry.activeAccountId
         lock.lock()
+        blindSessionEnded = true
         let engine = engineSession
         // The WMP transport holds its own live WebSocket, and the backend
         // re-checks the cut-off at every flow start - leaving it connected
