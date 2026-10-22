@@ -26,6 +26,9 @@ public final class WmpSession: @unchecked Sendable {
     /// observer, so it never takes elements from `stateStream`, which a host may be reading.
     public var onTerminal: (@Sendable () -> Void)?
 
+    /// Called after a lost connection has been resumed.
+    public var onResumed: (@Sendable () -> Void)?
+
     // Request-response correlation
     private nonisolated(unsafe) var pendingRequests: [String: CheckedContinuation<JsonRpcResponse, Error>] = [:]
     private let pendingLock = NSLock()
@@ -97,6 +100,7 @@ public final class WmpSession: @unchecked Sendable {
         resumptionToken = parsed.resumptionToken
 
         setState(.active)
+        onResumed?()
     }
 
     /// Resume an existing session after reconnection.
@@ -260,10 +264,11 @@ public final class WmpSession: @unchecked Sendable {
     }
 
     private func handleDisconnect() async {
-        guard resumptionToken != nil else { return }
-        setState(.resuming)
+        // Without a resumption token there is nothing to retry: the loss is final, and ends the session the same way.
+        let attempts = resumptionToken == nil ? 0 : config.maxReconnectAttempts
+        if attempts > 0 { setState(.resuming) }
 
-        for attempt in 0..<config.maxReconnectAttempts {
+        for attempt in 0..<attempts {
             let backoffMs = min(
                 config.reconnectBaseMs * Int64(1 << (attempt + 1)),
                 config.reconnectMaxMs

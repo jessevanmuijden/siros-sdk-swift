@@ -160,6 +160,20 @@ final class WmpPeerTests: XCTestCase {
         XCTAssertEqual(states.last, .closed)
     }
 
+    /// The terminal hook is in place before `create` returns: `create` starts the disconnect monitor, so a loss
+    /// right after it must already find the hook.
+    func testTheTerminalHookIsInstalledBeforeTheSessionIsCreated() async throws {
+        let transport = FakeTransport()
+        let session = WmpSession(transport: transport, config: WmpSessionConfig(requestTimeoutMs: 2_000))
+        let peer = WmpPeer(session: session)
+        let connect = Task { try await peer.connect(authToken: "token") }
+        let deadline = Date().addingTimeInterval(2)
+        while transport.sentMessages.isEmpty, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertNotNil(session.onTerminal, "installed while create is still in flight")
+        connect.cancel()
+        withExtendedLifetime(peer) {}
+    }
+
     func testProfileInitializeCalledOnUse() {
         let (peer, _, profile) = makePeer()
         XCTAssertNotNil(profile.ctx, "initialize(ctx:) should be called by use(_:)")

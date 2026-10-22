@@ -261,22 +261,99 @@ final class OpenID4xProfileTests: XCTestCase {
     }
 
     /// A child cancelled while its handler is suspended gets no reply, even when the handler returns normally.
+    /// The handler is waited for at entry, suspended on a gate that does not throw on cancellation, and shown to
+    /// reach its normal return, so only the profile's suppression keeps the answer back.
     func testACancelledChildFlowAnswersNothing() async throws {
-        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        final class Gate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var entered = false, returned = false
+            private var continuation: CheckedContinuation<Void, Never>?
+            private var opened = false
+            var didEnter: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+            var didReturn: Bool { lock.lock(); defer { lock.unlock() }; return returned }
+            func wait() async {
+                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                    lock.lock(); entered = true
+                    if opened { lock.unlock(); c.resume() } else { continuation = c; lock.unlock() }
+                }
+                lock.lock(); returned = true; lock.unlock()
+            }
+            func open() { lock.lock(); opened = true; let c = continuation; continuation = nil; lock.unlock(); c?.resume() }
+        }
         let ctx = MockPeerContext()
         let gate = Gate()
         let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
-            while await !gate.isOpen { try await Task.sleep(nanoseconds: 10_000_000) }
+            await gate.wait()
             return SignSubFlowResult(vpToken: "late")        // returns normally despite the cancellation
         }))
         profile.initialize(ctx: ctx)
         _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "c-x", params: [
             "action": .string("sign_presentation"), "parent_flow_id": .string("vp-1"),
         ]))
+        for _ in 0..<200 where !gate.didEnter { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(gate.didEnter, "the handler is entered before the cancel")
         await profile.handleCancel(params: FlowCancelParams(flowId: "c-x"))
-        await gate.release()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        gate.open()
+        for _ in 0..<200 where !gate.didReturn { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(gate.didReturn, "the handler returned normally")
+        // The child's task finishes by releasing its flow a second time (the cancel released it first).
+        for _ in 0..<200 where ctx.released.count < 2 { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertTrue(ctx.notifications.isEmpty, "no complete and no error for a cancelled child")
+    }
+
+    func testRepeatedShutdownNotifiesTheApplicationOnce() {
+        var told = 0
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
+        profile.shutdown(); profile.shutdown(); profile.shutdown()
+        XCTAssertEqual(told, 1)
+    }
+
+    func testAMalformedSignPayloadIsInvalidParamsNotASignFailure() async throws {
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            XCTFail("a payload that does not decode never reaches the handler"); return SignSubFlowResult()
+        }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "sign", params: ["parent_flow_id": .string("p"), "action": .int(7)]))
+        XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
+        XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("INVALID_PARAMS"))
+    }
+
+    /// A redelivered start while the terminal answer is still being sent runs no second handler.
+    func testARedeliveredStartDuringTheTerminalSendRunsNoSecondHandler() async throws {
+        let ctx = BlockingPeerContext()
+        let counter = Counter()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in counter.bump(); return SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        let start = childStart(flowType: "sign", flowId: "c-r", params: ["action": .string("sign_presentation"), "parent_flow_id": .string("vp")])
+        _ = try await profile.startFlow(params: start)
+        for _ in 0..<200 where !ctx.inNotify { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(ctx.inNotify, "the answer is mid-send")
+        _ = try await profile.startFlow(params: start)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        ctx.unblock()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    /// An answer that could not be sent while the connection was down goes out when the session resumes, without
+    /// running the handler again; a redelivered start meanwhile does not run it either.
+    func testAnUnsentAnswerIsSentAfterResumeWithoutRerunningTheHandler() async throws {
+        let ctx = FlakyPeerContext()
+        let counter = Counter()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in counter.bump(); return SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        let start = childStart(flowType: "sign", flowId: "c-u", params: ["action": .string("sign_presentation"), "parent_flow_id": .string("vp")])
+        await profile.runChildFlow(params: start)
+        XCTAssertEqual(ctx.sent.count, 0, "the send failed")
+        _ = try await profile.startFlow(params: start)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(counter.value, 1, "no second handler")
+        ctx.failing = false
+        profile.sessionResumed()
+        for _ in 0..<200 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.sent.first?.method, WmpMethods.flowComplete)
+        XCTAssertEqual(counter.value, 1)
     }
 
     func testCancellingTheParentCancelsItsChildren() async throws {
@@ -745,4 +822,47 @@ private func buildSignPayload() throws -> AnyCodable {
     )
     let data = try JSONEncoder().encode(signParams)
     return try JSONDecoder().decode(AnyCodable.self, from: data)
+}
+
+// MARK: - Peer doubles for the terminal-send cases
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock(); private var n = 0
+    func bump() { lock.lock(); n += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+}
+
+/// `notify` suspends until `unblock()`.
+private final class BlockingPeerContext: WmpPeerContext, @unchecked Sendable {
+    let codec = WmpCodec()
+    private let lock = NSLock()
+    private var blocked: CheckedContinuation<Void, Never>?
+    private var opened = false
+    private var _inNotify = false
+    var inNotify: Bool { lock.lock(); defer { lock.unlock() }; return _inNotify }
+    func releaseFlow(flowId: String) {}
+    func notify(method: String, params: [String: AnyCodable]?) async throws {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock(); _inNotify = true
+            if opened { lock.unlock(); c.resume() } else { blocked = c; lock.unlock() }
+        }
+    }
+    func unblock() { lock.lock(); opened = true; let c = blocked; blocked = nil; lock.unlock(); c?.resume() }
+    func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
+}
+
+/// `notify` throws while `failing`.
+private final class FlakyPeerContext: WmpPeerContext, @unchecked Sendable {
+    let codec = WmpCodec()
+    private let lock = NSLock()
+    private var _failing = true
+    private var _sent: [(method: String, params: [String: AnyCodable]?)] = []
+    var failing: Bool { get { lock.lock(); defer { lock.unlock() }; return _failing } set { lock.lock(); _failing = newValue; lock.unlock() } }
+    var sent: [(method: String, params: [String: AnyCodable]?)] { lock.lock(); defer { lock.unlock() }; return _sent }
+    func releaseFlow(flowId: String) {}
+    func notify(method: String, params: [String: AnyCodable]?) async throws {
+        if failing { throw WmpSessionError.connectionFailed }
+        lock.lock(); _sent.append((method, params)); lock.unlock()
+    }
+    func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
 }

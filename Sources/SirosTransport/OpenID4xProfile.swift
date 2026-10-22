@@ -556,7 +556,7 @@ private let trustEvaluationRequired = "trust_evaluation_required"
 /// Handles server-initiated flows: the backend engine starts flows and
 /// the SDK responds to progress events, sign requests, match requests,
 /// and trust evaluations.
-public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfile, @unchecked Sendable {
+public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfile, WmpResumeProfile, @unchecked Sendable {
     public let name: String = "openid4x"
     public let capabilities: [String] = ["oid4vci", "oid4vp"]
     public let flowTypes: [String] = [OID4FlowTypes.oid4vci, OID4FlowTypes.oid4vp, WmpSubFlowTypes.sign, WmpSubFlowTypes.match]
@@ -565,7 +565,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     private weak var peer: WmpPeerContext?
     // Running sign / match child flows: the task, and the parent flow it belongs to.
     private let childLock = NSLock()
-    private var childTasks: [String: (task: Task<Void, Never>, parent: String)] = [:]
+    private var childTasks: [String: (task: Task<Void, Never>, parent: String, token: UUID)] = [:]
+    /// Answers that could not be sent (the connection was down), kept until the session resumes. The handler is
+    /// not run again for them.
+    private var unsentAnswers: [String: (method: String, params: [String: AnyCodable], parent: String)] = [:]
     private var cancelledChildren: Set<String> = []
     // Set by `shutdown()`: no child may be registered or started afterwards, so a start still buffered in the
     // peer's dispatch loop cannot launch a handler during teardown.
@@ -596,8 +599,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             childLock.lock()
             // Not after shutdown, not for a parent that already ended, and never a second handler for a child that is
             // already running (a redelivered start must not replace the first task's tracking).
-            if !stopped, !endedParents.contains(parent), childTasks[params.flowId] == nil {
-                childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params) }, parent)
+            if !stopped, !endedParents.contains(parent), childTasks[params.flowId] == nil, unsentAnswers[params.flowId] == nil {
+                let token = UUID()
+                childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params, token: token) }, parent, token)
             }
             childLock.unlock()
         }
@@ -608,56 +612,104 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     /// response as `result`, or `wmp.flow.error` on the child flow with `data.reason` `rejected` when
     /// the wallet declines or fails. The handler is told the PARENT flow id (`parent_flow_id`), the
     /// issuance or presentation the request belongs to, which is what the wallet keys its state by.
-    func runChildFlow(params: FlowStartParams) async {
+    func runChildFlow(params: FlowStartParams, token: UUID = UUID()) async {
         let childId = params.flowId
         let payload = params.params
         let parentId = payload?.objectValue?["parent_flow_id"]?.stringValue ?? childId
         // Cancelled or shut down before it got going: no handler runs (Swift cancellation does not stop a task
         // that has not started, and a handler must not begin signing for a flow that has ended).
-        guard !endedBeforeStart(childId) else { peer?.releaseFlow(flowId: childId); return }
+        guard !endedBeforeStart(childId, token) else { peer?.releaseFlow(flowId: childId); return }
+        let method: String
+        let answer: [String: AnyCodable]
         do {
             let members: [String: AnyCodable]
             if params.flowType == WmpSubFlowTypes.sign {
                 guard let handler = config.onSignRequest, let payload else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
-                let signParams = try JSONDecoder().decode(SignSubFlowParams.self, from: try JSONEncoder().encode(payload))
+                let signParams: SignSubFlowParams
+                do {
+                    signParams = try JSONDecoder().decode(SignSubFlowParams.self, from: try JSONEncoder().encode(payload))
+                } catch {
+                    throw ChildFlowFailure(code: "INVALID_PARAMS")
+                }
                 members = signResponseMembers(try await handler(parentId, signParams))
             } else {
                 guard let handler = config.onMatchRequest else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
                 members = matchResponseMembers(try await handler(parentId, payload))
             }
-            guard finishChild(childId) else { peer?.releaseFlow(flowId: childId); return }
-            try? await peer?.notify(method: WmpMethods.flowComplete, params: [
-                "flow_id": .string(childId), "result": .object_(members),
-            ])
-            peer?.releaseFlow(flowId: childId)
+            method = WmpMethods.flowComplete
+            answer = ["flow_id": .string(childId), "result": .object_(members)]
         } catch {
-            // A flow that was cancelled gets no reply, whether its handler ignored the cancellation, threw
-            // `CancellationError` or returned normally.
-            guard finishChild(childId) else { peer?.releaseFlow(flowId: childId); return }
             let fallback = params.flowType == WmpSubFlowTypes.match ? "MATCH_ERROR" : "SIGN_ERROR"
             let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? fallback
-            try? await peer?.notify(method: WmpMethods.flowError, params: [
+            method = WmpMethods.flowError
+            answer = [
                 "flow_id": .string(childId), "code": .int(FlowErrorParams.flowErrorCode), "message": .string(code),
                 "data": .object_(["reason": .string("rejected"), "error_code": .string(code)]),
-            ])
-            peer?.releaseFlow(flowId: childId)
+            ]
+        }
+        // A flow that was cancelled gets no reply, whether its handler ignored the cancellation, threw
+        // `CancellationError` or returned normally. The child stays tracked until its answer is out, so a
+        // redelivered start cannot run a second handler beside it, and only this execution forgets it.
+        guard mayAnswer(childId) else { forgetChild(childId, token); peer?.releaseFlow(flowId: childId); return }
+        do {
+            try await peer?.notify(method: method, params: answer)
+        } catch {
+            keepUnsent(childId, method: method, params: answer, parent: parentId, token: token)
+            return
+        }
+        forgetChild(childId, token)
+        peer?.releaseFlow(flowId: childId)
+    }
+
+    /// The session came back after a loss: the answers that could not be sent go out now.
+    public func sessionResumed() {
+        childLock.lock()
+        let pending = unsentAnswers
+        childLock.unlock()
+        guard !pending.isEmpty else { return }
+        Task { [self] in
+            for (childId, answer) in pending {
+                guard (try? await peer?.notify(method: answer.method, params: answer.params)) != nil else { continue }
+                childLock.lock(); unsentAnswers.removeValue(forKey: childId); childLock.unlock()
+                peer?.releaseFlow(flowId: childId)
+            }
         }
     }
 
+    /// The answer could not be sent: keep it for the resume (unless the flow ended or the profile stopped meanwhile).
+    private func keepUnsent(_ childId: String, method: String, params: [String: AnyCodable], parent: String, token: UUID) {
+        childLock.lock()
+        let ended = stopped || cancelledChildren.contains(childId)
+        if !ended { unsentAnswers[childId] = (method, params, parent) }
+        childLock.unlock()
+        forgetChild(childId, token)
+        if ended { peer?.releaseFlow(flowId: childId) }
+    }
+
     /// Whether this child was cancelled, or the profile shut down, before its handler was entered. Forgets it if so.
-    private func endedBeforeStart(_ childId: String) -> Bool {
+    private func endedBeforeStart(_ childId: String, _ token: UUID) -> Bool {
         childLock.lock(); defer { childLock.unlock() }
         guard stopped || cancelledChildren.contains(childId) else { return false }
-        childTasks.removeValue(forKey: childId)
-        cancelledChildren.remove(childId)
+        if childTasks[childId]?.token == token || childTasks[childId] == nil {
+            childTasks.removeValue(forKey: childId)
+            cancelledChildren.remove(childId)
+        }
         return true
     }
 
-    /// Whether this child may still answer; forgets it either way.
-    private func finishChild(_ childId: String) -> Bool {
+    /// Whether this child may still answer.
+    private func mayAnswer(_ childId: String) -> Bool {
         childLock.lock(); defer { childLock.unlock() }
+        return !cancelledChildren.contains(childId)
+    }
+
+    /// Forgets the child, but only the execution that owns the tracking entry may (a direct run owns none).
+    private func forgetChild(_ childId: String, _ token: UUID) {
+        childLock.lock(); defer { childLock.unlock() }
+        guard let entry = childTasks[childId] else { cancelledChildren.remove(childId); return }
+        guard entry.token == token else { return }
         childTasks.removeValue(forKey: childId)
-        return cancelledChildren.remove(childId) == nil
+        cancelledChildren.remove(childId)
     }
 
     private struct ChildFlowFailure: Error, WmpErrorCodeProviding {
@@ -695,6 +747,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         let wasChild = childTasks[flowId] != nil
         endedParents.append(flowId)
         if endedParents.count > maxEndedParents { endedParents.removeFirst(endedParents.count - maxEndedParents) }
+        for (childId, answer) in unsentAnswers where childId == flowId || answer.parent == flowId {
+            unsentAnswers.removeValue(forKey: childId)
+            ids.append(childId)
+        }
         for (childId, child) in childTasks where childId == flowId || child.parent == flowId {
             cancelledChildren.insert(childId)
             running.append(child.task)
@@ -710,7 +766,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
 
     public func shutdown() {
         childLock.lock()
+        // Once: a session is shut down by its teardown, its close and its terminal hook, and the application's
+        // callback must not run again after a replacement session has begun.
+        guard !stopped else { childLock.unlock(); return }
         stopped = true
+        unsentAnswers.removeAll()
         var running: [Task<Void, Never>] = []
         var ids: [String] = []
         for (childId, child) in childTasks {
