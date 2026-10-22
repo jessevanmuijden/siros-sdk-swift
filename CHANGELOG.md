@@ -180,6 +180,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build. It now always throws `IDVError.unavailable`. `RemoteIDVProvider`
   is unchanged.
 
+### Fixed
+- **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
+  engine keeps one session per (tenant, user) and closes the older socket when a
+  second connects. The session used to open several at once: `forceReconnect`
+  (after an OAuth redirect or a QR scan) cancelled the old socket, and the receive
+  failure that cancel raises then scheduled a reconnect of its own, as did a
+  failed send and a second `connect()` while still connecting; the sockets
+  superseded each other and a flow's replies went to a socket the engine no longer
+  knew. Now every socket has an epoch: opening one supersedes (and cancels) the
+  previous one and any pending backoff attempt, a callback, frame or reconnect
+  attempt of a superseded socket does nothing (a superseded token refresh no
+  longer sets `.reauthRequired` over the new connection), a failed socket is no
+  longer reported by `isConnected` during the backoff, and a duplicate failure of
+  the same socket schedules one backoff, not two. Ports Kotlin SDK #282
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/282). The client
+  ping never closes the socket on a missing pong (Kotlin keeps its pong wait at
+  10 s or more for the same reason), so no change was needed there. Tested through
+  a fake socket (`EngineSocket`, a new internal seam); not run against a real
+  `URLSessionWebSocketTask` on an Apple platform.
+
 ## [0.14.1] - 2026-09-29
 
 ### Fixed
