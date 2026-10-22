@@ -47,19 +47,33 @@ final class ConsentPromptTests: XCTestCase {
     }
 
     /// Waits until the prompt holds a question (the asking task has installed it).
-    private func pending(_ prompt: Prompt, file: StaticString = #filePath, line: UInt = #line) async throws -> Prompt.Pending {
+    /// With a `host`, also waits until the host has been TOLD of the question: `current` becomes visible when the
+    /// asker installs the entry, a moment before the notification is delivered, and a test that resolves or tears down
+    /// in that window would see a history of `[nil]` or `[]` on correct code.
+    private func pending(
+        _ prompt: Prompt, host: Host? = nil, file: StaticString = #filePath, line: UInt = #line
+    ) async throws -> Prompt.Pending {
         for _ in 0..<400 {
-            if let current = prompt.current { return current }
+            if let current = prompt.current, host.map({ !$0.seen.isEmpty }) ?? true { return current }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTFail("no question was pending", file: file, line: line)
         throw CancellationError()
     }
 
+    /// Waits until the host has recorded `count` notifications (the final one is delivered after the answer).
+    private func settled(_ host: Host, count: Int, file: StaticString = #filePath, line: UInt = #line) async throws {
+        for _ in 0..<400 {
+            if host.seen.count >= count { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("the host was told \(host.seen.count) times, expected \(count)", file: file, line: line)
+    }
+
     func testAnAnswerResolvesTheQuestionExactlyOnce() async throws {
         let (prompt, host) = makePrompt()
         let asked = Task { await prompt.ask("share?") }
-        let question = try await pending(prompt)
+        let question = try await pending(prompt, host: host)
         XCTAssertEqual(question.request, "share?")
         XCTAssertTrue(question.answer(true))
         XCTAssertFalse(question.answer(false), "a second answer is a no-op")
@@ -67,6 +81,7 @@ final class ConsentPromptTests: XCTestCase {
         let answer = await value(asked)
         XCTAssertTrue(answer)
         XCTAssertNil(prompt.current)
+        try await settled(host, count: 2)
         XCTAssertEqual(host.seen, ["share?", nil], "shown, then cleared")
     }
 
@@ -93,13 +108,14 @@ final class ConsentPromptTests: XCTestCase {
         XCTAssertNil(prompt.current)
     }
 
-    func testAnUnansweredQuestionIsDeclinedWhenItExpires() async {
+    func testAnUnansweredQuestionIsDeclinedWhenItExpires() async throws {
         let (prompt, host) = makePrompt(timeout: 0.15)
         let start = Date()
         let answer = await prompt.ask("slow")
         XCTAssertFalse(answer)
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.1)
         XCTAssertNil(prompt.current)
+        try await settled(host, count: 2)
         XCTAssertEqual(host.seen, ["slow", nil])
     }
 
@@ -136,6 +152,18 @@ final class ConsentPromptTests: XCTestCase {
         let (negative, _) = makePrompt(timeout: -5)
         let expired = await negative.ask("already expired")
         XCTAssertFalse(expired, "a negative timeout expires at once")
+        // A host that answers SYNCHRONOUSLY from its callback must not be able to approve an already-expired question:
+        // a zero-duration timeout is declined before anything is installed or shown.
+        for timeout in [-5.0, 0.0] {
+            let approving = Prompt(decline: false, timeout: timeout)
+            let shown = Once()
+            approving.onChange = { pending in
+                if let pending { _ = shown.take(); _ = pending.answer(true) }
+            }
+            let result = await approving.ask("expired")
+            XCTAssertFalse(result, "timeout \(timeout): the synchronous approval is too late")
+            XCTAssertTrue(shown.take(), "timeout \(timeout): the question was never shown to the host")
+        }
     }
 
     func testANewQuestionDeclinesThePendingOne() async throws {
@@ -152,18 +180,20 @@ final class ConsentPromptTests: XCTestCase {
         XCTAssertTrue(fresh.answer(true))
         let secondAnswer = await value(second)
         XCTAssertTrue(secondAnswer)
+        try await settled(host, count: 3)
         XCTAssertEqual(host.seen.last ?? "x", nil)
     }
 
     func testCancellingTheAskingTaskDeclinesAndWithdrawsTheQuestion() async throws {
         let (prompt, host) = makePrompt()
         let asked = Task { await prompt.ask("cancel me") }
-        let question = try await pending(prompt)
+        let question = try await pending(prompt, host: host)
         asked.cancel()
         let answer = await value(asked)
         XCTAssertFalse(answer)
         XCTAssertNil(prompt.current)
         XCTAssertFalse(question.answer(true), "too late")
+        try await settled(host, count: 2)
         XCTAssertEqual(host.seen, ["cancel me", nil])
     }
 
@@ -295,7 +325,7 @@ final class ConsentPromptTests: XCTestCase {
     func testClearingTheCallbackRetiresTheQuestionThatIsPending() async throws {
         let (prompt, host) = makePrompt()
         let asked = Task { await prompt.ask("pending at teardown") }
-        _ = try await pending(prompt)
+        _ = try await pending(prompt, host: host)
         prompt.onChange = nil
         let answer = await value(asked)
         XCTAssertFalse(answer, "no UI left to answer it: declined, not suspended forever")

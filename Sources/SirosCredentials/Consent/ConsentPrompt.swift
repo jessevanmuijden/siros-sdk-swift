@@ -104,6 +104,9 @@ public final class ConsentPrompt<Request: Sendable, Answer: Sendable>: @unchecke
     /// Asks `request` and suspends until it is answered or declined. Never throws and resumes exactly once.
     public func ask(_ request: Request) async -> Answer {
         guard onChange != nil, !Task.isCancelled else { return declineAnswer }
+        // A zero-duration timeout (a negative one is normalised to it) has expired already: declined before anything is
+        // installed or shown, so a host that answers synchronously from `onChange` cannot approve an expired question.
+        if let timeout, timeout <= 0 { return declineAnswer }
         let new = Entry(request: request)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Answer, Never>) in
