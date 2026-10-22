@@ -1,0 +1,11 @@
+{
+  "id": "edge-max-size-001",
+  "description": "Large container with many credentials and events",
+  "version": "3",
+  "constraints": {
+    "credentials": 250,
+    "events": 1000,
+    "presentations": 500
+  },
+  "expected": "implementation handles without metadata loss"
+}
