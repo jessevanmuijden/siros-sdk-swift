@@ -281,9 +281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.14.1] - 2026-09-29
 
 ### Fixed
+- **Presentation consent: nothing is approved that is not shown.** A host predicate renderer that returns no sentences
+  (or only blank ones) is refused with `PresentationConsentTextError` instead of dropping the predicate from the screen.
+  Age bounds of one credential that meet at a single day (`ge` == `le`, in one predicate or split across two) identify
+  the exact birth date: the "not shared" age wording is dropped for them and every comparison is worded generically.
 - **ConsentPrompt: an expired question is never shown.** A zero-duration timeout (a negative one is normalised to it) is
   declined before the question is installed, so a host that answers synchronously from `onChange` cannot approve it.
   The tests wait for the host to be told before they resolve a question, removing a scheduling race.
+- **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
+  components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
+  and the label lookup. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
+  and `["SE", "FI"]` no longer read alike.
 - **Presentation consent screen now shows a verified identity when there's
   no declared display name.** The backend no longer trusts/caches an
   unvalidated client-supplied `client_metadata.client_name` for the

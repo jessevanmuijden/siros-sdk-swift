@@ -121,12 +121,24 @@ final class PresentationConsentTextTests: XCTestCase {
         XCTAssertThrowsError(try text("en").render(request([withContext])))
     }
 
+    /// One literal value `SE, FI` and two alternatives `SE`, `FI` read differently; quotes, backslashes and line
+    /// breaks inside an operand cannot imitate a separator or end the quoted text.
+    func testStringOperandsAreQuotedSoDifferentSetsNeverReadTheSame() throws {
+        let one = try lines("en", [predicate("Country", path: ["country"], .string, .in, ["SE, FI"])])
+        let two = try lines("en", [predicate("Country", path: ["country"], .string, .in, ["SE", "FI"])])
+        XCTAssertNotEqual(one, two)
+        XCTAssertEqual(one, ["Country is one of: \"SE, FI\"."])
+        let tricky = try lines("en", [predicate("Country", path: ["country"], .string, .in, ["a\", \"b", "line1\nline2", "back\\slash"])])
+        XCTAssertEqual(tricky, ["Country is one of: \"a\\\", \\\"b\", \"line1\\nline2\", \"back\\\\slash\"."])
+        XCTAssertEqual(try lines("en", [predicate("Score", .number, .ge, ["10"])]), ["Score is at least 10."], "numbers stay plain")
+    }
+
     func testAGenericPredicateSaysWhatIsProvedAndNeverReassuresAboutTheValue() throws {
         XCTAssertEqual(try lines("en", [predicate("Credit score", path: ["score"], .number, .ge, ["10"]), predicate("Credit score", path: ["score"], .number, .le, ["20"])]),
                        ["Credit score is at least 10.", "Credit score is at most 20."])
-        XCTAssertEqual(try lines("en", [predicate("Country", path: ["country"], .string, .in, ["SE", "FI"])]), ["Country is one of: SE, FI."])
+        XCTAssertEqual(try lines("en", [predicate("Country", path: ["country"], .string, .in, ["SE", "FI"])]), ["Country is one of: \"SE\", \"FI\"."])
         // No label: the path is the fallback, never an invented name.
-        XCTAssertEqual(try lines("en", [predicate(nil, path: ["address", "country"], .string, .eq, ["SE"])]), ["address.country is SE."])
+        XCTAssertEqual(try lines("en", [predicate(nil, path: ["address", "country"], .string, .eq, ["SE"])]), ["address.country is \"SE\"."])
         for language in languages {
             for op in [PredicateOp.eq, .ne, .lt, .le, .gt, .ge, .in] {
                 let operands = op == .in ? ["A", "B"] : ["A"]
@@ -160,13 +172,23 @@ final class PresentationConsentTextTests: XCTestCase {
     }
 
     func testAnArgumentContainingAPlaceholderIsNotExpanded() throws {
-        XCTAssertEqual(try lines("en", [predicate("%2$s", .string, .eq, ["%1$s"])]), ["%2$s is %1$s."])
+        XCTAssertEqual(try lines("en", [predicate("%2$s", .string, .eq, ["%1$s"])]), ["%2$s is \"%1$s\"."])
     }
 
     func testAHostRendererTakesPrecedenceOverTheGenericWording() throws {
         let t = PresentationConsentText(locale: Locale(identifier: "en"), predicateRenderers: ["x_check": { _ in ["custom"] }])
         XCTAssertEqual(try t.render(request([predicate(nil, .string, .eq, ["A"])])).entries[0].lines, ["custom"])
         XCTAssertNotEqual(try t.render(request([predicate(nil, .string, .eq, ["A"], function: "other")])).entries[0].lines, ["custom"])
+    }
+
+    /// A host renderer that says nothing would drop the predicate from the screen the user approves: refused.
+    func testARendererThatReturnsNoWordingIsRefusedNotSilentlyDropped() throws {
+        for output in [[String](), [""], ["   "], ["ok", " \n"]] {
+            let t = PresentationConsentText(locale: Locale(identifier: "en"), predicateRenderers: ["x_check": { _ in output }])
+            XCTAssertThrowsError(try t.render(request([predicate(nil, .string, .eq, ["A"])])), "renderer output \(output)") {
+                XCTAssertTrue($0 is PresentationConsentTextError)
+            }
+        }
     }
 
     func testTheRefusalMessagesAreLocalised() {

@@ -84,7 +84,12 @@ public enum PresentationConsentBuilder {
             }
         }
         let revealed = revealedClaimPaths(entries)
-        entries = entries.map { PresentationConsentEntry(credential: $0.credential, items: withoutAgeWordingWhereRevealed($0.items, revealed: revealed)) }
+        entries = entries.map { entry in
+            // A claim is also revealed when this credential's age bounds meet at one day (ge == le, in one predicate or
+            // split across two): the proof then identifies the exact birth date, so "not shared" would be untrue.
+            let revealedHere = revealed.union(exactBirthDateClaims(entry.items))
+            return PresentationConsentEntry(credential: entry.credential, items: withoutAgeWordingWhereRevealed(entry.items, revealed: revealedHere))
+        }
         let verifier = PresentationConsentVerifier(
             label: label(trust: trust, clientName: verifiedClientIdDisplayName, origin: attestedOrigin),
             trustFramework: trust.framework,
@@ -138,25 +143,40 @@ public enum PresentationConsentBuilder {
     /// The age wording says the exact birth date is not shared. It is dropped (the generic wording states every
     /// comparison) for an age predicate whose claim the request reveals elsewhere: a disclosure of that claim
     /// (legacy `claims`), or another predicate on it that is not itself a ge/le age bound (an equality, a set).
-    private static func withoutAgeWordingWhereRevealed(_ items: [PresentationConsentItem], revealed: Set<[String]>) -> [PresentationConsentItem] {
+    private static func withoutAgeWordingWhereRevealed(_ items: [PresentationConsentItem], revealed: Set<ClaimPathKey>) -> [PresentationConsentItem] {
         items.map { item in
-            guard case .predicate(let predicate) = item, predicate.ageForm != nil, revealed.contains(predicate.claim.path) else { return item }
+            guard case .predicate(let predicate) = item, predicate.ageForm != nil, revealed.contains(ClaimPathKey(predicate.claim.path)) else { return item }
             return .predicate(PresentationConsentPredicate(
                 functionId: predicate.functionId, claim: predicate.claim, valueType: predicate.valueType,
                 conditions: predicate.conditions, ageForm: nil))
         }
     }
 
+    /// The claims whose age bounds, over the predicates of ONE credential, leave a single day: the greatest `ge` is not
+    /// below the least `le`. Such a proof identifies the exact date, whichever predicates the bounds came from.
+    private static func exactBirthDateClaims(_ items: [PresentationConsentItem]) -> Set<ClaimPathKey> {
+        var lower: [ClaimPathKey: Int] = [:], upper: [ClaimPathKey: Int] = [:]
+        for case .predicate(let predicate) in items where predicate.ageForm != nil {
+            let key = ClaimPathKey(predicate.claim.path)
+            for condition in predicate.conditions {
+                guard let text = condition.values.first, let day = CivilDate(text)?.daysSinceEpoch else { continue }
+                if condition.op == .ge { lower[key] = max(lower[key] ?? day, day) }
+                if condition.op == .le { upper[key] = min(upper[key] ?? day, day) }
+            }
+        }
+        return Set(lower.compactMap { key, low in upper[key].map { $0 <= low } == true ? key : nil })
+    }
+
     /// The claim paths the whole request reveals other than through an age statement: a disclosure of the claim
     /// (legacy `claims`) or a predicate on it without age wording (an equality, a set). Collected ONCE, so the
     /// per-item check is a set lookup however many entries the request has.
-    private static func revealedClaimPaths(_ entries: [PresentationConsentEntry]) -> Set<[String]> {
-        var paths = Set<[String]>()
+    private static func revealedClaimPaths(_ entries: [PresentationConsentEntry]) -> Set<ClaimPathKey> {
+        var paths = Set<ClaimPathKey>()
         for entry in entries {
             for item in entry.items {
                 switch item {
-                case .claim(let name): paths.insert([name])
-                case .predicate(let predicate) where predicate.ageForm == nil: paths.insert(predicate.claim.path)
+                case .claim(let name): paths.insert(ClaimPathKey([name]))
+                case .predicate(let predicate) where predicate.ageForm == nil: paths.insert(ClaimPathKey(predicate.claim.path))
                 default: break
                 }
             }
@@ -168,7 +188,8 @@ public enum PresentationConsentBuilder {
         _ registered: PredicateFunction, _ parsed: ParsedPredicate, claims: [PresentationConsentClaimRef], namespace: String?, today: CivilDate
     ) -> PresentationConsentPredicate {
         let metadataPath = (namespace.map { [$0] } ?? []) + parsed.path
-        let label = claims.first { $0.path == metadataPath }?.label
+        let wanted = ClaimPathKey(metadataPath)
+        let label = claims.first { ClaimPathKey($0.path) == wanted }?.label
         let usable = label.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         return PresentationConsentPredicate(
             functionId: registered.id, claim: PresentationConsentClaimRef(path: parsed.path, label: usable),

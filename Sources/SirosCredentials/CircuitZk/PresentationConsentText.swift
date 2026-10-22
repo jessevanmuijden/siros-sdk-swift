@@ -91,7 +91,14 @@ public struct PresentationConsentText: Sendable {
     private func lines(_ item: PresentationConsentItem, verifierName: String) throws -> [String] {
         switch item {
         case .predicate(let predicate):
-            return predicateRenderers[predicate.functionId]?(predicate) ?? predicateLines(predicate)
+            guard let render = predicateRenderers[predicate.functionId] else { return predicateLines(predicate) }
+            // A renderer that says nothing (no sentences, or only blank ones) would remove the predicate from the screen
+            // the user approves: refused, never an approval of something not shown.
+            let sentences = render(predicate)
+            guard !sentences.isEmpty, sentences.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                throw PresentationConsentTextError(reason: "a predicate renderer returned no wording")
+            }
+            return sentences
         case .pseudonym(_, let scope, let remappable, let crossSite, _, let context):
             guard scope == .perVerifier, !crossSite, context == nil else {
                 throw PresentationConsentTextError(reason: "unsupported pseudonym scope")
@@ -128,8 +135,31 @@ public struct PresentationConsentText: Sendable {
             case .ge: key = isDate ? .predicateDateGe : .predicateGe
             case .in: key = isDate ? .predicateDateIn : .predicateIn
             }
-            return text(key, claim, condition.values.map { isDate ? date($0) : $0 }.joined(separator: ", "))
+            let operands = condition.values.map { value -> String in
+                if isDate { return date(value) }
+                // A string operand is quoted and escaped: `["SE, FI"]` (one value) and `["SE", "FI"]` (two) must not
+                // read the same on the screen the user approves.
+                return item.valueType == .string ? Self.quoted(value) : value
+            }
+            return text(key, claim, operands.joined(separator: ", "))
         }
+    }
+
+    /// A string operand as the user reads it: double-quoted, with `\`, `"` and control characters escaped.
+    static func quoted(_ value: String) -> String {
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 || scalar.value == 0x7f { out += String(format: "\\u{%04X}", scalar.value) } else { out.unicodeScalars.append(scalar) }
+            }
+        }
+        return out + "\""
     }
 
     /// The date as the user's locale writes it; the input is a validated RFC 3339 full-date.
