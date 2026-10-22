@@ -201,11 +201,16 @@ extension SirosWallet {
     public func destroy() {
         lock.lock()
         let engine = engineSession
+        let peer = wmpPeer
+        wmpPeer = nil
         engineSession = nil
         credentialNotifier = nil
         apiClient = nil
         lock.unlock()
         engine?.disconnect()
+        // The WMP session goes too, and its child-flow handlers stop before their state is cleared.
+        peer?.shutdownProfiles()
+        if let peer { Task { try? await peer.close() } }
         cancelEngineTasks()
         clearBlindIssuanceState()
         keystore.lock()

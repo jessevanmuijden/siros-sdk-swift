@@ -59,6 +59,8 @@ extension SirosWallet {
         apiClient = nil
         lock.unlock()
         engine?.disconnect()
+        // Stop the handlers still running for the orchestrator's child flows BEFORE their state is cleared.
+        peer?.shutdownProfiles()
         if let peer { try? await peer.close() }
         cancelEngineTasks()
         authTokens?.clear()
