@@ -38,11 +38,10 @@ final class OpenID4xProfileTests: XCTestCase {
 
     // MARK: - handleProgress routing
 
-    func testHandleProgressSignRequestCallsOnSignRequest() async throws {
+    func testSignChildFlowDecodesTheEnginesParamsAndAnswersOnTheChild() async throws {
         let ctx = MockPeerContext()
         var receivedFlowId: String?
         var receivedParams: SignSubFlowParams?
-
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onSignRequest: { flowId, params in
                 receivedFlowId = flowId
@@ -51,29 +50,13 @@ final class OpenID4xProfileTests: XCTestCase {
             }
         ))
         profile.initialize(ctx: ctx)
-
-        let payload = try buildSignPayload()
-        let progressParams = FlowProgressParams(
-            flowId: "flow-1",
-            step: "sign_request",
-            payload: payload
-        )
-        await profile.handleProgress(params: progressParams)
-
+        await profile.runChildFlow(params: childStart(flowType: "sign", parent: "flow-1", payload: try buildSignPayload()))
         XCTAssertEqual(receivedFlowId, "flow-1")
         XCTAssertEqual(receivedParams?.action, "sign")
         XCTAssertEqual(receivedParams?.nonce, "nonce-abc")
         XCTAssertEqual(receivedParams?.audience, "https://issuer.example")
-
-        // Verify sign_response notification sent on wmp.flow.action
         XCTAssertEqual(ctx.notifications.count, 1)
-        let notification = ctx.notifications[0]
-        XCTAssertEqual(notification.method, WmpMethods.flowAction)
-        if case .string(let action) = notification.params?["action"] {
-            XCTAssertEqual(action, "sign_response")
-        } else {
-            XCTFail("Expected action = sign_response in notification params")
-        }
+        XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowComplete)
     }
 
     /// `sign_client_auth` over WMP (go-wallet-backend#317): the sub-flow params
@@ -98,7 +81,7 @@ final class OpenID4xProfileTests: XCTestCase {
             "issuer": .string("siros-sample://callback"), "htm": .string("POST"), "htu": .string("https://as.example.com/token"),
             "dpop_nonce": .string("n-1"), "ath": .string("h"), "key_id": .string("k-1"),
         ]
-        await profile.handleProgress(params: FlowProgressParams(flowId: "flow-1", step: "sign_request", payload: .object_(payload)))
+        await profile.runChildFlow(params: childStart(flowType: "sign", parent: "flow-1", payload: .object_(payload)))
 
         XCTAssertEqual(receivedParams?.action, "sign_client_auth")
         XCTAssertEqual(receivedParams?.issuer, "siros-sample://callback")
@@ -109,8 +92,8 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(receivedParams?.keyId, "k-1")
 
         XCTAssertEqual(ctx.notifications.count, 1)
-        let params = ctx.notifications[0].params
-        XCTAssertEqual(params?["action"], .string("sign_response"))
+        let params = ctx.notifications[0].params?["result"]?.objectValue
+        XCTAssertNil(params?["action"])
         XCTAssertEqual(params?["client_attestation"], .string("wia"))
         XCTAssertEqual(params?["client_attestation_pop"], .string("pop"))
         XCTAssertEqual(params?["dpop_key_id"], .string("k-1"))
@@ -135,17 +118,24 @@ final class OpenID4xProfileTests: XCTestCase {
             "action": .string("sign_client_auth"), "htm": .string("POST"),
             "htu": .string("https://issuer.example.com/credential"), "ath": .string("h"),
         ]
-        await profile.handleProgress(params: FlowProgressParams(flowId: "flow-1", step: "sign_request", payload: .object_(payload)))
+        await profile.runChildFlow(params: childStart(flowType: "sign", parent: "flow-1", payload: .object_(payload)))
 
         XCTAssertEqual(receivedParams?.action, "sign_client_auth")
         XCTAssertEqual(receivedParams?.audience, "")
         XCTAssertEqual(receivedParams?.nonce, "")
         XCTAssertEqual(receivedParams?.htm, "POST")
         XCTAssertEqual(ctx.notifications.count, 1)
-        XCTAssertEqual(ctx.notifications[0].params?["dpop_proof"], .string("dpop"))
+        XCTAssertEqual(ctx.notifications[0].params?["result"]?.objectValue?["dpop_proof"], .string("dpop"))
     }
 
     // MARK: - Child flows (the orchestrator's nested sign / match flows)
+
+    /// A child start carrying `payload`'s members plus the `parent_flow_id` the engine adds.
+    private func childStart(flowType: String, parent: String, payload: AnyCodable?, flowId: String = "child-1") -> FlowStartParams {
+        var members = payload?.objectValue ?? [:]
+        members["parent_flow_id"] = .string(parent)
+        return childStart(flowType: flowType, flowId: flowId, params: members)
+    }
 
     private func childStart(flowType: String, flowId: String = "child-1", params: [String: AnyCodable]) -> FlowStartParams {
         FlowStartParams(wmp: WmpMeta(version: "0.1", sessionId: "s"), flowId: flowId, flowType: flowType, params: .object_(params))
@@ -387,38 +377,6 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications.first?.params?["result"]?.objectValue?["vp_token"], .string("tok"))
     }
 
-    func testHandleProgressMatchRequestCallsOnMatchRequest() async throws {
-        let ctx = MockPeerContext()
-        var receivedFlowId: String?
-
-        let profile = OpenID4xProfile(config: OpenID4xConfig(
-            onMatchRequest: { flowId, _ in
-                receivedFlowId = flowId
-                return MatchResult(matches: [
-                    CredentialMatch(credentialId: "cred-1", format: "vc+sd-jwt"),
-                ])
-            }
-        ))
-        profile.initialize(ctx: ctx)
-
-        let progressParams = FlowProgressParams(
-            flowId: "flow-2",
-            step: "match_request",
-            payload: nil
-        )
-        await profile.handleProgress(params: progressParams)
-
-        XCTAssertEqual(receivedFlowId, "flow-2")
-        XCTAssertEqual(ctx.notifications.count, 1)
-        let notification = ctx.notifications[0]
-        XCTAssertEqual(notification.method, WmpMethods.flowAction)
-        if case .string(let action) = notification.params?["action"] {
-            XCTAssertEqual(action, "match_response")
-        } else {
-            XCTFail("Expected action = match_response in notification params")
-        }
-    }
-
     /// A wallet with nothing to present answers with an empty match set; the
     /// reason travelling with it is the only explanation of *why*, and this
     /// transport used to drop it on the floor.
@@ -431,11 +389,11 @@ final class OpenID4xProfileTests: XCTestCase {
         ))
         profile.initialize(ctx: ctx)
 
-        await profile.handleProgress(params: FlowProgressParams(flowId: "flow-4", step: "match_request", payload: nil))
+        await profile.runChildFlow(params: childStart(flowType: "match", parent: "flow-4", payload: nil))
 
         XCTAssertEqual(ctx.notifications.count, 1)
-        let params = ctx.notifications[0].params
-        XCTAssertEqual(params?["action"], .string("match_response"))
+        let params = ctx.notifications[0].params?["result"]?.objectValue
+        XCTAssertNil(params?["action"])
         XCTAssertEqual(params?["matches"], .array([]))
         XCTAssertEqual(
             params?["no_match_reason"],
@@ -452,15 +410,22 @@ final class OpenID4xProfileTests: XCTestCase {
         ))
         profile.initialize(ctx: ctx)
 
-        await profile.handleProgress(params: FlowProgressParams(flowId: "flow-5", step: "match_request", payload: nil))
+        await profile.runChildFlow(params: childStart(flowType: "match", parent: "flow-5", payload: nil))
 
-        XCTAssertNil(ctx.notifications.first?.params?["no_match_reason"])
+        let result = ctx.notifications.first?.params?["result"]?.objectValue
+        XCTAssertEqual(result?["matches"]?.arrayValue?.count, 1)
+        XCTAssertNil(result?["no_match_reason"])
     }
 
-    func testHandleProgressTrustEvaluationCallsOnTrustEvaluation() async throws {
+    private func trustRequired(_ extra: [String: AnyCodable] = [:]) -> AnyCodable {
+        var members: [String: AnyCodable] = ["trust_evaluation_required": .bool(true)]
+        for (k, v) in extra { members[k] = v }
+        return .object_(members)
+    }
+
+    func testMarkedTrustProgressIsAnsweredWithTheMembersUnderParams() async throws {
         let ctx = MockPeerContext()
         var receivedFlowId: String?
-
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onTrustEvaluation: { flowId, _ in
                 receivedFlowId = flowId
@@ -468,28 +433,60 @@ final class OpenID4xProfileTests: XCTestCase {
             }
         ))
         profile.initialize(ctx: ctx)
-
-        let progressParams = FlowProgressParams(
-            flowId: "flow-3",
-            step: "trust_evaluation_required",
-            payload: nil
-        )
-        await profile.handleProgress(params: progressParams)
+        await profile.handleProgress(params: FlowProgressParams(flowId: "flow-3", step: VCIStep.evaluatingTrust, payload: trustRequired()))
 
         XCTAssertEqual(receivedFlowId, "flow-3")
         XCTAssertEqual(ctx.notifications.count, 1)
         let notification = ctx.notifications[0]
         XCTAssertEqual(notification.method, WmpMethods.flowAction)
-        if case .string(let action) = notification.params?["action"] {
-            XCTAssertEqual(action, "trust_result")
-        } else {
-            XCTFail("Expected action = trust_result in notification params")
+        XCTAssertEqual(notification.params?["action"], .string("trust_result"))
+        XCTAssertNil(notification.params?["trusted"], "go-wmp reads the members under `params`, not next to `action`")
+        let members = notification.params?["params"]?.objectValue
+        XCTAssertEqual(members?["trusted"], .bool(true))
+        XCTAssertEqual(members?["framework"], .string("eidas"))
+    }
+
+    func testVerifierTrustProgressIsAnsweredToo() async throws {
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onTrustEvaluation: { _, _ in TrustResult(trusted: true) }))
+        profile.initialize(ctx: ctx)
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: VPStep.evaluatingVerifierTrust, payload: trustRequired()))
+        XCTAssertEqual(ctx.notifications.count, 1)
+        XCTAssertEqual(ctx.notifications[0].params?["action"], .string("trust_result"))
+    }
+
+    /// The engine's informational `evaluating_trust` progress is not a request, and neither is a bare
+    /// `trust_evaluation_required` step name: an early answer could satisfy the engine's later wait.
+    func testInformationalTrustProgressIsNotAnswered() async throws {
+        let ctx = MockPeerContext()
+        var progress: [String] = []
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onProgress: { _, step, _ in progress.append(step) },
+            onTrustEvaluation: { _, _ in
+                XCTFail("an unmarked progress must not reach the trust handler")
+                return TrustResult(trusted: true)
+            }
+        ))
+        profile.initialize(ctx: ctx)
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: VCIStep.evaluatingTrust, payload: nil))
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: VPStep.evaluatingVerifierTrust, payload: .object_(["trust_evaluation_required": .bool(false)])))
+        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "trust_evaluation_required", payload: nil))
+        XCTAssertTrue(ctx.notifications.isEmpty)
+        XCTAssertEqual(progress.count, 3, "they are passed on as ordinary progress")
+    }
+
+    /// Sign and match are child flows now; a progress step of that name is only progress.
+    func testSignAndMatchProgressStepsNoLongerRunHandlers() async throws {
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in XCTFail("sign runs from a child flow only"); return SignSubFlowResult() },
+            onMatchRequest: { _, _ in XCTFail("match runs from a child flow only"); return MatchResult(matches: []) }
+        ))
+        profile.initialize(ctx: ctx)
+        for step in ["sign_request", "match_request", VCIStep.generatingProof, VPStep.matchingCredentials] {
+            await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: step, payload: try buildSignPayload()))
         }
-        if case .bool(let trusted) = notification.params?["trusted"] {
-            XCTAssertTrue(trusted)
-        } else {
-            XCTFail("Expected trusted = true in notification params")
-        }
+        XCTAssertTrue(ctx.notifications.isEmpty)
     }
 
     func testHandleProgressUnknownStepCallsOnProgress() async throws {
@@ -549,30 +546,19 @@ final class OpenID4xProfileTests: XCTestCase {
 
     // MARK: - Error propagation
 
-    func testHandleProgressSignRequestHandlerErrorSendsFlowError() async throws {
+    func testSignChildHandlerErrorSendsFlowError() async throws {
         let ctx = MockPeerContext()
-
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onSignRequest: { _, _ in
-                struct SignError: Error, LocalizedError {
-                    var errorDescription: String? { "key not found" }
-                }
+                struct SignError: Error, LocalizedError { var errorDescription: String? { "key not found" } }
                 throw SignError()
             }
         ))
         profile.initialize(ctx: ctx)
-
-        let payload = try buildSignPayload()
-        let progressParams = FlowProgressParams(
-            flowId: "flow-7",
-            step: "sign_request",
-            payload: payload
-        )
-        await profile.handleProgress(params: progressParams)
-
-        // Should send wmp.flow.error
+        await profile.runChildFlow(params: childStart(flowType: "sign", parent: "flow-7", payload: try buildSignPayload()))
         XCTAssertEqual(ctx.notifications.count, 1)
         XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
+        XCTAssertEqual(ctx.notifications[0].params?["flow_id"], .string("child-1"))
         XCTAssertEqual(ctx.notifications[0].params?["code"], .int(-31006))
         XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("SIGN_ERROR"))
     }
@@ -586,7 +572,7 @@ final class OpenID4xProfileTests: XCTestCase {
         let ctx = MockPeerContext()
         let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in throw Refusal() }))
         profile.initialize(ctx: ctx)
-        await profile.handleProgress(params: FlowProgressParams(flowId: "flow-8", step: "sign_request", payload: try buildSignPayload()))
+        await profile.runChildFlow(params: childStart(flowType: "sign", parent: "flow-8", payload: try buildSignPayload()))
         XCTAssertEqual(ctx.notifications.count, 1)
         XCTAssertEqual(ctx.notifications[0].params?["code"], .int(-31006))
         XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("invalid_transaction_data"))
@@ -597,9 +583,8 @@ final class OpenID4xProfileTests: XCTestCase {
         }
     }
 
-    func testHandleProgressTrustEvaluationHandlerErrorSendsUntrustedResult() async throws {
+    func testTrustHandlerErrorSendsUntrustedResult() async throws {
         let ctx = MockPeerContext()
-
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onTrustEvaluation: { _, _ in
                 struct TrustError: Error {}
@@ -607,20 +592,12 @@ final class OpenID4xProfileTests: XCTestCase {
             }
         ))
         profile.initialize(ctx: ctx)
-
         await profile.handleProgress(params: FlowProgressParams(
-            flowId: "flow-8",
-            step: "trust_evaluation_required",
-            payload: nil
+            flowId: "flow-8", step: VCIStep.evaluatingTrust, payload: .object_(["trust_evaluation_required": .bool(true)])
         ))
-
         XCTAssertEqual(ctx.notifications.count, 1)
         XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowAction)
-        if case .bool(let trusted) = ctx.notifications[0].params?["trusted"] {
-            XCTAssertFalse(trusted, "Trust evaluation error should result in trusted=false")
-        } else {
-            XCTFail("Expected trusted field in trust_result notification")
-        }
+        XCTAssertEqual(ctx.notifications[0].params?["params"]?.objectValue?["trusted"], .bool(false), "a failed evaluation is untrusted")
     }
 
     // MARK: - startFlow / initialize
@@ -646,26 +623,18 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(profile.flowTypes.contains(OID4FlowTypes.oid4vp))
     }
 
-    func testHandleProgressSignRequestNilPayloadSendsFlowError() async throws {
+    func testSignChildWithNoParamsSendsFlowError() async throws {
         let ctx = MockPeerContext()
-
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onSignRequest: { _, _ in
-                XCTFail("handler should not be called when payload is nil")
+                XCTFail("handler should not be called when params are missing")
                 return SignSubFlowResult()
             }
         ))
         profile.initialize(ctx: ctx)
-
-        await profile.handleProgress(params: FlowProgressParams(
-            flowId: "flow-nil",
-            step: "sign_request",
-            payload: nil
-        ))
-
+        await profile.runChildFlow(params: FlowStartParams(wmp: WmpMeta(), flowId: "child-1", flowType: "sign", params: nil))
         XCTAssertEqual(ctx.notifications.count, 1)
         XCTAssertEqual(ctx.notifications[0].method, WmpMethods.flowError)
-        // The wire code is the protocol's number (go-wmp reads an int); the application's is in data.
         XCTAssertEqual(ctx.notifications[0].params?["code"], .int(-31006))
         XCTAssertEqual(ctx.notifications[0].params?["data"]?.objectValue?["error_code"], .string("INVALID_PARAMS"))
     }
