@@ -6,6 +6,7 @@ import SirosAuth
 import SirosCredentials
 import SirosKeystore
 import SirosTransport
+import SwiftCBOR
 @testable import SirosWallet
 
 /// Issuer trust is a gate on issuance (Kotlin SDK #276): a credential is stored
@@ -112,10 +113,12 @@ final class IssuanceTrustGateTests: XCTestCase {
     private func flowComplete(
         flowId: String = "flow-1",
         credentials: [[String: Any]],
-        engineTrusted: Bool? = nil
+        engineTrusted: Bool? = nil,
+        startTag: Int? = 0
     ) -> FlowCompleteMessage {
         let obj: [String: Any] = ["type": MessageTypes.flowComplete, "flow_id": flowId, "credentials": credentials]
         var msg = try! JSONDecoder().decode(FlowCompleteMessage.self, from: JSONSerialization.data(withJSONObject: obj))
+        msg.startTag = startTag
         if let engineTrusted {
             msg.issuerTrust = IssuerTrustReport(
                 issuer: "https://issuer.example", trusted: engineTrusted, framework: "etsi-tl",
@@ -317,17 +320,19 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertTrue(h.notifier.events.isEmpty)
     }
 
-    func testACancelledFlowsBufferedCompletionDoesNotAdoptTheEpochOfALaterFlow() async {
+    func testAFlowCancelledBeforeItsFirstProgressCannotAdoptALaterFlowsEpoch() async {
         let h = makeHarness()
         let wallet = h.wallet
-        // Flow A is live: its first progress binds it to the current epoch.
-        wallet.bindFlowEpoch("A")
-        // A is cancelled; renewal B starts and is bound under the NEW epoch.
+        // A is started under epoch 0 (its flow_start carried tag 0) ...
+        wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.lock.unlock()
+        // ... and cancelled before its first progress message is handled; renewal B then starts.
         wallet.cancelCurrentFlow()
-        wallet.lock.lock(); wallet.pendingRenewalSourceBatchId = 100; wallet.issuanceInFlight = true; wallet.lock.unlock()
-        wallet.bindFlowEpoch("B")
-        // A's buffered completion (negative report) is only now handled.
-        await wallet.handleFlowComplete(msg: flowComplete(flowId: "A", credentials: [sdJwtCredential], engineTrusted: false))
+        wallet.lock.lock(); wallet.pendingRenewalSourceBatchId = 100; wallet.issuanceInFlight = true
+        let bTag = wallet.issuanceEpoch
+        wallet.lock.unlock()
+        XCTAssertNotEqual(bTag, 0)
+        // A's first progress and negative completion are only now handled: A still carries ITS tag.
+        await wallet.handleFlowComplete(msg: flowComplete(flowId: "A", credentials: [sdJwtCredential], engineTrusted: false, startTag: 0))
 
         XCTAssertTrue(wallet.issuanceInFlight, "B's guard was not cleared by A's refusal")
         XCTAssertEqual(wallet.pendingRenewalSourceBatchId, 100)
@@ -335,10 +340,48 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertTrue(h.notifier.events.isEmpty)
         let stored = await h.store.getAll()
         XCTAssertTrue(stored.isEmpty)
-        // B's own completion still works.
-        await wallet.handleFlowComplete(msg: flowComplete(flowId: "B", credentials: [sdJwtCredential], engineTrusted: true))
+        // B's own completion, carrying B's tag, still works.
+        await wallet.handleFlowComplete(msg: flowComplete(flowId: "B", credentials: [sdJwtCredential], engineTrusted: true, startTag: bTag))
         let after = await h.store.getAll()
         XCTAssertEqual(after.count, 1)
+    }
+
+    func testACompletionThatCannotProveItsIssuanceIsRefusedNotAdopted() async {
+        let h = makeHarness()
+        await h.wallet.handleFlowComplete(msg: flowComplete(credentials: [sdJwtCredential], engineTrusted: true, startTag: nil))
+        let stored = await h.store.getAll()
+        XCTAssertTrue(stored.isEmpty, "no start tag: ownership cannot be established, nothing is stored")
+        XCTAssertTrue(h.listener.completed.isEmpty)
+        // A completion that stores nothing and refuses nothing (a presentation) needs no proof.
+        await h.wallet.handleFlowComplete(msg: try! JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"{"type":"flow_complete","flow_id":"p"}"#.utf8)))
+        XCTAssertEqual(h.listener.completed, ["p"])
+    }
+
+    // MARK: - The signed docType
+
+    private func msoPayload(docType: String?, tagged: Bool = true) -> [UInt8] {
+        var map: [CBOR: CBOR] = ["version": .utf8String("1.0")]
+        if let docType { map["docType"] = .utf8String(docType) }
+        let mso = CBOR.map(map)
+        return tagged ? CBOR.tagged(.encodedCBORDataItem, .byteString(mso.encode())).encode() : mso.encode()
+    }
+
+    func testAnEnvelopeDocTypeThatDiffersFromTheSignedMsoIsRefused() {
+        let signedB = msoPayload(docType: "org.example.B")
+        let reason = SirosWallet.issuerAuthDocTypeRefusal(msoPayload: signedB, envelopeDocType: "org.example.A")
+        XCTAssertNotNil(reason)
+        XCTAssertTrue(reason?.contains("org.example.A") == true && reason?.contains("org.example.B") == true)
+    }
+
+    func testMatchingDocTypeIsAcceptedTaggedOrBare() {
+        XCTAssertNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: msoPayload(docType: "org.example.A"), envelopeDocType: "org.example.A"))
+        XCTAssertNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: msoPayload(docType: "org.example.A", tagged: false), envelopeDocType: "org.example.A"))
+    }
+
+    func testAMsoWithNoReadableDocTypeCannotBeComparedAndIsRefused() {
+        XCTAssertNotNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: msoPayload(docType: nil), envelopeDocType: "x"))
+        XCTAssertNotNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: [0xff, 0x00], envelopeDocType: "x"))
+        XCTAssertNotNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: [], envelopeDocType: "x"))
     }
 
     func testARefusedRenewalKeepsTheOldBatch() async {

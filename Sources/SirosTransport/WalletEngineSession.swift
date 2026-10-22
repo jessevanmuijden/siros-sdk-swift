@@ -277,6 +277,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     }
 
     private func doConnect(appToken: String) {
+        resetStartTags()
         let wsUrl = baseUrl
             .replacingOccurrences(of: "https://", with: "wss://")
             .replacingOccurrences(of: "http://", with: "ws://")
@@ -379,6 +380,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     }
 
     private func scheduleReconnect() {
+        resetStartTags()
         guard lastAppToken != nil, reconnectAttempts < maxReconnectAttempts else {
             setState(.failed)
             return
@@ -437,6 +439,28 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     private var issuerTrustReports: [String: IssuerTrustReport] = [:]
     private let issuerTrustLock = NSLock()
 
+    /// Tags a flow with the caller's state at the moment its `flow_start` was sent
+    /// (the wallet returns its issuance epoch), so a completion can later be judged
+    /// by the state ITS flow started under, even if the flow was cancelled and a
+    /// newer one started before its first progress arrived. Read at send time, on
+    /// the calling thread, never under a session lock.
+    public var startTagProvider: (@Sendable () -> Int?)?
+    let startTags = StartTagTracker()
+    /// Held across tagging AND sending, so concurrent starts enqueue in send order.
+    private let flowStartLock = NSLock()
+
+    private func sendFlowStart(_ message: FlowStartMessage) {
+        let tag = startTagProvider?()
+        flowStartLock.lock(); defer { flowStartLock.unlock() }
+        // A start sent with no socket is dropped by send(); it must not be queued.
+        if webSocketTask != nil { startTags.enqueue(tag) }
+        send(message)
+    }
+
+    /// A dead or replaced socket answers no more starts: tags queued for it would
+    /// misalign every later flow.
+    private func resetStartTags() { startTags.reset() }
+
     private func recordIssuerTrustReport(_ msg: FlowProgressMessage) {
         guard msg.step == "trust_evaluated",
               let payload = msg.payload?.objectValue,
@@ -455,6 +479,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
         var copy = msg
         copy.issuerTrust = issuerTrustReports.removeValue(forKey: msg.flowId)
+        copy.startTag = startTags.take(flowId: msg.flowId)
         return copy
     }
 
@@ -462,6 +487,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         guard let flowId else { return }
         issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
         issuerTrustReports.removeValue(forKey: flowId)
+        startTags.discard(flowId: flowId)
     }
 
     /// Internal so tests can feed frames without a socket.
@@ -481,6 +507,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             }
         case MessageTypes.flowProgress:
             if let msg = try? decoder.decode(FlowProgressMessage.self, from: data) {
+                startTags.firstProgress(flowId: msg.flowId)
                 recordIssuerTrustReport(msg)
                 flowProgressContinuation.yield(msg)
             }
@@ -541,7 +568,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         redirectUri: String? = nil,
         authorizationDetails: [AuthorizationDetail]? = nil
     ) {
-        send(FlowStartMessage(
+        sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
             offer: offer,
             credentialOfferUri: credentialOfferUri,
@@ -569,7 +596,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         clientAttestation: String?,
         clientAttestationPoP: String?
     ) {
-        send(FlowStartMessage(
+        sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
             offer: offer,
             credentialOfferUri: credentialOfferUri,
@@ -590,7 +617,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         dpopJwk: String? = nil,
         dpopKeyId: String? = nil
     ) {
-        send(FlowStartMessage(
+        sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
             refreshToken: refreshToken,
             credentialIssuer: credentialIssuer,
@@ -607,7 +634,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         requestUriRef: String? = nil,
         features: [String]? = nil
     ) {
-        send(FlowStartMessage(
+        sendFlowStart(FlowStartMessage(
             protocol: "oid4vp",
             requestUri: requestUri,
             requestUriRef: requestUriRef,
@@ -840,7 +867,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         authCode: String,
         codeVerifier: String? = nil
     ) {
-        send(FlowStartMessage(
+        sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
             offer: offer,
             credentialOfferUri: credentialOfferUri,
@@ -863,7 +890,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         clientAttestation: String?,
         clientAttestationPoP: String?
     ) {
-        send(FlowStartMessage(
+        sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
             offer: offer,
             credentialOfferUri: credentialOfferUri,
@@ -877,6 +904,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
 
     /// Disconnect the WebSocket session.
     public func disconnect() {
+        resetStartTags()
         lastAppToken = nil
         tokenProvider = nil
         onTokenRejected = nil

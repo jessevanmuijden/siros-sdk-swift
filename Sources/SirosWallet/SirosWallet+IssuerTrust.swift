@@ -105,9 +105,40 @@ extension SirosWallet {
         guard case .array(let arr) = issuerAuth, arr.count == 4, case .byteString(let msoBytes) = arr[2] else { return nil }
         guard MdocCose.verify1(issuerAuth, payload: msoBytes, publicKeyX963: [UInt8](publicKeyX963)) else { return nil }
 
+        // The docType the trust service is asked about must be the SIGNED one: the
+        // envelope's is unsigned. A mismatch, or no way to compare, is untrusted.
+        if let reason = Self.issuerAuthDocTypeRefusal(msoPayload: msoBytes, envelopeDocType: docType) {
+            return TrustResult(trusted: false, reason: reason)
+        }
+
         return await evaluateIssuerTrust(chain, docType: docType)
         #else
         return nil
         #endif
+    }
+
+    /// The `docType` inside the signed MobileSecurityObject: the `issuerAuth`
+    /// payload is `#6.24(bstr(MSO))` (a bare MSO map is accepted too). Nil if it
+    /// cannot be read.
+    static func signedDocType(msoPayload: [UInt8]) -> String? {
+        guard let top = try? CBOR.decode(msoPayload) else { return nil }
+        var mso = top
+        if case .tagged(let tag, let inner) = top, tag == .encodedCBORDataItem {
+            guard case .byteString(let bytes) = inner, let decoded = try? CBOR.decode(bytes) else { return nil }
+            mso = decoded
+        }
+        guard case .map(let map) = mso, case .utf8String(let docType)? = map["docType"] else { return nil }
+        return docType
+    }
+
+    /// Fail closed: the unsigned envelope's docType must equal the signed one;
+    /// "cannot compare" refuses. Nil means they agree.
+    static func issuerAuthDocTypeRefusal(msoPayload: [UInt8], envelopeDocType: String) -> String? {
+        guard let signed = signedDocType(msoPayload: msoPayload) else {
+            return "the signed MSO has no readable docType to compare the credential's docType with"
+        }
+        return signed == envelopeDocType
+            ? nil
+            : "the credential's docType '\(envelopeDocType)' differs from the signed MSO's '\(signed)'"
     }
 }

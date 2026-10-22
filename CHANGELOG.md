@@ -134,6 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (default no-op) followed by `onFlowError` with the English text "This issuer could
   not be verified as trusted, so the credential was not added." The Swift SDK has no
   per-credential trusted flag, so there is no "stored with `trusted=false`" state.
+  A completion is judged by the issuance epoch its OWN flow started under (the
+  session tags every `flow_start` with it and carries the tag to
+  `FlowCompleteMessage.startTag`), so a flow cancelled before its first progress
+  cannot adopt a newer flow's epoch; a completion that would store credentials or
+  carries a negative report but has no start tag is refused. For mdoc the docType
+  sent to the trust service is checked against the signed MSO's and a mismatch (or
+  no readable signed docType) is untrusted.
   Ports Kotlin SDK #276 (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/276),
   items 1 to 3; the TTL trust-decision cache (item 4) is a separate change.
 - **mdoc trust evaluation requests carry `resource.id == subject.id`.** The issuer

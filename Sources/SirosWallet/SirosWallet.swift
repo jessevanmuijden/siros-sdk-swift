@@ -534,12 +534,6 @@ public final class SirosWallet: @unchecked Sendable {
     /// credentials, delete a newer renewal's source batch or clear a newer
     /// flow's guards. Guarded by `lock`.
     var issuanceEpoch = 0
-    /// The `issuanceEpoch` each engine flow was first seen under (bound on its
-    /// first progress message, while it is the live flow). A completion is
-    /// judged against ITS flow's epoch, not the current one: after flow A is
-    /// cancelled and renewal B started, A's buffered completion must not adopt
-    /// B's epoch. Guarded by `lock`; see `bindFlowEpoch`.
-    var flowEpochs: [String: Int] = [:]
     /// When set, the next `flow_complete` is a renewal's - see
     /// `renewCredential`/`SirosWallet+Notifications.swift`'s `handleFlowComplete`.
     /// Not `private` for the same cross-file-extension-access reason as

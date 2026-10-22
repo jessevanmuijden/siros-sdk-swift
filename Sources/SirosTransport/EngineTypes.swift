@@ -550,6 +550,11 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// when the flow completes; nil when the engine sent none (its permissive
     /// no-PDP mode emits none). Not part of the wire message.
     public var issuerTrust: IssuerTrustReport?
+    /// The tag `WalletEngineSession.startTagProvider` returned when THIS flow's
+    /// `flow_start` was sent (the wallet's issuance epoch then), attached when the
+    /// flow completes; nil if the flow was not started by this session or its
+    /// first progress was never seen. Not part of the wire message.
+    public var startTag: Int?
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp

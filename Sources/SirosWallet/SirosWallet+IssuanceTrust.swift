@@ -16,8 +16,22 @@ extension SirosWallet {
     /// - Returns: true when the completion has been dealt with and the caller
     ///   must stop (the issuance was refused, or the session ended while the
     ///   trust check was awaiting the network); false to carry on and store.
-    func issuanceTrustGateHandled(_ msg: FlowCompleteMessage, offer: CredentialOffer?, epoch: Int) async -> Bool {
+    func issuanceTrustGateHandled(_ msg: FlowCompleteMessage, offer: CredentialOffer?, epoch tag: Int?) async -> Bool {
         let credentials = msg.credentials ?? []
+        // A completion that would store credentials or that carries a negative
+        // report must be able to prove which issuance it belongs to. Without a start
+        // tag it cannot (cannot compare => refuse): it is dropped, nothing stored.
+        let epoch: Int
+        if let tag {
+            epoch = tag
+        } else if !credentials.isEmpty || msg.issuerTrust?.trusted == false {
+            #if canImport(os)
+            logger.error("Flow \(msg.flowId, privacy: .public) completed with no start tag; its issuance cannot be established, dropping it")
+            #endif
+            return true
+        } else {
+            lock.lock(); epoch = issuanceEpoch; lock.unlock()
+        }
         lock.lock(); let generation = sessionGeneration; lock.unlock()
         // Also for a completion with no credentials: an explicit negative engine
         // report refuses regardless of how many credentials came with it, so no
@@ -46,27 +60,6 @@ extension SirosWallet {
         }
         #endif
         return owner
-    }
-
-    /// Records the epoch `flowId` belongs to, the first time the flow is seen.
-    /// Called from the flow-progress handler, i.e. while the flow is live.
-    func bindFlowEpoch(_ flowId: String) {
-        lock.lock(); defer { lock.unlock() }
-        if flowEpochs[flowId] == nil {
-            // Bounded: entries of flows that never complete are only ever needed to
-            // recognise a late completion, so the oldest can go.
-            if flowEpochs.count >= 64, let oldest = flowEpochs.min(by: { $0.value < $1.value })?.key {
-                flowEpochs.removeValue(forKey: oldest)
-            }
-            flowEpochs[flowId] = issuanceEpoch
-        }
-    }
-
-    /// The epoch to judge `flowId`'s completion by, consuming the binding. A flow
-    /// whose progress was never seen (nothing to compare against) falls back to
-    /// the current epoch. Call with `lock` held.
-    func takeFlowEpochLocked(_ flowId: String) -> Int {
-        flowEpochs.removeValue(forKey: flowId) ?? issuanceEpoch
     }
 
     /// Decodes an issued `mso_mdoc` credential and evaluates its issuer; nil

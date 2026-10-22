@@ -69,4 +69,37 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         let msg = await nextComplete(session)
         XCTAssertNil(msg?.issuerTrust)
     }
+
+    // MARK: - Start tags (a flow keeps the tag of ITS flow_start)
+
+    func testAFlowKeepsTheTagOfItsOwnStartEvenIfANewerFlowStartedBeforeItsFirstProgress() async {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.startTags.enqueue(0) // A started under epoch 0 ... and was cancelled
+        session.startTags.enqueue(1) // ... B started under epoch 1 before A's first progress was handled
+        await session.handleMessage(progress(flowId: "A", trusted: false)) // A's first progress arrives first
+        await session.handleMessage(progress(flowId: "B", trusted: true))
+        await session.handleMessage(complete(flowId: "A"))
+        await session.handleMessage(complete(flowId: "B"))
+        var it = session.flowComplete().makeAsyncIterator()
+        let a = await it.next()
+        let b = await it.next()
+        XCTAssertEqual(a?.startTag, 0)
+        XCTAssertEqual(b?.startTag, 1)
+    }
+
+    func testAFlowWhoseProgressWasNeverSeenHasNoTag() async {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.startTags.enqueue(5)
+        await session.handleMessage(complete(flowId: "A"))
+        let msg = await nextComplete(session)
+        XCTAssertNil(msg?.startTag)
+    }
+
+    func testStartTagsQueuedForADeadSocketAreDropped() {
+        let tracker = StartTagTracker()
+        tracker.enqueue(7)
+        tracker.reset()
+        tracker.firstProgress(flowId: "A")
+        XCTAssertNil(tracker.take(flowId: "A"), "a flow of the next socket must not take the dead socket's tag")
+    }
 }
