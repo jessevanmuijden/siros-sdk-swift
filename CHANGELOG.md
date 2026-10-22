@@ -99,6 +99,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The AES block primitive is CommonCrypto on Apple platforms and a FIPS 197 reference elsewhere (CI);
   the unwrap and CBC are built on it. Tests: 12 JWEs from go-jose v4.1.6 (every alg/enc pair, vendored
   with its generator), RFC 7518 Appendix C, RFC 3394, RFC 7516 A.3 and FIPS 197 vectors.
+- **WMP HTTP+SSE transport: SSE event ids, `Last-Event-ID` and replay dedupe.** The
+  transport now parses `text/event-stream` with `SseEventParser` (the `id` field, a
+  persistent last event id, comments, multi-line `data`), sends `Last-Event-ID` when it
+  reconnects, and drops an event whose id it already delivered (`SseReplayFilter`), so a
+  replayed `wmp.flow.complete` is never handled twice. It also splits the byte stream
+  itself (`SseLineSplitter`): `URLSession.AsyncBytes.lines` omits the blank line that
+  ends an event. The parser, splitter and filter are pure and tested on Linux; the
+  transport's use of them is Apple-only and not exercised by a test. The resume cursor advances only when a block's blank line arrives, an empty `id` resets it and is never a dedupe key, one leading byte order mark is ignored per response, and each response starts with clean buffers (a disconnect mid-event never joins two responses' data). An event's
+  `description` never prints its data. The parser reads each line as Unicode scalars (the colon and the one optional
+  space are delimiters even before a combining mark), the replay filter keys ids by their UTF-8 bytes
+  (canonically equivalent but different ids are different events), and an `SseReaderGate` lets only one
+  reader run, so two overlapping `connect()` calls cannot feed one parser from two tasks; a reader touches the parser and the replay filter only inside `ifCurrent`, which holds the gate for the step, and frees the gate and publishes `.disconnected` or `.failed` as one step under the gate lock (a consumer that reconnects at once finds it open, and a stale reader never overwrites its successor's state); a reader is claimed and installed in one step (`start`) and `disconnect()` invalidates it, cancels its task and publishes in one step (`stop`), so a reconnect cannot be cancelled by an earlier disconnect; `.connected` is published only while the reader is still current.
 - **Keystore: per-credential `metadata` in the privatedata container
   (`S.credentials[].metadata`, schema version 4).** An optional array of
   `{"type": <non-empty string>, "value": <any JSON>}` entries, stored exactly as received (first use: an
