@@ -56,6 +56,14 @@ final class WmpRegistry: @unchecked Sendable {
         return resolveHandlers[resolveType]
     }
 
+    /// Stops every profile's in-flight work (session teardown).
+    func shutdownProfiles() {
+        lock.lock()
+        let all = profiles
+        lock.unlock()
+        for case let profile as WmpShutdownProfile in all { profile.shutdown() }
+    }
+
     func allCapabilities() -> [String] {
         lock.lock()
         defer { lock.unlock() }

@@ -88,8 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parks until its sign timeout. `OpenID4xProfile` now registers `sign` and `match`, runs each child
   flow (the handler is given the PARENT flow id, which is what the wallet keys its state by) and
   answers as above, without holding the start request while the user decides. A child that is
-  cancelled (or whose parent is) is cancelled and answers nothing, even if its handler returns
-  normally, and a finished child is released from the peer's tracking. The old progress-step route is
+  cancelled, whose parent is cancelled, completes or fails, or whose session closes (`WmpPeer.close`) is
+  cancelled and answers nothing, even if its handler returns normally, and a finished child is released from the peer's tracking. The old progress-step route is
   left as it was. **`wmp.flow.error` now carries the protocol's numeric code (-31006)**: go-wmp reads
   `code` as an int, so the string codes the profile sent made the whole notification undecodable and
   the refusal was lost; the application code moves to `data.error_code` and the text to `message`.
