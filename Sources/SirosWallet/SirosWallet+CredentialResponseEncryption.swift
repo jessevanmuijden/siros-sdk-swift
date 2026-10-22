@@ -200,7 +200,7 @@ extension SirosWallet {
     ///
     /// Where the transport can say when the notification was handed over, it is awaited, so it precedes the
     /// error answer that follows (the engine registered the notification context before relaying the JWE).
-    private func sendCredentialFailure(flowId: String, notificationId: String?) async {
+    func sendCredentialFailure(flowId: String, notificationId: String?) async {
         guard let notificationId, !notificationId.isEmpty else { return }
         lock.lock(); let notifier = credentialNotifier; lock.unlock()
         if let awaitable = notifier as? AwaitableCredentialNotifier {

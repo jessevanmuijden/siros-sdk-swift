@@ -256,6 +256,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **Blind issuance: a plain completion after an offered key is an error.** When the wallet offered a
+  response-encryption key for a flow and its `flow_complete` / `wmp.flow.complete` does not say the response was
+  encrypted to the wallet (`credential_response_encrypted: true`), the engine held the credentials: the completion is
+  refused, nothing is stored, and the issuer gets `credential_failure` for each notification id the entries carry.
+  Pending responses carrying `org.siros.secret_seed` are refused on every poll, and a response's `credential_metadata`
+  is never carried into the next. Each `credentials[]` entry must be an object with a `credential` member, and its
+  inner value is what is stored (tests pin this).
 - **Review follow-ups (WMP replay, stale sockets, cancellation).** Replayed child answers are claimed under the lock
   before their send is awaited (a second resume cannot resend them), an answer queued by a send that began before a
   resume is retried at once, shutdown releases the routing entries of children with queued answers, and a session
@@ -274,6 +281,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
   kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
   only after a replacement was stored; tests now pin that.
+- **WMP child flows, further review follow-ups.** A child cancelled while its replay send is suspended is not requeued
+  when that send fails; a second resume during a suspended replay that then fails triggers another drain; a redelivered
+  start for a cancelled child does not run its handler again; a child start refused for good (its flow ended, or the
+  profile stopped) releases the route the peer registered for it.
 - **WMP child flows and session end, review follow-ups.** Shutdown is one-shot, so a retired session's close
   cannot run the application's cleanup again after a replacement session has begun. A session created without a
   `resumption_token` now ends at once when its connection is lost (terminal hook, pending requests failed)

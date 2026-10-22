@@ -35,6 +35,14 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // Whether this wallet offered a response-encryption key for the flow, read before the flow's state is dropped.
+        lock.lock(); let offeredKey = credentialResponseKeys[msg.flowId] != nil; lock.unlock()
+        if offeredKey, msg.credentialResponseEncrypted != true {
+            // The engine says the issuer answered in the clear although the wallet's key was offered: the engine holds
+            // the credentials, which engine-blind issuance forbids. Nothing is stored; the issuer is told.
+            await refusePlainCompletion(flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId))
+            return
+        }
         // Taken before `cancelTransactionTasks`, which also drops the flow's response-encryption key.
         let decryptedResponses = takeDecryptedCredentialResponses(flowId: msg.flowId)
         cancelTransactionTasks(flowId: msg.flowId)
@@ -146,6 +154,15 @@ extension SirosWallet {
         }
 
         await restoreReadyState()
+    }
+
+    /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
+    /// for each notification id the entries carry, and the issuance ended locally.
+    func refusePlainCompletion(flowId: String, notificationIds: [String]) async {
+        for id in Set(notificationIds).sorted() where !id.isEmpty {
+            await sendCredentialFailure(flowId: flowId, notificationId: id)
+        }
+        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet")
     }
 
     /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
