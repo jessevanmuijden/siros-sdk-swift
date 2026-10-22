@@ -22,11 +22,11 @@ final class ScaSignFlowTests: XCTestCase {
     ) throws -> SignerScaOutcome {
         try ScaSignFlow.run(
             pluginId: plugin, capability: capability ?? can,
-            promptPin: { trace.prompts += 1; return Data(pin.utf8) },
+            promptPin: { trace.prompts += 1; return SecureBytes(utf8: pin) },
             payload: { factors in trace.payloads += 1; trace.claimed = factors; return Data("signing-input".utf8) },
             sign: { data, givenPin in
                 trace.signs += 1
-                trace.pinGivenToSign = givenPin
+                trace.pinGivenToSign = givenPin.dataCopy()
                 return report(data) ?? ScaSignReport(signature: Data([9]), factors: [remote, pin6], satisfiesTwoCategories: true, shortfall: nil)
             }
         )
@@ -80,7 +80,7 @@ final class ScaSignFlowTests: XCTestCase {
         }
         let t = Trace()
         expectRefusal {
-            _ = try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { Data([0xFF, 0xFE]) },
+            _ = try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { SecureBytes([0xFF, 0xFE]) },
                                     payload: { _ in t.payloads += 1; return Data() }, sign: { _, _ in t.signs += 1; fatalError() })
         }
         XCTAssertEqual([t.payloads, t.signs], [0, 0])
@@ -104,6 +104,25 @@ final class ScaSignFlowTests: XCTestCase {
         }
     }
 
+    /// `run`'s final check used to be "same length and every reported factor is also
+    /// claimed" (count + containment), which a duplicated factor can satisfy despite
+    /// the wrong composition - true SET equality (`Set(report.factors) == Set(expected)`,
+    /// matching siros-sdk-kotlin's `ScaSignSession.requireMatching`:
+    /// `applied.toSet() != declared.toSet()`) tells them apart. `ScaSignFlow.run` itself
+    /// can never actually reach this case through its own two-category guard (duplicating
+    /// one of today's always-two `expected` factors drops the reported category count
+    /// below two, which refuses first) - so this test exercises the comparison rule
+    /// directly, the same way the old and new rules are specified, rather than through
+    /// `run`'s full pipeline.
+    func testCountAndContainmentWouldWronglyAcceptADuplicatedFactorThatSetEqualityRejects() {
+        let claimed = [remote, pin6]
+        let reportedWithADuplicate = [remote, remote] // same length; every element is present in `claimed`
+        let oldCountAndContainmentCheck = reportedWithADuplicate.count == claimed.count
+            && reportedWithADuplicate.allSatisfy { claimed.contains($0) }
+        XCTAssertTrue(oldCountAndContainmentCheck, "demonstrates the old rule's bug: this wrongly looks like a match")
+        XCTAssertNotEqual(Set(reportedWithADuplicate), Set(claimed), "the new rule correctly tells them apart")
+    }
+
     func testAShortfallReportedByTheSignIsRefused() {
         expectRefusal {
             _ = try run(report: { _ in ScaSignReport(signature: Data([1]), factors: [self.remote], satisfiesTwoCategories: false, shortfall: "cached session") })
@@ -116,10 +135,70 @@ final class ScaSignFlowTests: XCTestCase {
 
     func testAnErrorFromThePayloadOrTheSignPropagates() {
         struct Boom: Error {}
-        XCTAssertThrowsError(try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { Data("1234".utf8) },
+        XCTAssertThrowsError(try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { SecureBytes(utf8: "1234") },
                                                   payload: { _ in throw Boom() }, sign: { _, _ in fatalError() })) { XCTAssertTrue($0 is Boom) }
-        XCTAssertThrowsError(try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { Data("1234".utf8) },
+        XCTAssertThrowsError(try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { SecureBytes(utf8: "1234") },
                                                   payload: { _ in Data() }, sign: { _, _ in throw Boom() })) { XCTAssertTrue($0 is Boom) }
+    }
+
+    // MARK: - The supplied PIN is wiped by `run` itself on every exit path
+    //
+    // Each test RETAINS the `SecureBytes` it hands `run`, so `deinit` cannot mask a missing
+    // explicit wipe: the buffer must already be wiped when `run` returns or throws.
+
+    private struct Boom: Error {}
+
+    private func assertWiped(_ pin: SecureBytes, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(pin.isWiped, message, file: file, line: line)
+        XCTAssertEqual(pin.count, 0, message, file: file, line: line)
+        XCTAssertEqual(pin.dataCopy(), Data(), message, file: file, line: line)
+    }
+
+    func testThePinIsWipedAfterASuccessfulSign() throws {
+        let pin = SecureBytes(utf8: "123456")
+        var seenBySign: Data?
+        _ = try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { pin },
+                                payload: { _ in Data([1]) },
+                                sign: { _, p in
+            seenBySign = p.dataCopy()
+            return ScaSignReport(signature: Data([9]), factors: [self.remote, self.pin6], satisfiesTwoCategories: true, shortfall: nil)
+        })
+        XCTAssertEqual(seenBySign, Data("123456".utf8), "the sign still received the live PIN")
+        assertWiped(pin, "wiped on success")
+    }
+
+    func testThePinIsWipedWhenTheSecretIsRejected() {
+        for bytes: [UInt8] in [[], [0xFF, 0xFE]] {
+            let pin = SecureBytes(bytes)
+            expectRefusal {
+                _ = try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { pin },
+                                        payload: { _ in Data() }, sign: { _, _ in fatalError("must not sign") })
+            }
+            assertWiped(pin, "wiped on invalid-secret rejection \(bytes)")
+        }
+    }
+
+    func testThePinIsWipedWhenThePayloadThrows() {
+        let pin = SecureBytes(utf8: "123456")
+        XCTAssertThrowsError(try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { pin },
+                                                 payload: { _ in throw Boom() }, sign: { _, _ in fatalError("must not sign") }))
+        assertWiped(pin, "wiped on payload error")
+    }
+
+    func testThePinIsWipedWhenTheSignThrows() {
+        let pin = SecureBytes(utf8: "123456")
+        XCTAssertThrowsError(try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { pin },
+                                                 payload: { _ in Data() }, sign: { _, _ in throw Boom() }))
+        assertWiped(pin, "wiped on sign error")
+    }
+
+    func testThePinIsWipedWhenTheSignReportMismatchesTheClaim() {
+        let pin = SecureBytes(utf8: "123456")
+        expectRefusal {
+            _ = try ScaSignFlow.run(pluginId: "r2ps", capability: can, promptPin: { pin }, payload: { _ in Data() },
+                                    sign: { _, _ in ScaSignReport(signature: Data([1]), factors: [self.remote], satisfiesTwoCategories: false, shortfall: "x") })
+        }
+        assertWiped(pin, "wiped on a refused sign report")
     }
 
     /// The same boundaries the manager measures (`classify_secret` in siros-wscd-manager).
