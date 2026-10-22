@@ -47,8 +47,10 @@ extension SirosWallet {
         // happens to be current by the time each credential is stored.
         let vctmDocument = activeVctmDocument
         let attestedKeyIds = activeAttestedKeyIds
-        // Read BEFORE any await, together with the state it describes.
-        let epochAtStart = issuanceEpoch
+        // Read BEFORE any await. The epoch is THIS flow's (bound when its first
+        // progress arrived), not the current one: a cancelled flow's buffered
+        // completion must not adopt the epoch of a flow started after it.
+        let epochAtStart = takeFlowEpochLocked(msg.flowId)
         // A completed flow has no further sign_presentation coming - drop
         // its cached DCQL match results (if any; a no-op for an issuance
         // flow, which never populates this map) so it doesn't linger

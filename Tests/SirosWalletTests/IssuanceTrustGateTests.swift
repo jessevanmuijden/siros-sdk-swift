@@ -317,6 +317,30 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertTrue(h.notifier.events.isEmpty)
     }
 
+    func testACancelledFlowsBufferedCompletionDoesNotAdoptTheEpochOfALaterFlow() async {
+        let h = makeHarness()
+        let wallet = h.wallet
+        // Flow A is live: its first progress binds it to the current epoch.
+        wallet.bindFlowEpoch("A")
+        // A is cancelled; renewal B starts and is bound under the NEW epoch.
+        wallet.cancelCurrentFlow()
+        wallet.lock.lock(); wallet.pendingRenewalSourceBatchId = 100; wallet.issuanceInFlight = true; wallet.lock.unlock()
+        wallet.bindFlowEpoch("B")
+        // A's buffered completion (negative report) is only now handled.
+        await wallet.handleFlowComplete(msg: flowComplete(flowId: "A", credentials: [sdJwtCredential], engineTrusted: false))
+
+        XCTAssertTrue(wallet.issuanceInFlight, "B's guard was not cleared by A's refusal")
+        XCTAssertEqual(wallet.pendingRenewalSourceBatchId, 100)
+        XCTAssertTrue(h.listener.untrusted.isEmpty && h.listener.errors.isEmpty && h.listener.completed.isEmpty)
+        XCTAssertTrue(h.notifier.events.isEmpty)
+        let stored = await h.store.getAll()
+        XCTAssertTrue(stored.isEmpty)
+        // B's own completion still works.
+        await wallet.handleFlowComplete(msg: flowComplete(flowId: "B", credentials: [sdJwtCredential], engineTrusted: true))
+        let after = await h.store.getAll()
+        XCTAssertEqual(after.count, 1)
+    }
+
     func testARefusedRenewalKeepsTheOldBatch() async {
         let h = makeHarness()
         let old = StoredCredential(id: 7, format: "vc+sd-jwt", raw: sdJwt(), batchId: 100, instanceId: 0)

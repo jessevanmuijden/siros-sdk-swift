@@ -1192,6 +1192,7 @@ extension SirosWallet {
     }
 
     private func handleFlowProgress(engine: WalletEngineSession, msg: FlowProgressMessage) async {
+        bindFlowEpoch(msg.flowId)
         let payloadDict = msg.payload?.objectValue
 
         // Handle trust evaluation

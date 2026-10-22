@@ -48,6 +48,27 @@ extension SirosWallet {
         return owner
     }
 
+    /// Records the epoch `flowId` belongs to, the first time the flow is seen.
+    /// Called from the flow-progress handler, i.e. while the flow is live.
+    func bindFlowEpoch(_ flowId: String) {
+        lock.lock(); defer { lock.unlock() }
+        if flowEpochs[flowId] == nil {
+            // Bounded: entries of flows that never complete are only ever needed to
+            // recognise a late completion, so the oldest can go.
+            if flowEpochs.count >= 64, let oldest = flowEpochs.min(by: { $0.value < $1.value })?.key {
+                flowEpochs.removeValue(forKey: oldest)
+            }
+            flowEpochs[flowId] = issuanceEpoch
+        }
+    }
+
+    /// The epoch to judge `flowId`'s completion by, consuming the binding. A flow
+    /// whose progress was never seen (nothing to compare against) falls back to
+    /// the current epoch. Call with `lock` held.
+    func takeFlowEpochLocked(_ flowId: String) -> Int {
+        flowEpochs.removeValue(forKey: flowId) ?? issuanceEpoch
+    }
+
     /// Decodes an issued `mso_mdoc` credential and evaluates its issuer; nil
     /// if it cannot be verified (unparseable, no x5chain, bad signature, or a
     /// platform without the Security framework).
