@@ -302,19 +302,30 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
                 promptPin: {
                     guard let provider else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
                     // WscdAuthProvider.requestPin throws only when the user cancels, whatever error type it uses.
-                    do { return try provider.requestPin(pluginId: pluginId ?? "") }
+                    // It returns `Data` (a public protocol host apps implement, and the shape the
+                    // generated FFI callback below needs regardless) - wrapped into a `SecureBytes`
+                    // immediately so everything downstream of this point threads the wipeable type;
+                    // the host's own `Data` is not reachable or wipeable by this SDK (see
+                    // `SecureBytes`'s doc comment on residual exposure).
+                    do { return SecureBytes(try provider.requestPin(pluginId: pluginId ?? "")) }
                     catch { throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt") }
                 },
                 payload: payload,
                 sign: { data, pin in
                     // A fresh user authentication, never a cached session: the PIN just typed is
                     // handed to the plugin once; any further request goes to the user again.
+                    //
+                    // `pin.dataCopy()` is the one unavoidable `Data` copy this call needs: UniFFI's
+                    // generated `FfiConverterData` (see `Generated/siros_wscd_manager.swift`) copies
+                    // these bytes again into its own `RustBuffer` before the call crosses to Rust, so
+                    // by the time `signWithFactors` returns, neither copy is needed - `run`'s `defer`
+                    // wipes the authoritative `SecureBytes` right after this closure returns.
                     let outcome = try self.ffi.signWithFactors(
                         kid: keyId,
                         data: data,
                         algorithm: .es256, // inferred from the key by the manager
                         options: FfiSignOptions(requireFreshUserAuthentication: true, hostVerifiedFactor: nil),
-                        auth: OneShotPinAuthCallback(pin: pin, fallback: provider),
+                        auth: OneShotPinAuthCallback(pin: pin.dataCopy(), fallback: provider),
                         progress: NoOpProgressCallback()
                     )
                     return ScaSignReport(
