@@ -279,6 +279,8 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
     /// kept, and never more than 256 credentials for the flow.
     func testDeferredPollsAreNotRetainedAndTheCredentialCountIsBounded() async throws {
         let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
         let key = try installOwnKey(w, flowId: "rp")
         for _ in 0..<10 {
             let body = #"{"transaction_id":"tx","interval":1,"credential_metadata":{"x":"\#(String(repeating: "m", count: 1000))"}}"#
@@ -286,14 +288,17 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
         w.lock.lock(); let held = w.decryptedCredentialResponses["rp"]?.count ?? 0; w.lock.unlock()
         XCTAssertEqual(held, 0, "ten polls retain nothing")
-        func batch(_ n: Int) -> String {
-            #"{"credentials":["# + (0..<n).map { _ in #"{"credential":"c"}"# }.joined(separator: ",") + "]}"
+        func batch(_ n: Int, notification: String? = nil) -> String {
+            #"{"credentials":["# + (0..<n).map { _ in #"{"credential":"c"}"# }.joined(separator: ",") + "]"
+                + (notification.map { #","notification_id":"\#($0)""# } ?? "") + "}"
         }
         _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(200), to: key), deferred: false)
         do {
-            _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(100), to: key), deferred: true)
+            _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(100, notification: "n-over"), to: key), deferred: true)
             XCTFail("more than 256 credentials for one flow")
         } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse) }
+        XCTAssertEqual(notifier.sent.map(\.event), [CredentialNotificationEvent.failure], "the issuer is told of the rejection")
+        XCTAssertEqual(notifier.sent.first?.notificationId, "n-over")
         XCTAssertEqual(w.takeDecryptedCredentialResponses(flowId: "rp").flatMap(\.credentials).count, 200)
     }
 

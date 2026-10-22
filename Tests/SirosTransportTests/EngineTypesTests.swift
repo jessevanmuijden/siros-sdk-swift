@@ -551,13 +551,25 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertNil(absent.credentialMetadata)
     }
 
-    /// Losing the socket tells the owner once, before a replacement is attempted, so what it keeps for the flows
-    /// that ran on the old socket can go.
+    /// Losing a connection tells the owner once, before a replacement is attempted, so what it keeps for the flows
+    /// that ran on the old socket can go. A session that was told to disconnect says nothing, even when a late
+    /// failure from its old socket arrives after a replacement session has begun.
     func testALostSocketTellsTheOwnerOnceBeforeReconnecting() {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.lastAppToken = "app-token"   // a session that was connected
         var told = 0
         session.onSocketReplaced = { told += 1 }
         session.scheduleReconnect()
         XCTAssertEqual(told, 1)
+    }
+
+    func testALateFailureAfterDisconnectDoesNotTellTheOwner() {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.lastAppToken = "app-token"
+        var told = 0
+        session.onSocketReplaced = { told += 1 }
+        session.disconnect()
+        session.scheduleReconnect()
+        XCTAssertEqual(told, 0)
     }
 }

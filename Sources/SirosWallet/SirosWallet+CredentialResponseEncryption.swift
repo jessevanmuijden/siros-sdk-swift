@@ -165,6 +165,8 @@ extension SirosWallet {
         let heldCount = decryptedCredentialResponses[flowId, default: []].reduce(0) { $0 + $1.credentials.count }
         guard heldCount + response.credentials.count <= 256 else {
             lock.unlock()
+            // Read and rejected: the issuer is owed a credential_failure, ahead of the error answer.
+            await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
             throw CredentialResponseError.malformedResponse
         }
         if !response.credentials.isEmpty { decryptedCredentialResponses[flowId, default: []].append(response) }

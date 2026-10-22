@@ -54,7 +54,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var sessionId: String?
-    private var lastAppToken: String?
+    var lastAppToken: String?
     /// Mints a fresh handshake token on demand - called before every
     /// automatic reconnect attempt instead of replaying `lastAppToken`, which
     /// is otherwise never updated after the initial `connect` and goes stale
@@ -383,8 +383,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     }
 
     func scheduleReconnect() {
-        // Flows that were running on the old socket are gone with it.
-        if reconnectAttempts == 0 { onSocketReplaced?() }
+        // Flows that were running on the old socket are gone with it: told once, and only for a connection that was
+        // lost, not for one this session was told to drop (`disconnect()` clears the token), whose late failure
+        // must not reach a replacement session's state.
+        if reconnectAttempts == 0, lastAppToken != nil { onSocketReplaced?() }
         guard lastAppToken != nil, reconnectAttempts < maxReconnectAttempts else {
             setState(.failed)
             return
