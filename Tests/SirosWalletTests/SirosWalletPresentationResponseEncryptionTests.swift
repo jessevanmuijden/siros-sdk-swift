@@ -161,6 +161,27 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// A malformed JWK member is a bad key, not something to drop: a private `d` of ANY type, or `use` that is
+    /// not a string, must not be filtered away before the key checks.
+    func testMalformedJwkMembersAreRefusedNotDropped() throws {
+        let w = wallet()
+        let good = verifierJwk.mapValues { AnyCodable.string($0 as? String ?? "") }
+        func attempt(_ extra: [String: AnyCodable]) throws {
+            _ = try w.encryptedPresentationResponse(
+                parts: [(nil, "t")],
+                encryption: ResponseEncryptionRequest(jwk: good.merging(extra) { _, new in new }, alg: "ECDH-ES", enc: "A128GCM"),
+                state: nil, verifiedRequest: VerifiedRequest(clientId: "c", responseMode: "direct_post.jwt")
+            )
+        }
+        XCTAssertNoThrow(try attempt([:]))
+        XCTAssertNoThrow(try attempt(["key_ops": .array([.string("deriveKey")])]), "unrelated members are not judged")
+        XCTAssertThrowsError(try attempt(["d": .int(1)]), "a private key of any type")
+        XCTAssertThrowsError(try attempt(["d": .string("AAAA")]))
+        XCTAssertThrowsError(try attempt(["use": .array([.string("enc")])]), "use must be a string")
+        XCTAssertThrowsError(try attempt(["crv": .int(256)]))
+        XCTAssertThrowsError(try attempt(["kid": .object_([:])]))
+    }
+
     func testOnlyAVerifiedDirectPostJwtRequestIsEncrypted() async throws {
         let w = wallet()
         for mode in ["direct_post", "fragment", "query"] {

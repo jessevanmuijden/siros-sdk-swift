@@ -27,6 +27,13 @@ extension SirosWallet {
         guard verifiedRequest?.responseMode == "direct_post.jwt" else {
             throw PresentationResponseError()
         }
+        // The JWK's own members are read as they arrived: a known member of the wrong type, or ANY `d`, is a bad
+        // key and is refused here rather than dropped before the key checks can see it.
+        let keyMembers: Set<String> = ["kty", "crv", "x", "y", "kid", "use", "alg"]
+        guard encryption.jwk["d"] == nil,
+              encryption.jwk.allSatisfy({ !keyMembers.contains($0.key) || $0.value.stringValue != nil }) else {
+            throw PresentationResponseError()
+        }
         do {
             return try JarmResponse.encrypt(
                 vpToken: VpTokenValue.from(parts: parts), state: state, audience: verifiedRequest?.clientId,
