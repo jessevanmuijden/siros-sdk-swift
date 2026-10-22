@@ -275,6 +275,35 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// A decrypt whose flow was cancelled while its receiver was suspended fails later, after another issuance has
+    /// begun: its failure must not reset the new issuance's guards, key or state.
+    func testALateFailureOfACancelledFlowLeavesTheNextIssuanceAlone() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        struct Boom: Error {}
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        try installKey(w, flowId: "A")
+        let gate = Gate()
+        w.credentialMetadataReceiver = { _, _, _ in
+            while await !gate.isOpen { await Task.yield() }
+            throw Boom()
+        }
+        let a = Task { try await w.wmpDecryptCredentialResponse(flowId: "A", params: SignSubFlowParams(action: "decrypt_credential_response", jwe: Self.jwe, deferred: false)) }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        w.cancelCurrentFlow()                       // issuance A is cancelled ...
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        try installKey(w, flowId: "B")              // ... and B begins
+        await gate.release()
+        do { _ = try await a.value; XCTFail("A's decrypt fails") } catch { /* reported to the engine for A only */ }
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is not reset by A's late failure")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        XCTAssertTrue(listener.errors.isEmpty, "B is not failed")
+    }
+
     /// Repeated deferred polls do not pile up a metadata tree each: only a response that carries credentials is
     /// kept, and never more than 256 credentials for the flow.
     func testDeferredPollsAreNotRetainedAndTheCredentialCountIsBounded() async throws {

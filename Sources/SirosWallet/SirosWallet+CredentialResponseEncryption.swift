@@ -246,6 +246,9 @@ extension SirosWallet {
     /// `decrypt_credential_response` on the engine WebSocket: answer with the control fields and
     /// nothing else; a failure answers with an error that carries no plaintext and drops the flow's state.
     func answerDecryptCredentialResponse(engine: any SignResponseSender, msg: SignRequestMessage) async {
+        // Taken before the awaits: a failure that arrives after this flow was cancelled (and perhaps another begun)
+        // is answered to the engine, but must not touch the wallet-wide state of whatever runs now.
+        let generation = credentialResponseGeneration(flowId: msg.flowId)
         do {
             let control = try await decryptCredentialResponse(
                 flowId: msg.flowId, jwe: msg.params.jwe, deferred: msg.params.deferred ?? false
@@ -257,16 +260,18 @@ extension SirosWallet {
         } catch {
             if Task.isCancelled || error is CancellationError { return }
             let code = (error as? CredentialResponseError)?.wmpErrorCode ?? "DECRYPT_FAILED"
-            discardCredentialResponseState(flowId: msg.flowId)
+            let current = generation == credentialResponseGeneration(flowId: msg.flowId)
+            if current { discardCredentialResponseState(flowId: msg.flowId) }
             engine.sendSignResponse(
                 flowId: msg.flowId, error: "credential response could not be taken", errorCode: code, messageId: msg.messageId
             )
-            reportSignFailure(flowId: msg.flowId, message: code)
+            if current { reportSignFailure(flowId: msg.flowId, message: code) }
         }
     }
 
     /// The same action over WMP; the profile reports a failure as a flow error carrying only the code.
     func wmpDecryptCredentialResponse(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
+        let generation = credentialResponseGeneration(flowId: flowId)
         do {
             let control = try await decryptCredentialResponse(flowId: flowId, jwe: params.jwe, deferred: params.deferred ?? false)
             return SignSubFlowResult(
@@ -277,6 +282,8 @@ extension SirosWallet {
             if error is CancellationError || Task.isCancelled { throw error }
             // The profile's flow error goes to the peer only; the wallet's own terminal handling is here.
             let code = (error as? CredentialResponseError) ?? CredentialResponseError.decryptFailed
+            // A flow that was cancelled meanwhile (and perhaps replaced) is not failed again here.
+            if generation != credentialResponseGeneration(flowId: flowId) { throw code }
             await failIssuanceLocally(flowId: flowId, message: code.wmpErrorCode ?? "DECRYPT_FAILED")
             throw code
         }
