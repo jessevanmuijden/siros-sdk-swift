@@ -529,6 +529,37 @@ final class OpenID4xProfileTests: XCTestCase {
         ctx.releaseBlocked()
     }
 
+    /// A send that fails while the connection stays healthy (a failed POST on a live stream) brings no resume event:
+    /// the queued answer is retried after a bounded backoff, without `sessionResumed()` and without running the
+    /// handler again.
+    func testAFailedSendIsRetriedWithoutAResumeEvent() async throws {
+        let ctx = ScriptedPeerContext([.fail, .succeed])
+        let counter = Counter()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in counter.bump(); return SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [10, 10]
+        ))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: signStart())
+        for _ in 0..<300 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.sent, ["c1"])
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    /// The retries are bounded: after the last one the answer waits for the next resume.
+    func testRetriesAreBoundedAndTheAnswerWaitsForAResume() async throws {
+        let ctx = ScriptedPeerContext([.fail, .fail, .fail, .succeed])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [10, 10]
+        ))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: signStart())
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(ctx.sent.isEmpty, "three failures: the original and two retries; no more timed retries")
+        profile.sessionResumed()
+        for _ in 0..<300 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.sent, ["c1"])
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))

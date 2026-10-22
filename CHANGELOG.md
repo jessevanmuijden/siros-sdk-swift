@@ -262,6 +262,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
   kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
   only after a replacement was stored; tests now pin that.
+- **WMP child answers: failed sends are retried, and the queue handoff is atomic.** A send that fails on a healthy
+  connection (a failed POST on a live stream) brings no resume event; the queued answer is now retried after a bounded
+  backoff (`OpenID4xConfig.sendRetryDelaysMs`, default 1/2/4/8 s), then waits for the next resume. The task and
+  cancellation state of a child whose answer is queued are removed in the same critical section that queues it.
 - **WMP child flows: completed children are remembered, and a replaying child is cancelled like any other.** A start
   redelivered after the child's answer was sent (original send or replay) runs nothing. A parent ending while a replay
   send is suspended releases the claimed child's route at once, and the child's cancellation marker lives until that
@@ -298,8 +302,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers as above, without holding the start request while the user decides. A child that is
   cancelled, whose parent is cancelled, completes or fails, or whose session closes (`WmpPeer.close`) is
   cancelled, released from the peer's tracking at once (not when its handler returns) and answers nothing,
-  even if its handler returns normally; after `shutdown()` no child is started and a queued child never enters its handler; a cancel made locally (`WmpPeer.cancelFlow`) stops the flow here at once; a failing match child reports `MATCH_ERROR`; a child start for a parent that already ended, and a redelivered start for a child already running, are dropped; `shutdown()` also calls the application's `onShutdown`, and a finished child is released from the peer's tracking. The old progress-step route is
-  left as it was. **`wmp.flow.error` now carries the protocol's numeric code (-31006)**: go-wmp reads
+  even if its handler returns normally; after `shutdown()` no child is started and a queued child never enters its handler; a cancel made locally (`WmpPeer.cancelFlow`) stops the flow here at once; a failing match child reports `MATCH_ERROR`; a child start for a parent that already ended, and a redelivered start for a child already running, are dropped; `shutdown()` also calls the application's `onShutdown`, and a finished child is released from the peer's tracking. The old progress-step route no longer runs sign or match handlers (see the entry below; no shim). **`wmp.flow.error` now carries the protocol's numeric code (-31006)**: go-wmp reads
   `code` as an int, so the string codes the profile sent made the whole notification undecodable and
   the refusal was lost; the application code moves to `data.error_code` and the text to `message`.
   An integer `code` from the peer now decodes (it was a decode failure).
