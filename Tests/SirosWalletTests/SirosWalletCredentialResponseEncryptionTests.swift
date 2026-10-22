@@ -389,6 +389,38 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertNotNil(sender.sent.last?.credentialResponseEncryptionJwk)
     }
 
+    /// The regression class: an "ended" check that outlives a normal login would refuse every request after it.
+    /// After a session ended, a new connection on EITHER transport (the connect itself need not succeed) clears
+    /// the ended state before anything else runs, so requests are served again, and nothing later sets it back.
+    func testRequestsAreServedAfterANewConnectionOnBothTransports() async throws {
+        for transport in ["engine", "wmp"] {
+            let w = SirosWallet(
+                config: WalletConfig(backendUrl: "http://127.0.0.1:1", engineUrl: "http://127.0.0.1:1", credentialStore: InMemoryCredentialStore()),
+                authProvider: StubAuthProvider(), keystore: StubKeystoreManager(), accountRegistry: .inMemory()
+            )!
+            w.endSessionLocally()                       // logout: the session has ended
+            XCTAssertTrue(w.sessionHasEnded)
+            let connect = Task { () -> Void in
+                if transport == "engine" { try? await w.connectEngine(appToken: "t") } else { try? await w.connectViaWmp(appToken: "t") }
+            }
+            for _ in 0..<200 where w.sessionHasEnded { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertFalse(w.sessionHasEnded, "\(transport): the new connection clears the ended state")
+            if transport == "engine" {
+                let engine = try XCTUnwrap(w.engineSession)
+                try await w.answerGenerateProof(engine: engine, msg: try keyOnlyProofMessage(flowId: "ok-\(transport)"))
+            } else {
+                let result = try await w.wmpGenerateProof(flowId: "ok-\(transport)", params: SignSubFlowParams(
+                    action: "generate_proof", credentialResponseEncryption: CredentialResponseEncryptionRequest(alg: "ECDH-ES", enc: "A256GCM", required: true)
+                ))
+                XCTAssertNotNil(result.credentialResponseEncryptionJwk)
+            }
+            w.lock.lock(); let has = w.credentialResponseKeys["ok-\(transport)"] != nil; w.lock.unlock()
+            XCTAssertTrue(has, "\(transport): a request after a normal connection is served")
+            connect.cancel()
+            w.destroy()
+        }
+    }
+
     /// A request that arrives on a superseded engine session is dropped: no key, no answer.
     func testARequestFromASupersededEngineSessionIsDropped() async throws {
         let w = wallet()
