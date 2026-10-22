@@ -84,6 +84,8 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         sender: String? = nil,
         capabilitiesOffered: [String: AnyCodable]? = nil
     ) async throws {
+        // Before `create`: it starts the disconnect monitor, so a loss right after it must find the hooks.
+        installSessionHooks()
         try await session.create(authToken: authToken, sender: sender, capabilitiesOffered: capabilitiesOffered)
         startDispatch()
     }
@@ -164,10 +166,14 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         registry.shutdownProfiles()
     }
 
-    private func startDispatch() {
+    private func installSessionHooks() {
         // A session that ends for good (reconnects exhausted, or closed) ends the handlers running for it, whether
         // or not anyone calls `close()`. A hook, not a reader of `stateStream`: that stream belongs to the host.
         session.onTerminal = { [weak self] in self?.registry.shutdownProfiles() }
+        session.onResumed = { [weak self] in self?.registry.resumeProfiles() }
+    }
+
+    private func startDispatch() {
         Task { [weak self] in
             guard let self else { return }
             for await msg in self.session.notifications() {

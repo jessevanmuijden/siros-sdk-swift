@@ -64,6 +64,14 @@ final class WmpRegistry: @unchecked Sendable {
         for case let profile as WmpShutdownProfile in all { profile.shutdown() }
     }
 
+    /// Tells every profile the session resumed after a loss.
+    func resumeProfiles() {
+        lock.lock()
+        let all = profiles
+        lock.unlock()
+        for case let profile as WmpResumeProfile in all { profile.sessionResumed() }
+    }
+
     func allCapabilities() -> [String] {
         lock.lock()
         defer { lock.unlock() }

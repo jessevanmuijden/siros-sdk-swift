@@ -87,3 +87,9 @@ public protocol WmpShutdownProfile: AnyObject {
     /// Cancel everything in flight and answer nothing more.
     func shutdown()
 }
+
+/// A profile that holds answers it could not send while the connection was down.
+public protocol WmpResumeProfile: AnyObject {
+    /// The session resumed: send what could not be sent.
+    func sessionResumed()
+}
