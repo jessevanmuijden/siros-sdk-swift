@@ -39,6 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verbatim copy of privatedata-spec `test-vectors/` at pull request 9, head
   `64315a5eae50e08a93772488217bbc913c82dd56`, with a recorded source and a
   digest check (`vectors.PROVENANCE.txt`, `vectors.SHA256SUMS`).
+- **Keystore: per-credential `metadata` in the privatedata container
+  (`S.credentials[].metadata`, schema version 4).** An optional array of
+  `{"type": <non-empty string>, "value": <any JSON>}` entries, stored exactly as received (first use: an
+  issuer-delivered `org.siros.secret_seed`; per privatedata-spec section 5A.2 one entry per response-level
+  `credential_metadata` member, `value` the member's object verbatim, not a string; members of an entry
+  beyond `type`/`value` are kept). `JweKeystore` (and `WscdKeystoreAdapter`) gain
+  `credentialMetadata(id:)` and `setCredentialMetadata(id:_:)`. What is stored is an independent copy, and
+  so is what the accessor returns. The container is always written at `S.schemaVersion` 4 (the member is a
+  version 4 one), a container of a schema this build must not rewrite refuses `setCredentialMetadata` with
+  `KeystoreError.unsupportedSchemaVersion`, and `null` or `[]` is never written. The member is the keystore's
+  source of truth once unlocked: loaded with the container, replaced by the setter, and removed with the
+  credential (`deleteCredential`, `clearCredentials`, `lock`). EVERY successful replacement of the container
+  (a current one, a legacy one with no `S`, a first-time empty one) starts from no metadata. It is kept apart
+  from `StoredCredential.metadata`, which is display metadata and is not persisted in the container. A
+  malformed (non-array) `metadata` is written back verbatim. **Older clients drop the `metadata` member the
+  next time they rewrite the container**, which is accepted for this change.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
