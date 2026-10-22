@@ -228,6 +228,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **WMP: flow actions and trust answers now match go-wmp, and the old sign/match progress route is gone
+  (no shim).** `trust_result` put `trusted`, `framework` and `reason` next to `action`; go-wmp's
+  `FlowActionParams` reads them under `params`, so the engine saw an empty payload. They are sent under
+  `params`. A trust progress is answered only when the engine marks it `trust_evaluation_required`
+  (issuer `evaluating_trust`, verifier `evaluating_verifier_trust`, new `VPStep.evaluatingVerifierTrust`);
+  the informational progress under the same step is passed to `onProgress` instead of being answered.
+  `sign_request` / `match_request` / `generating_proof` / `matching_credentials` progress no longer runs
+  the sign or match handler: the engine starts those as child flows. Verified against go-wmp and the Kotlin
+  SDK's equivalent change only, not a live engine.
 - **WMP: the wallet answered the orchestrator's `sign` and `match` requests on a route the orchestrator
   never reads.** The orchestrator (go-wallet-backend, WMP openid4x section 3.1.5) starts them as CHILD
   flows (`wmp.flow.start`, `flow_type` `sign` or `match`, the issuance or presentation in

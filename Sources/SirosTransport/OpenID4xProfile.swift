@@ -40,6 +40,7 @@ public enum VPStep {
     public static let matchingCredentials = "matching_credentials"
     public static let awaitingConsent = "awaiting_consent"
     public static let generatingPresentation = "generating_presentation"
+    public static let evaluatingVerifierTrust = "evaluating_verifier_trust"
 }
 
 // MARK: - Action Constants
@@ -586,9 +587,8 @@ public struct OpenID4xConfig: @unchecked Sendable {
 
 // MARK: - OpenID4x Profile Implementation
 
-private let stepSignRequest = "sign_request"
-private let stepMatchRequest = "match_request"
-private let stepTrustEvaluation = "trust_evaluation_required"
+/// The member the engine sets on a trust progress that wants an answer; its informational progress lacks it.
+private let trustEvaluationRequired = "trust_evaluation_required"
 
 /// OpenID4x WMP profile for OID4VCI and OID4VP flows.
 ///
@@ -709,14 +709,13 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         let step = params.step
         let payload = params.payload
 
-        switch step {
-        case stepSignRequest, VCIStep.generatingProof:
-            await handleSignRequest(flowId: flowId, payload: payload)
-        case stepMatchRequest, VPStep.matchingCredentials:
-            await handleMatchRequest(flowId: flowId, payload: payload)
-        case stepTrustEvaluation, VCIStep.evaluatingTrust:
+        // Signing and matching arrive as child flows (`startFlow`), not as progress. Trust is the one progress the
+        // wallet answers, and only when the engine marks it: issuer trust is `evaluating_trust`, verifier trust
+        // `evaluating_verifier_trust`, and both also send informational progress under the same step, which must
+        // not be answered (an early answer could satisfy the engine's later wait).
+        if wantsTrustAnswer(payload), step == VCIStep.evaluatingTrust || step == VPStep.evaluatingVerifierTrust {
             await handleTrustEvaluation(flowId: flowId, payload: payload)
-        default:
+        } else {
             await config.onProgress?(flowId, step, payload)
         }
     }
@@ -785,45 +784,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
 
     // MARK: - Sub-flow Handlers
 
-    private func handleSignRequest(flowId: String, payload: AnyCodable?) async {
-        guard let handler = config.onSignRequest else { return }
-
-        guard let payload else {
-            await sendFlowError(flowId: flowId, code: "INVALID_PARAMS", message: "sign_request missing payload")
-            return
-        }
-        let signParams: SignSubFlowParams
-        do {
-            let data = try JSONEncoder().encode(payload)
-            signParams = try JSONDecoder().decode(SignSubFlowParams.self, from: data)
-        } catch {
-            await sendFlowError(flowId: flowId, code: "INVALID_PARAMS", message: "sign_request payload decode failed: \(error.localizedDescription)")
-            return
-        }
-
-        do {
-            let result = try await handler(flowId, signParams)
-            await sendSignResponse(flowId: flowId, result: result)
-        } catch {
-            // An error that names its code is reported with that code and nothing
-            // else: no developer text goes to the peer.
-            if let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode {
-                await sendFlowError(flowId: flowId, code: code, message: code)
-            } else {
-                await sendFlowError(flowId: flowId, code: "SIGN_ERROR", message: error.localizedDescription)
-            }
-        }
-    }
-
-    private func handleMatchRequest(flowId: String, payload: AnyCodable?) async {
-        guard let handler = config.onMatchRequest else { return }
-
-        do {
-            let result = try await handler(flowId, payload)
-            await sendMatchResponse(flowId: flowId, result: result)
-        } catch {
-            await sendFlowError(flowId: flowId, code: "MATCH_ERROR", message: error.localizedDescription)
-        }
+    private func wantsTrustAnswer(_ payload: AnyCodable?) -> Bool {
+        guard case .object_(let members)? = payload, case .bool(true)? = members[trustEvaluationRequired] else { return false }
+        return true
     }
 
     private func handleTrustEvaluation(flowId: String, payload: AnyCodable?) async {
@@ -876,14 +839,6 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         return params
     }
 
-    private func sendSignResponse(flowId: String, result: SignSubFlowResult) async {
-        guard let peer else { return }
-        var params = signResponseMembers(result)
-        params["flow_id"] = .string(flowId)
-        params["action"] = .string("sign_response")
-        try? await peer.notify(method: WmpMethods.flowAction, params: params)
-    }
-
     private func matchResponseMembers(_ result: MatchResult) -> [String: AnyCodable] {
         let matchArray = result.matches.map { match -> [String: AnyCodable] in
             var dict: [String: AnyCodable] = [
@@ -903,36 +858,14 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         return params
     }
 
-    private func sendMatchResponse(flowId: String, result: MatchResult) async {
-        guard let peer else { return }
-        var params = matchResponseMembers(result)
-        params["flow_id"] = .string(flowId)
-        params["action"] = .string("match_response")
-        try? await peer.notify(method: WmpMethods.flowAction, params: params)
-    }
-
     private func sendTrustResult(flowId: String, result: TrustResult) async {
         guard let peer else { return }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "action": .string("trust_result"),
-            "trusted": .bool(result.trusted),
-        ]
-        if let framework = result.framework { params["framework"] = .string(framework) }
-        if let reason = result.reason { params["reason"] = .string(reason) }
-        try? await peer.notify(method: WmpMethods.flowAction, params: params)
-    }
-
-    private func sendFlowError(flowId: String, code: String, message: String?) async {
-        guard let peer else { return }
-        // The wire `code` is the protocol's number (go-wmp reads an int); the application's code is
-        // `data.error_code` and the text is `message`.
-        let params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "code": .int(FlowErrorParams.flowErrorCode),
-            "message": .string(message ?? code),
-            "data": .object_(["error_code": .string(code)]),
-        ]
-        try? await peer.notify(method: WmpMethods.flowError, params: params)
+        // go-wmp reads the action's members under `params`, not next to `action`.
+        var members: [String: AnyCodable] = ["trusted": .bool(result.trusted)]
+        if let framework = result.framework { members["framework"] = .string(framework) }
+        if let reason = result.reason { members["reason"] = .string(reason) }
+        try? await peer.notify(method: WmpMethods.flowAction, params: [
+            "flow_id": .string(flowId), "action": .string("trust_result"), "params": .object_(members),
+        ])
     }
 }
