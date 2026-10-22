@@ -59,6 +59,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
+- **`zkp_req` (nym_auth rulebook v0.4): planner, unsatisfiable rules, strict CBOR response validator,
+  `proof_time`, prefixed `verifier_id`.** `ZkpReqPlanner` reads the v0.4 DCQL names (`zkp_req`, `_req`,
+  `fn_id`, `return`, `meta.source_format`, `vp_formats_supported.zkp_req` with `system_id_values` and
+  `proof_system_values`); `ZkpReqUnsatisfiable` is the rulebook's request-only rules (`pseudonym` with
+  `ver` and `prf`, one `age_check` of at least 365 days, `verifier_context`, holder binding).
+  `ZkpReqResponseValidator` checks the base64url CBOR `ZkpPresentation` `{system_id, proof,
+  issuer_key_set (at most 8 DER certificates of at most 4096 bytes), proof_time, results}` with its own
+  strict CBOR reader (definite lengths only, duplicate keys refused structurally, depth 16) that walks the
+  raw bytes and its own JSON reader that keeps duplicate members. `ZkpReqProofTime` is the exact 20-byte
+  `YYYY-MM-DDThh:mm:ssZ` form (shape first, parsed only to settle that the instant is real) with the verifier
+  tolerance helper (recommended 60 s skew, 600 s age: the verifier's to configure). The time is the PROVER's;
+  nothing reads a clock here. `ZkpReqPresentationBuilder` encodes a presentation and returns a `vp_token` only
+  after the validator accepts it. `ZkpReqVerifierId` forms the PREFIXED `verifier_id`
+  (`x509_san_dns:<dns>`, `semantic_id:<id>`) whose SHA-256 is `verifier_input`. Tested against the 241
+  vectors of siros-dc-matcher 93047bc (digest 9f482d7a...), verbatim. Supersedes the JSON `circuit_zk`
+  response shape. Not wired into the wallet; the prover seam still refuses.
+- **`DeliveredSecretReceipt`: the wallet's side of delivered secrets (privatedata-spec 5A).**
+  `receive` applies the rules to a Credential Response that carries
+  `org.siros.secret_seed`: refused when the response is not JWE-encrypted, is a deferred
+  response, has no `notification_id`, has a malformed member (1 to 8 namespaces of 1 to
+  64 bytes, not `namespaces`, each seed 32 lowercase hex), has a non-object
+  `credential_metadata`, or fails the commitment (`SHA256(seed) == ssc` for the designated
+  namespace, constant time). It returns the `metadata` entries to store in each credential
+  (in the order received), the display members WITHOUT the seed (strip before merge) and
+  the seeds for the secret store only; `mergedDisplayMetadata` merges the stripped response
+  over the issuer metadata and `advertisement` validates the issuer's namespace-names-only
+  advertisement. Pure; the result and errors never print a seed. Tested against the
+  privatedata-spec 1b796d2 delivered-secret vectors, verbatim. Not wired into the wallet yet.
+- **`circuit_zk` response shape: `CircuitZkX5Chain` and `CircuitZkResponseValidator`.** The
+  presentation now carries `x5chain`, the holder-supplied issuer chain: the credential's own
+  Document Signer chain from `issuerAuth`'s unprotected header (COSE label 33), leaf first,
+  padded STANDARD base64 of each DER certificate, at most 8 certificates and 4096 bytes each
+  (a chain that breaks a limit is never built). `CircuitZkResponseValidator` checks the shape of a
+  `circuit_zk` entry in a `vp_token` and its binding to the request (offer, handles, result
+  shapes; a JSON `null` is a type error everywhere, duplicates are judged on the raw text,
+  unknown functions and members are refused) and is run by a wallet on the response it built.
+  Tested against the 80 shared vectors of siros-dc-matcher 932b07a, copied verbatim. The
+  verification time `T` is not part of this change. Not wired into the wallet.
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1
@@ -282,6 +320,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **A refusal's cleanup no longer outlives its issuance.** When a plain completion is refused after the wallet offered a
+  key, the `credential_failure` send is awaited; if that issuance was cancelled and another began meanwhile, the
+  cleanup (and the restore of the ready state after the awaited store read) runs only if the refused flow still owns the
+  state, decided under the wallet lock. Transaction-bearing `direct_post.jwt` presentations are covered end to end: the
+  `response_jwe` decrypts to the query-grouped `vp_token`, and a response that cannot be built after signing returns
+  nothing and is not recorded as consented.
 - **Presentation encryption: the top-level `response_mode` counts too.** A `direct_post.jwt` there, with neither
   `verified_request` nor `response_encryption`, is refused on both transports instead of answered with a plaintext
   `vp_token`. The transaction-data end-to-end fixtures now use plain `direct_post` for their KB-JWT contract checks.
@@ -291,6 +335,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The JARM JWE header no longer sets `cty: JWT` (the plaintext is a JSON claims set). A malformed `verified_request`
   or `state` on a sign request is `INVALID_PARAMS` instead of being read as absent, which with `response_encryption`
   omitted would have answered a `direct_post.jwt` request with a plaintext `vp_token`.
+- **Blind issuance: frames and requests of replaced or lost sockets, failed and cancelled flows.** Each receive loop
+  labels the frames it delivers with ITS socket's generation, and a frame a replaced socket delivers late is dropped
+  before dispatch. A lost socket advances the generation at once (during the backoff, and when retries are exhausted
+  and no replacement opens), so requests buffered from it are refused. `reportSignFailure` and `cancelCurrentFlow()`
+  mark the flow ended, so a buffered `generate_proof` for it neither recreates its key nor is answered; a decrypt for
+  an ended flow is answered `NO_RESPONSE_KEY`.
 - **Blind issuance: buffered requests and replaying children.** Each WebSocket sign request carries the socket
   generation it was received on (`SignRequestMessage.socketGeneration`, stamped by the session, not on the wire); a
   `generate_proof` / `decrypt_credential_response` buffered across a same-object reconnect is dropped before it
@@ -322,6 +372,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
   kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
   only after a replacement was stored; tests now pin that.
+- **WMP child answers: the retry budget is per answer, and cancelled replays leave no marker.** The timed-retry budget
+  belongs to each queued answer (cleared when it is sent, ends, or the session resumes), so an answer that used its
+  retries up cannot starve the next. A replay's cancellation marker is removed when its send finishes whether or not its
+  parent is still in the bounded ended-flow list, so markers cannot accumulate over a long session.
 - **WMP child answers: failed sends are retried, and the queue handoff is atomic.** A send that fails on a healthy
   connection (a failed POST on a live stream) brings no resume event; the queued answer is now retried after a bounded
   backoff (`OpenID4xConfig.sendRetryDelaysMs`, default 1/2/4/8 s), then waits for the next resume. The task and

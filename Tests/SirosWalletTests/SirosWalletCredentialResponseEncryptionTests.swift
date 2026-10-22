@@ -522,6 +522,24 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         engine.disconnect()
     }
 
+    /// After a local failure (`reportSignFailure`) or `cancelCurrentFlow()` a buffered key-only proof request for that
+    /// flow is refused: no key and no reply.
+    func testABufferedProofRequestAfterAFailureOrACancelIsRefused() async throws {
+        for how in ["failure", "cancel"] {
+            let w = wallet()
+            let sender = RecordingSender()
+            if how == "failure" {
+                w.reportSignFailure(flowId: "bf", message: "decrypt failed", notifyError: false)
+            } else {
+                w.setState(.flowActive(userId: "u", displayName: nil, flowId: "bf", flowType: "oid4vci", status: "active", credentials: []))
+                w.cancelCurrentFlow()
+            }
+            try await w.answerGenerateProof(engine: sender, msg: try keyOnlyProofMessage(flowId: "bf"))
+            XCTAssertTrue(sender.sent.isEmpty, "\(how): no reply")
+            w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty, "\(how): no key"); w.lock.unlock()
+        }
+    }
+
     /// A buffered `generate_proof` for a flow that already ended is rejected: no key, no reply.
     func testABufferedProofRequestForAnEndedFlowIsRejected() async throws {
         let w = wallet()
@@ -913,6 +931,31 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             let stored = await w.credentialStore.getAll()
             XCTAssertTrue(stored.isEmpty, "\(transport): nothing is stored")
         }
+    }
+
+    /// The refusal's `credential_failure` awaits a transport send; if issuance A is cancelled and issuance B begins
+    /// meanwhile, A's late cleanup must not reset B's guards, key or state.
+    func testALateRefusalOfACancelledIssuanceLeavesTheNextIssuanceAlone() async throws {
+        let w = wallet()
+        w.credentialNotifier = SlowAwaitableNotifier()                     // the send takes 80 ms
+        try installKey(w, flowId: "A")
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "A", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = ["type": "flow_complete", "flow_id": "A", "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-1"]]]
+        let message = try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
+        let refusing = Task { await w.handleFlowComplete(msg: message) }
+        try await Task.sleep(nanoseconds: 20_000_000)                      // the notification is in flight
+        w.cancelCurrentFlow()                                              // A is cancelled ...
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        try installKey(w, flowId: "B")                                     // ... and B begins
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
+        await refusing.value
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is not reset by A's late cleanup")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
+        XCTAssertEqual(flowId, "B")
     }
 
     // MARK: - flow_complete pairing

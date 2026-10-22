@@ -102,7 +102,7 @@ extension SirosWallet {
         return credentialResponseGenerationLocked(flowId: flowId)
     }
 
-    private func credentialResponseGenerationLocked(flowId: String) -> [Int] {
+    func credentialResponseGenerationLocked(flowId: String) -> [Int] {
         [credentialResponseEpoch, flowEndSeq[flowId] ?? 0]
     }
 
@@ -306,6 +306,9 @@ extension SirosWallet {
         do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration) } catch {
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
+            } else if error as? CredentialResponseError == .flowEnded {
+                // The flow's key is gone with the flow: a decrypt is answered (the engine waits for it), allocating nothing.
+                engine.sendSignResponse(flowId: msg.flowId, error: "credential response could not be taken", errorCode: CredentialResponseError.noKey.wmpErrorCode, messageId: msg.messageId)
             }
             return
         }
@@ -354,14 +357,24 @@ extension SirosWallet {
 
     /// Local terminal handling of a flow the wallet is failing itself: drop its response state, end the
     /// issuance and tell the listener.
-    func failIssuanceLocally(flowId: String, message: String) async {
+    ///
+    /// - Parameter ifGeneration: when given, the cleanup runs only if the flow's generation is still this one, decided
+    ///   under the wallet lock together with ending the flow; otherwise a cancellation (or another issuance) owns the
+    ///   state now and nothing here touches it.
+    func failIssuanceLocally(flowId: String, message: String, ifGeneration: [Int]? = nil) async {
+        if let ifGeneration {
+            lock.lock()
+            guard ifGeneration == credentialResponseGenerationLocked(flowId: flowId) else { lock.unlock(); return }
+            flowEndSeq[flowId, default: 0] += 1
+            lock.unlock()
+        }
         cancelTransactionTasks(flowId: flowId)
         discardCredentialResponseState(flowId: flowId)
         resetIssuanceGuards()
         lock.lock(); let listener = eventListener; lock.unlock()
         listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil)
         // A wallet that was flow-active is ready again: the issuance is over.
-        await restoreReadyState()
+        await restoreReadyState(ownedBy: (flowId, credentialResponseGeneration(flowId: flowId)))
     }
 
     /// The WMP `flow_complete` result as a `FlowCompleteMessage`, when it says the issuer's response

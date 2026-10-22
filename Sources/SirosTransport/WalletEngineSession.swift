@@ -367,16 +367,18 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     }
 
     private func startReceiveLoop(_ task: URLSessionWebSocketTask) {
+        // The generation of THIS socket: every frame it delivers is labelled with it, however late it arrives.
+        let generation = socketGeneration
         Task { [weak self] in
             while task.state == .running {
                 do {
                     let message = try await task.receive()
                     switch message {
                     case .string(let text):
-                        await self?.handleMessage(text)
+                        await self?.handleMessage(text, socketGeneration: generation)
                     case .data(let data):
                         if let text = String(data: data, encoding: .utf8) {
-                            await self?.handleMessage(text)
+                            await self?.handleMessage(text, socketGeneration: generation)
                         }
                     @unknown default:
                         break
@@ -400,7 +402,12 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         // Flows that were running on the old socket are gone with it: told at each loss, and only for a connection that was
         // lost, not for one this session was told to drop (`disconnect()` clears the token), whose late failure
         // must not reach a replacement session's state.
-        if lastAppToken != nil { onSocketReplaced?() }
+        if lastAppToken != nil {
+            // Requests received on the lost socket are obsolete from this moment, not only once a replacement opens
+            // (retries may be exhausted and none ever does): they carry the old generation and are refused.
+            socketGeneration += 1
+            onSocketReplaced?()
+        }
         guard lastAppToken != nil, reconnectAttempts < maxReconnectAttempts else {
             setState(.failed)
             return
@@ -450,7 +457,9 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         }
     }
 
-    func handleMessage(_ text: String) async {
+    func handleMessage(_ text: String, socketGeneration receivedOn: Int? = nil) async {
+        // A frame that a replaced socket delivered after its replacement opened is obsolete: dropped before dispatch.
+        if let receivedOn, receivedOn != socketGeneration { return }
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
@@ -480,7 +489,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             }
         case MessageTypes.signRequest:
             if var msg = try? decoder.decode(SignRequestMessage.self, from: data) {
-                msg.socketGeneration = socketGeneration
+                msg.socketGeneration = receivedOn ?? socketGeneration
                 signRequestContinuation.yield(msg)
             }
         case MessageTypes.matchRequest:

@@ -657,6 +657,47 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.sent, ["c1"])
     }
 
+    /// The retry budget belongs to each answer: one that used its retries up (cancelled, or still queued) does not
+    /// starve the next child's first transient failure.
+    func testTheRetryBudgetIsPerAnswerNotShared() async throws {
+        // A exhausts its single retry and is cancelled; B then fails once and must still be retried.
+        let ctx = ScriptedPeerContext([.fail, .fail, .fail, .succeed])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [10]))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: signStart("c1", parent: "p1"))
+        try await Task.sleep(nanoseconds: 200_000_000)                      // A's original and its one retry both failed
+        await profile.handleCancel(params: FlowCancelParams(flowId: "p1"))
+        _ = try await profile.startFlow(params: signStart("c2", parent: "p2"))
+        for _ in 0..<300 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.sent, ["c2"], "B's first failure got its own timed retry")
+        // The same with A still queued (not cancelled): B is retried, A's spent budget is not B's.
+        let ctx2 = ScriptedPeerContext([.fail, .fail, .fail, .succeed, .succeed])
+        let profile2 = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [10]))
+        profile2.initialize(ctx: ctx2)
+        _ = try await profile2.startFlow(params: signStart("c1", parent: "p1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        _ = try await profile2.startFlow(params: signStart("c2", parent: "p2"))
+        for _ in 0..<300 where !ctx2.sent.contains("c2") { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(ctx2.sent.contains("c2"))
+    }
+
+    /// A cancelled replay removes its marker when its send finishes, even though its parent is still in the ended-flow
+    /// list: markers must not grow without bound over a long session.
+    func testACancelledReplayLeavesNoCancellationMarkerBehind() async throws {
+        for _ in 0..<5 {
+            let ctx = ScriptedPeerContext([.fail, .blockThenFail])
+            let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: []))
+            profile.initialize(ctx: ctx)
+            await profile.runChildFlow(params: signStart())
+            profile.sessionResumed()
+            for _ in 0..<200 where !ctx.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+            await profile.handleCancel(params: FlowCancelParams(flowId: "p1"))
+            ctx.releaseBlocked()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(profile.cancellationMarkerCount, 0)
+        }
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))

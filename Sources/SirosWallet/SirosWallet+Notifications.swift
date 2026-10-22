@@ -159,18 +159,25 @@ extension SirosWallet {
     /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
     /// for each notification id the entries carry, and the issuance ended locally.
     func refusePlainCompletion(flowId: String, notificationIds: [String]) async {
+        // The notification awaits a transport send, during which this issuance may be cancelled and another begun: the
+        // cleanup runs only if THIS flow still owns the state (checked under the wallet lock, where it also ends the flow).
+        let generation = credentialResponseGeneration(flowId: flowId)
         for id in Set(notificationIds).sorted() where !id.isEmpty {
             await sendCredentialFailure(flowId: flowId, notificationId: id)
         }
-        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet")
+        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet", ifGeneration: generation)
     }
 
     /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
-    func restoreReadyState() async {
+    ///
+    /// - Parameter ownedBy: the flow and generation this restore belongs to; after the awaited store read the state is
+    ///   changed only if that flow is still the one that ended (a newer issuance's state is left alone).
+    func restoreReadyState(ownedBy owner: (flowId: String, generation: [Int])? = nil) async {
         switch state {
         case .flowActive(let userId, let displayName, _, _, _, _),
              .ready(let userId, let displayName, _, _):
             let creds = await credentialStore.getAll()
+            if let owner, credentialResponseGeneration(flowId: owner.flowId) != owner.generation { return }
             setState(.ready(userId: userId, displayName: displayName, credentials: creds))
         default:
             break

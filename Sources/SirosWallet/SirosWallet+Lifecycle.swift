@@ -84,6 +84,9 @@ extension SirosWallet {
             // is cleared, so no suspended child can answer or recreate the cancelled flow's state afterwards.
             lock.lock(); let peer = wmpPeer; lock.unlock()
             peer?.cancelFlowNow(flowId: flowId)
+            // The flow is over for this wallet: mark it ended, so a request for it that is still buffered on the
+            // legacy WebSocket is refused instead of recreating its key.
+            cancelTransactionTasks(flowId: flowId)
             setState(.ready(userId: userId, displayName: displayName, credentials: creds))
         }
         // Only the issuance being cancelled holds response keys; a flow that ends for other reasons drops
