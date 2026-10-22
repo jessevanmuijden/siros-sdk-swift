@@ -114,7 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `credential_failure` (the `notification_id` is read from the body even then). A flow error, a stale
   response (the flow ended while the receiver was suspended) and locking the wallet or ending the
   session drop the key and everything decrypted with it. Numbers in an object-valued credential are
-  kept exactly. A requested pair this build cannot open is answered (declined), never left hanging.
+  kept exactly. A pair this build cannot open is answered, never left hanging: declined (no JWK) when optional, and when the engine REQUIRES encryption with it an error `sign_response` (`UNSUPPORTED_RESPONSE_ENCRYPTION`, the original `message_id`) over the WebSocket and a rejected flow error over WMP. Duplicate member names are refused wherever they hide (also behind escapes and inside the seed member).
   A cancelled sign request (a WMP child flow) installs no key, writes no issuance state and keeps no
   response; the `credential_failure` of a rejected response is handed to the transport (WMP: awaited)
   before the error answer; an encrypted completion that reports no credentials is an error, not a success.
