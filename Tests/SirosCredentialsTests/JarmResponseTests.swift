@@ -86,6 +86,15 @@ final class JarmResponseTests: XCTestCase {
         XCTAssertEqual(token, ["pid": ["t1", "t3"], "mdl": ["t2"]])
     }
 
+    /// The enum case is public: a repeated query id is merged in order, not a trap.
+    func testRepeatedQueryIdsPassedDirectlyAreMerged() throws {
+        let jwe = try JarmResponse.encrypt(
+            vpToken: .dcql([("pid", ["t1"]), ("mdl", ["m1"]), ("pid", ["t2"])]), state: nil, audience: "a",
+            recipientJwk: jwk(), alg: "ECDH-ES", enc: "A128GCM"
+        )
+        XCTAssertEqual(try claims(jwe)["vp_token"] as? [String: [String]], ["pid": ["t1", "t2"], "mdl": ["m1"]])
+    }
+
     func testWithoutQueryIdsTheTokenIsAString() {
         XCTAssertEqual(VpTokenValue.from(parts: [(nil, "a"), (nil, "b")]), .string("a\nb"))
         XCTAssertEqual(VpTokenValue.from(parts: [("q", "a"), (nil, "b")]), .string("a\nb"), "a part without a query makes it non-DCQL")

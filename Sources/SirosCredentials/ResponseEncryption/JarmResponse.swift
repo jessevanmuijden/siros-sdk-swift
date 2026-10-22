@@ -55,7 +55,9 @@ public enum VpTokenValue: Sendable, Equatable {
     var jsonObject: Any {
         switch self {
         case .string(let token): return token
-        case .dcql(let entries): return Dictionary(uniqueKeysWithValues: entries.map { ($0.queryId, $0.tokens) })
+        case .dcql(let entries):
+            // A repeated query id (the case is public, so a caller may pass one) merges, tokens in order.
+            return entries.reduce(into: [String: [String]]()) { $0[$1.queryId, default: []] += $1.tokens }
         }
     }
 }
