@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cancelCurrentFlow()` during the start resets at once, sends nothing to the
   engine (there is no flow id), and the suspended start unwinds with
   `CancellationError` instead of reaching the engine; a cancelled start cannot
-  clobber a newer one. The flow type stays `"issuance"` across the first engine
+  clobber a newer one (admission, epoch checks, state commits, failure cleanup
+  and cancel share one critical section on the wallet lock). The flow type stays `"issuance"` across the first engine
   progress event for flows begun this way (before, it became the step name).
   Both start paths now take the in-flight guard before connecting the engine.
   Hosts that switch on `flowId` should treat `isPendingFlow` as "no engine flow

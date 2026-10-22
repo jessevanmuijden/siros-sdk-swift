@@ -8,15 +8,32 @@ import SirosTransport
 // the wallet: the first thing a start call does is publish it, each slow step
 // advances it, and a failure or a cancel takes it away again.
 extension SirosWallet {
-    /// Publish the synchronous pre-engine state of an issuance start - the
-    /// first thing a start call does, before any network work. Only from
-    /// `.ready`; from any other state the start proceeds as before without a
-    /// visible flow state. Returns this attempt's epoch.
-    func beginIssuanceStart() -> Int {
-        let epoch = issuanceStartEpoch.begin()
-        if let pending = state.beginningIssuanceStart() {
-            setState(pending)
+    /// Admission of an issuance start, as ONE critical section under `lock`:
+    /// refuse when another issuance is in flight, take the in-flight guard,
+    /// allocate this attempt's epoch and publish the synchronous pre-engine
+    /// state - the first thing a start call does, before any network work. The
+    /// same lock covers every later commit (`advanceIssuanceStart`,
+    /// `failIssuanceStart`) and `cancelCurrentFlow`, so a cancel can never fall
+    /// between claiming the guard and allocating the epoch, and an epoch can
+    /// never be validated and then acted on after it went stale.
+    ///
+    /// The pending state is only published from `.ready`; from any other state
+    /// the start proceeds as before without a visible flow state. Returns this
+    /// attempt's epoch. Observers are notified after the lock is released.
+    func admitIssuanceStart() throws -> Int {
+        lock.lock()
+        if issuanceInFlight {
+            lock.unlock()
+            throw SirosError.wallet(message: "Another issuance is already in progress")
         }
+        issuanceInFlight = true
+        issuanceStartHook?("admit.afterGuard")
+        let epoch = issuanceStartEpoch.begin()
+        let pending = _state.beginningIssuanceStart()
+        if let pending { _state = pending }
+        let observers = pending == nil ? [] : Array(stateContinuations.values)
+        lock.unlock()
+        if let pending { for c in observers { c.yield(pending) } }
         return epoch
     }
 
@@ -24,14 +41,25 @@ extension SirosWallet {
     /// it was suspended: `cancelCurrentFlow()` has already reset the wallet, so
     /// a cancelled start only has to unwind (`CancellationError`) - it must not
     /// touch state again, which by now may belong to a newer attempt.
-    func advanceIssuanceStart(_ epoch: Int, _ step: String) throws {
-        try issuanceStartEpoch.checkCurrent(epoch)
-        if let next = state.advancingPendingStep(to: step) {
-            setState(next)
-            // A synchronous observer of the state may have cancelled while it
-            // was published; stop before the caller goes on to send anything.
-            try issuanceStartEpoch.checkCurrent(epoch)
+    ///
+    /// The epoch check, the step commit and `commit` (which publishes whatever
+    /// the step's work produced, and must not take `lock`) are one critical
+    /// section: a cancel cannot slip between the check and the writes, so a
+    /// stale start can neither resurrect the spinner nor write into a newer
+    /// attempt's fields.
+    func advanceIssuanceStart(_ epoch: Int, _ step: String, commit: (() -> Void)? = nil) throws {
+        lock.lock()
+        guard issuanceStartEpoch.isCurrent(epoch) else {
+            lock.unlock()
+            throw CancellationError()
         }
+        issuanceStartHook?("advance.afterCheck")
+        commit?()
+        let next = _state.advancingPendingStep(to: step)
+        if let next { _state = next }
+        let observers = next == nil ? [] : Array(stateContinuations.values)
+        lock.unlock()
+        if let next { for c in observers { c.yield(next) } }
     }
 
     /// The engine half of an issuance start, as two visible steps: reconnect
@@ -55,13 +83,22 @@ extension SirosWallet {
     /// nothing will ever clear) and returns `error` for the caller to throw. An
     /// attempt that was cancelled meanwhile returns `CancellationError` and
     /// leaves everything alone - the cancel already reset it, and it may now
-    /// belong to a newer attempt.
+    /// belong to a newer attempt. The currency check and the cleanup are one
+    /// critical section, so a newer attempt's guard and state cannot be cleared
+    /// by this one.
     func failIssuanceStart(_ epoch: Int, _ error: Error) -> Error {
-        guard issuanceStartEpoch.isCurrent(epoch) else { return CancellationError() }
-        resetIssuanceGuards()
-        if let ready = state.abandoningPendingStart() {
-            setState(ready)
+        lock.lock()
+        guard issuanceStartEpoch.isCurrent(epoch) else {
+            lock.unlock()
+            return CancellationError()
         }
+        issuanceStartHook?("fail.afterCheck")
+        resetIssuanceGuardsLocked()
+        let ready = _state.abandoningPendingStart()
+        if let ready { _state = ready }
+        let observers = ready == nil ? [] : Array(stateContinuations.values)
+        lock.unlock()
+        if let ready { for c in observers { c.yield(ready) } }
         return error
     }
 }

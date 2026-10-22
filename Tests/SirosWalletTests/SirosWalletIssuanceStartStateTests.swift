@@ -50,6 +50,9 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
         await body()
         try? await Task.sleep(nanoseconds: 100_000_000)
         collector.cancel()
+        // `cancel()` only requests cancellation: wait for the collector to
+        // finish before `seen` is read, or the read races its last append.
+        await collector.value
         return seen
     }
 
@@ -88,8 +91,7 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
 
     func testCancelDuringAPendingStartResetsAtOnceAndStalesTheStart() {
         let wallet = makeWallet()
-        wallet.issuanceInFlight = true
-        let epoch = wallet.beginIssuanceStart()
+        let epoch = try! wallet.admitIssuanceStart()
         XCTAssertTrue(wallet.state.isPendingFlow)
 
         wallet.cancelCurrentFlow()
@@ -104,10 +106,9 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
 
     func testACancelledStartCannotClobberANewerOne() {
         let wallet = makeWallet()
-        let cancelled = wallet.beginIssuanceStart()
+        let cancelled = try! wallet.admitIssuanceStart()
         wallet.cancelCurrentFlow()
-        wallet.issuanceInFlight = true
-        let newer = wallet.beginIssuanceStart()
+        let newer = try! wallet.admitIssuanceStart()
 
         // The cancelled attempt's late network failure arrives now.
         let error = wallet.failIssuanceStart(cancelled, URLError(.timedOut))
@@ -120,8 +121,7 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
 
     func testAFailureOfTheCurrentStartRethrowsTheOriginalError() {
         let wallet = makeWallet()
-        wallet.issuanceInFlight = true
-        let epoch = wallet.beginIssuanceStart()
+        let epoch = try! wallet.admitIssuanceStart()
 
         let error = wallet.failIssuanceStart(epoch, URLError(.notConnectedToInternet))
 
@@ -132,7 +132,7 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
 
     func testAFailureDoesNotClearARealEngineFlow() {
         let wallet = makeWallet()
-        let epoch = wallet.beginIssuanceStart()
+        let epoch = try! wallet.admitIssuanceStart()
         wallet.setState(.flowActive(
             userId: "u1", displayName: "Alice", flowId: "f1", flowType: "issuance",
             status: "parsing_offer", credentials: []
@@ -147,8 +147,106 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
     func testAStartFromANonReadyStateShowsNoFlow() {
         let wallet = makeWallet()
         wallet.setState(.keystoreLocked(userId: "u1", displayName: "Alice"))
-        _ = wallet.beginIssuanceStart()
+        _ = try! wallet.admitIssuanceStart()
         guard case .keystoreLocked = wallet.state else { return XCTFail("got \(wallet.state)") }
+    }
+
+    // MARK: - Controlled interleavings
+    //
+    // Each test parks one thread inside a critical section of the start state
+    // machine (via `issuanceStartHook`) and runs the racing operation on
+    // another. With one synchronisation boundary the racer is held off until the
+    // parked thread is done, so the hook simply times out; if the boundary were
+    // split, the racer gets through the window and the assertions fail.
+
+    /// Runs `parked` on a thread whose hook for `window` signals and then waits
+    /// (bounded) for `release`; `racer` runs on another thread once the hook was
+    /// reached and signals `release` when it is finished.
+    private func interleave(
+        _ wallet: SirosWallet, window: String, parked: @escaping () -> Void, racer: @escaping () -> Void
+    ) {
+        let reached = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        wallet.issuanceStartHook = { name in
+            guard name == window else { return }
+            wallet.issuanceStartHook = nil
+            reached.signal()
+            _ = release.wait(timeout: .now() + 0.5)
+        }
+        let done = DispatchGroup()
+        DispatchQueue.global().async(group: done) { parked() }
+        _ = reached.wait(timeout: .now() + 5)
+        DispatchQueue.global().async(group: done) { racer(); release.signal() }
+        XCTAssertEqual(done.wait(timeout: .now() + 10), .success)
+    }
+
+    /// A failure that passed its currency check must not clear a NEWER
+    /// attempt's guard, metadata and pending state.
+    func testAFailureThatPassedItsCheckCannotClearANewerAttempt() throws {
+        let wallet = makeWallet()
+        let a = try wallet.admitIssuanceStart()
+        var newer = 0
+        interleave(wallet, window: "fail.afterCheck", parked: {
+            _ = wallet.failIssuanceStart(a, URLError(.timedOut))
+        }, racer: {
+            wallet.cancelCurrentFlow()
+            newer = (try? wallet.admitIssuanceStart()) ?? -1
+        })
+        XCTAssertGreaterThan(newer, 0, "the newer attempt must have been admitted")
+        XCTAssertTrue(wallet.issuanceInFlight, "the newer attempt's guard was cleared by the older failure")
+        XCTAssertTrue(wallet.state.isPendingFlow, "the newer attempt's pending state was cleared by the older failure")
+        XCTAssertNoThrow(try wallet.advanceIssuanceStart(newer, WalletState.FlowActive.stepConnectingEngine))
+    }
+
+    /// A stale advance must not resurrect the spinner after a cancel.
+    func testAnAdvanceThatPassedItsCheckCannotResurrectTheSpinnerAfterACancel() throws {
+        let wallet = makeWallet()
+        let a = try wallet.admitIssuanceStart()
+        interleave(wallet, window: "advance.afterCheck", parked: {
+            try? wallet.advanceIssuanceStart(a, WalletState.FlowActive.stepConnectingEngine)
+        }, racer: {
+            wallet.cancelCurrentFlow()
+        })
+        guard case .ready = wallet.state else { return XCTFail("the spinner was resurrected: \(wallet.state)") }
+        XCTAssertFalse(wallet.issuanceInFlight)
+    }
+
+    /// A cancel arriving while admission is claiming the guard must not leave
+    /// the cancelled call with a live epoch and a pending state.
+    func testACancelDuringAdmissionLeavesNoLiveAttempt() {
+        let wallet = makeWallet()
+        var epoch = -1
+        interleave(wallet, window: "admit.afterGuard", parked: {
+            epoch = (try? wallet.admitIssuanceStart()) ?? -1
+        }, racer: {
+            wallet.cancelCurrentFlow()
+        })
+        XCTAssertGreaterThan(epoch, 0)
+        XCTAssertFalse(wallet.issuanceInFlight)
+        XCTAssertFalse(wallet.state.isPendingFlow, "the cancelled call left a pending state behind")
+        XCTAssertThrowsError(try wallet.advanceIssuanceStart(epoch, WalletState.FlowActive.stepConnectingEngine)) {
+            XCTAssertTrue($0 is CancellationError, "the cancelled call would carry on to the engine")
+        }
+    }
+
+    /// The commit of a step's work is under the same check: a stale attempt's
+    /// fields never reach a newer attempt.
+    func testAStaleCommitNeverRunsAgainstANewerAttempt() throws {
+        let wallet = makeWallet()
+        let a = try wallet.admitIssuanceStart()
+        wallet.cancelCurrentFlow()
+        _ = try wallet.admitIssuanceStart()
+        var ran = false
+        XCTAssertThrowsError(try wallet.advanceIssuanceStart(a, WalletState.FlowActive.stepStartingFlow) { ran = true })
+        XCTAssertFalse(ran)
+        XCTAssertNil(wallet.activeOffer)
+    }
+
+    /// A second start is refused while one is in flight, atomically with the claim.
+    func testASecondStartIsRefusedWhileOneIsInFlight() throws {
+        let wallet = makeWallet()
+        _ = try wallet.admitIssuanceStart()
+        XCTAssertThrowsError(try wallet.admitIssuanceStart())
     }
 }
 

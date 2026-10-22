@@ -720,18 +720,12 @@ extension SirosWallet {
         guard let engine = engineSession else {
             throw SirosError.wallet(message: "Not connected")
         }
-        // The in-flight guard is taken before any network work, so the
-        // pending flow state published below cannot overlap another start; a
-        // failure anywhere after it (including the entitlement refusal)
-        // clears it again in `failIssuanceStart`.
-        lock.lock()
-        if issuanceInFlight {
-            lock.unlock()
-            throw SirosError.wallet(message: "Another issuance is already in progress")
-        }
-        issuanceInFlight = true
-        lock.unlock()
-        let epoch = beginIssuanceStart()
+        // Admission takes the in-flight guard, allocates the attempt's epoch
+        // and publishes the pending state as one step (see
+        // `admitIssuanceStart`), before any network work; a failure anywhere
+        // after it (including the entitlement refusal) clears it again in
+        // `failIssuanceStart`.
+        let epoch = try admitIssuanceStart()
         do {
             try await connectEngineForIssuance(engine, epoch: epoch)
             try advanceIssuanceStart(epoch, WalletState.FlowActive.stepCheckingEntitlement)
@@ -745,63 +739,12 @@ extension SirosWallet {
                 )
             )
             try advanceIssuanceStart(epoch, WalletState.FlowActive.stepPreparingIssuance)
-
-            // Try to fetch VCTM (SD-JWT) and MDDL schema (mdoc) - format-blind,
-            // like `activeVctm`'s existing fetch: whichever one doesn't match
-            // this offer's actual format simply fails to decode and stays nil.
-            let vctmDocument = await vctmFetcher.fetchDocument(
-                issuerUrl: offer.credentialIssuerIdentifier,
-                scope: offer.credentialConfigurationId,
-                vct: offer.vct,
-                registryUrl: resolvedRegistryUrl
-            )
-            let vctm = vctmDocument?.vctm
-            let mddlSchema = await mddlSchemaFetcher.fetch(
-                issuerUrl: offer.credentialIssuerIdentifier,
-                scope: offer.credentialConfigurationId,
-                doctype: offer.doctype,
-                registryUrl: resolvedRegistryUrl
-            )
-            // Published only after the epoch is re-checked: a cancelled
-            // attempt must not write into fields a newer attempt now owns.
-            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow)
-            lock.lock()
-            activeOffer = offer
-            activeVctm = vctm
-            activeVctmDocument = vctmDocument
-            activeMddlSchema = mddlSchema
-            lock.unlock()
-
-            var credOffer: [String: AnyCodable] = [
-                "credential_issuer": .string(offer.credentialIssuerIdentifier),
-                "credential_configuration_ids": .array([.string(offer.credentialConfigurationId)]),
-            ]
-
-            var grants: [String: AnyCodable] = [:]
-            if let preAuth = offer.preAuthorizedCode {
-                var preAuthGrant: [String: AnyCodable] = ["pre-authorized_code": .string(preAuth)]
-                if offer.txCode != nil {
-                    preAuthGrant["tx_code"] = .object_(["input_mode": .string("text")])
-                }
-                grants["urn:ietf:params:oauth:grant-type:pre-authorized_code"] = .object_(preAuthGrant)
-            } else {
-                grants["authorization_code"] = .object_([:])
-            }
-            credOffer["grants"] = .object_(grants)
-
-            let offerJson: String
-            if let data = try? JSONEncoder().encode(credOffer),
-               let s = String(data: data, encoding: .utf8) {
-                offerJson = s
-            } else {
-                offerJson = "{}"
-            }
-
+            try await prepareOfferMetadata(offer, epoch: epoch)
             // Wallet attestation is engine-requested (`request_attestation`
             // sign request, answered in `handleSignRequest`) - nothing to
             // resolve or attach up front.
             engine.startIssuance(
-                offer: offerJson,
+                offer: Self.credentialOfferJson(for: offer),
                 redirectUri: config.redirectUri.isEmpty ? nil : config.redirectUri,
                 authorizationDetails: authorizationDetailsForActiveOffer()
             )
@@ -814,6 +757,57 @@ extension SirosWallet {
             // unwinds with `CancellationError` and leaves state alone.
             throw failIssuanceStart(epoch, error)
         }
+    }
+
+    /// Fetch the VCTM (SD-JWT) and MDDL schema (mdoc) for `offer` - format-blind,
+    /// like `activeVctm`'s existing fetch: whichever one doesn't match this
+    /// offer's actual format simply fails to decode and stays nil - and publish
+    /// them with the offer. Published only once the epoch has been re-checked,
+    /// in the same critical section: a cancelled attempt must not write into
+    /// fields a newer attempt now owns.
+    private func prepareOfferMetadata(_ offer: CredentialOffer, epoch: Int) async throws {
+        let vctmDocument = await vctmFetcher.fetchDocument(
+            issuerUrl: offer.credentialIssuerIdentifier,
+            scope: offer.credentialConfigurationId,
+            vct: offer.vct,
+            registryUrl: resolvedRegistryUrl
+        )
+        let mddlSchema = await mddlSchemaFetcher.fetch(
+            issuerUrl: offer.credentialIssuerIdentifier,
+            scope: offer.credentialConfigurationId,
+            doctype: offer.doctype,
+            registryUrl: resolvedRegistryUrl
+        )
+        try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow) {
+            self.activeOffer = offer
+            self.activeVctm = vctmDocument?.vctm
+            self.activeVctmDocument = vctmDocument
+            self.activeMddlSchema = mddlSchema
+        }
+    }
+
+    /// The `credential_offer` JSON the engine is started with for `offer`.
+    private static func credentialOfferJson(for offer: CredentialOffer) -> String {
+        var credOffer: [String: AnyCodable] = [
+            "credential_issuer": .string(offer.credentialIssuerIdentifier),
+            "credential_configuration_ids": .array([.string(offer.credentialConfigurationId)]),
+        ]
+        var grants: [String: AnyCodable] = [:]
+        if let preAuth = offer.preAuthorizedCode {
+            var preAuthGrant: [String: AnyCodable] = ["pre-authorized_code": .string(preAuth)]
+            if offer.txCode != nil {
+                preAuthGrant["tx_code"] = .object_(["input_mode": .string("text")])
+            }
+            grants["urn:ietf:params:oauth:grant-type:pre-authorized_code"] = .object_(preAuthGrant)
+        } else {
+            grants["authorization_code"] = .object_([:])
+        }
+        credOffer["grants"] = .object_(grants)
+        if let data = try? JSONEncoder().encode(credOffer),
+           let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return "{}"
     }
 
     /// Start issuance with a raw offer URI or JSON.
@@ -842,42 +836,15 @@ extension SirosWallet {
         guard let engine = engineSession else {
             throw SirosError.wallet(message: "Not connected")
         }
-        lock.lock()
-        if issuanceInFlight {
-            lock.unlock()
-            throw SirosError.wallet(message: "Another issuance is already in progress")
-        }
-        issuanceInFlight = true
-        lock.unlock()
-        let epoch = beginIssuanceStart()
+        let epoch = try admitIssuanceStart()
         do {
             try await connectEngineForIssuance(engine, epoch: epoch)
             try advanceIssuanceStart(epoch, WalletState.FlowActive.stepPreparingIssuance)
             if let offer = await resolveOfferForDisplay(offerUri) {
-                let vctmDocument = await vctmFetcher.fetchDocument(
-                    issuerUrl: offer.credentialIssuerIdentifier,
-                    scope: offer.credentialConfigurationId,
-                    vct: offer.vct,
-                    registryUrl: resolvedRegistryUrl
-                )
-                let vctm = vctmDocument?.vctm
-                let mddlSchema = await mddlSchemaFetcher.fetch(
-                    issuerUrl: offer.credentialIssuerIdentifier,
-                    scope: offer.credentialConfigurationId,
-                    doctype: offer.doctype,
-                    registryUrl: resolvedRegistryUrl
-                )
-                // Published only after the epoch is re-checked (see
-                // `startIssuanceByOffer`).
+                try await prepareOfferMetadata(offer, epoch: epoch)
+            } else {
                 try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow)
-                lock.lock()
-                activeOffer = offer
-                activeVctm = vctm
-                activeVctmDocument = vctmDocument
-                activeMddlSchema = mddlSchema
-                lock.unlock()
             }
-            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow)
             // Wallet attestation is engine-requested (`request_attestation`
             // sign request, answered in `handleSignRequest`): the engine
             // resolves the offer and the issuer's authorization server itself
