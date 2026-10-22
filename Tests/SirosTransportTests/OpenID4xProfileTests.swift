@@ -320,6 +320,26 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(told, 1)
     }
 
+    /// The application hears of a shutdown last: by then the profile is stopped and its children are already
+    /// released, so nothing the callback does can race a child that is still live.
+    func testTheApplicationIsToldOfShutdownAfterTheChildrenAreReleased() async throws {
+        let ctx = MockPeerContext()
+        var releasedWhenTold: [String]?
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                return SignSubFlowResult()
+            },
+            onShutdown: { releasedWhenTold = ctx.released }
+        ))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "c-live", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("vp-1"),
+        ]))
+        profile.shutdown()
+        XCTAssertEqual(releasedWhenTold?.contains("c-live"), true)
+    }
+
     func testNoChildStartsAfterShutdown() async throws {
         let ctx = MockPeerContext()
         var ran = false
