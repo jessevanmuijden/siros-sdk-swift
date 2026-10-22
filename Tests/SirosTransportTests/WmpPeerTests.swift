@@ -61,6 +61,16 @@ private final class ShutdownProfile: WmpProfile, WmpShutdownProfile, @unchecked 
     func shutdown() { lock.lock(); _count += 1; lock.unlock() }
 }
 
+private final class ResumeProfile: WmpProfile, WmpResumeProfile, @unchecked Sendable {
+    let name = "resume"
+    let capabilities: [String] = []
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+    func initialize(ctx: WmpPeerContext) {}
+    func sessionResumed() { lock.lock(); _count += 1; lock.unlock() }
+}
+
 // MARK: - Helpers
 
 private extension WmpPeerTests {
@@ -128,6 +138,33 @@ final class WmpPeerTests: XCTestCase {
         transportC.simulateFailure()
         for _ in 0..<150 where shutdownC.count == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertGreaterThanOrEqual(shutdownC.count, 1, "a failed session ends its children without a close()")
+    }
+
+    /// A real reconnection reaches the profiles: the session resumes after a loss, and the peer tells them, so
+    /// answers kept for the resume go out. Creating the session is not a resume.
+    func testAProfileIsToldWhenTheSessionResumesAfterALoss() async throws {
+        let transport = FakeTransport()
+        let session = WmpSession(
+            transport: transport,
+            config: WmpSessionConfig(requestTimeoutMs: 2_000, maxReconnectAttempts: 3, reconnectBaseMs: 1, reconnectMaxMs: 1)
+        )
+        let peer = WmpPeer(session: session)
+        let profile = ResumeProfile()
+        peer.use(profile)
+        try await connectPeer(peer, transport: transport)
+        XCTAssertEqual(profile.count, 0, "creating the session is not a resume")
+        await transport.disconnect()
+        let codec = WmpCodec()
+        var resumeId: String?
+        for _ in 0..<300 where resumeId == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            for data in transport.sentMessages {
+                if let req = try? codec.decodeRequest(data), req.method == "wmp.session.resume" { resumeId = req.id }
+            }
+        }
+        transport.receiveFromServer(#"{"jsonrpc":"2.0","id":"\#(try XCTUnwrap(resumeId))","result":{}}"#.data(using: .utf8)!)
+        for _ in 0..<300 where profile.count == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(profile.count, 1)
     }
 
     /// A cancel made locally reaches the handler and forgets the flow before it is sent, without waiting for an echo.
