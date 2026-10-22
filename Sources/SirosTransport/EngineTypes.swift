@@ -743,6 +743,10 @@ public struct SignRequestMessage: Codable, Sendable {
     public var action: String
     public var params: SignRequestParams
     public var timestamp: String?
+    /// The engine session's socket generation when this request was received (set by the session, never on the
+    /// wire). A request that was buffered across a reconnect carries the old generation, so the wallet can refuse it
+    /// before it allocates anything for a flow that ran on the replaced socket.
+    public var socketGeneration: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case type, action, params, timestamp

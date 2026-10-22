@@ -465,6 +465,70 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.released.contains("later"), "and so is a start after shutdown")
     }
 
+    private func signStart(_ child: String = "c1", parent: String = "p1") -> FlowStartParams {
+        childStart(flowType: "sign", flowId: child, params: ["action": .string("sign_presentation"), "parent_flow_id": .string(parent)])
+    }
+
+    /// A child whose answer was sent is remembered: a start redelivered while its parent is still active runs the
+    /// handler once only, after the original send and after a replay alike.
+    func testARedeliveredStartAfterASentAnswerRunsNothing() async throws {
+        for path in ["original", "replay"] {
+            let ctx = ScriptedPeerContext(path == "original" ? [.succeed] : [.fail, .succeed])
+            let counter = Counter()
+            let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in counter.bump(); return SignSubFlowResult(vpToken: "t") }))
+            profile.initialize(ctx: ctx)
+            _ = try await profile.startFlow(params: signStart())
+            if path == "replay" {
+                for _ in 0..<200 where counter.value == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+                try await Task.sleep(nanoseconds: 50_000_000)       // the original send failed and queued the answer
+                profile.sessionResumed()
+            }
+            for _ in 0..<300 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertEqual(ctx.sent, ["c1"], path)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            _ = try await profile.startFlow(params: signStart())
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(counter.value, 1, "\(path): the redelivered start did not run the handler again")
+        }
+    }
+
+    /// A parent ending while a replay send is suspended releases the claimed child's route at once, and its failing
+    /// send is not requeued even after later terminal events have evicted the parent from the bounded ended-flow list.
+    func testAParentEndingDuringAReplayReleasesTheChildAndSurvivesEviction() async throws {
+        let ctx = ScriptedPeerContext([.fail, .blockThenFail, .succeed])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: signStart())
+        profile.sessionResumed()
+        for _ in 0..<200 where !ctx.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+        let releasedBefore = ctx.releasedRoutes.filter { $0 == "c1" }.count
+        await profile.handleComplete(params: FlowCompleteParams(flowId: "p1"))          // the parent ends
+        XCTAssertGreaterThan(ctx.releasedRoutes.filter { $0 == "c1" }.count, releasedBefore, "the claimed child's route is released at once")
+        for i in 0..<400 { await profile.handleComplete(params: FlowCompleteParams(flowId: "other-\(i)")) }   // evict p1
+        ctx.releaseBlocked()                                                                                       // the send fails
+        try await Task.sleep(nanoseconds: 100_000_000)
+        profile.sessionResumed()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(ctx.sent.isEmpty, "a cancelled child's answer is never sent")
+    }
+
+    /// Cancelling a child whose answer a replay is sending is a child cancel: the wallet's parent-flow callback is
+    /// not invoked (it would reset the parent's guards).
+    func testCancellingAReplayingChildDoesNotCancelTheParentInTheWallet() async throws {
+        let ctx = ScriptedPeerContext([.fail, .blockThenFail, .succeed])
+        var cancelled: [String] = []
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, onCancel: { cancelled.append($0) }
+        ))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: signStart())
+        profile.sessionResumed()
+        for _ in 0..<200 where !ctx.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+        await profile.handleCancel(params: FlowCancelParams(flowId: "c1"))
+        XCTAssertTrue(cancelled.isEmpty, "only the child operation was cancelled")
+        ctx.releaseBlocked()
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
@@ -1104,7 +1168,9 @@ private final class ScriptedPeerContext: WmpPeerContext, @unchecked Sendable {
     var blockedNow: Bool { lock.lock(); defer { lock.unlock() }; return _blockedNow }
     var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
     func releaseBlocked() { lock.lock(); released = true; let c = blocked; blocked = nil; lock.unlock(); c?.resume() }
-    func releaseFlow(flowId: String) {}
+    private var _routes: [String] = []
+    var releasedRoutes: [String] { lock.lock(); defer { lock.unlock() }; return _routes }
+    func releaseFlow(flowId: String) { lock.lock(); _routes.append(flowId); lock.unlock() }
     func notify(method: String, params: [String: AnyCodable]?) async throws {
         lock.lock(); let step = script.isEmpty ? Step.succeed : script.removeFirst(); lock.unlock()
         switch step {

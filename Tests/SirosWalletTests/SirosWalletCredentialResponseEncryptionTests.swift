@@ -408,7 +408,9 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             XCTAssertFalse(w.sessionHasEnded, "\(transport): the new connection clears the ended state")
             if transport == "engine" {
                 let engine = try XCTUnwrap(w.engineSession)
-                try await w.answerGenerateProof(engine: engine, msg: try keyOnlyProofMessage(flowId: "ok-\(transport)"))
+                var message = try keyOnlyProofMessage(flowId: "ok-\(transport)")
+                message.socketGeneration = engine.socketGeneration       // as the session stamps it on receipt
+                try await w.answerGenerateProof(engine: engine, msg: message)
             } else {
                 let result = try await w.wmpGenerateProof(flowId: "ok-\(transport)", params: SignSubFlowParams(
                     action: "generate_proof", credentialResponseEncryption: CredentialResponseEncryptionRequest(alg: "ECDH-ES", enc: "A256GCM", required: true)
@@ -497,6 +499,41 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let methods = transport.sentMethods
         XCTAssertTrue(methods.contains("wmp.flow.cancel"), "the cancel went out on the peer: \(methods)")
         XCTAssertFalse(methods.contains("wmp.flow.complete"), "the cancelled child answered nothing: \(methods)")
+    }
+
+    /// A request buffered behind a suspended handler across a SAME-object reconnect carries the old socket
+    /// generation: it allocates nothing and is not answered, while one stamped with the current generation is served.
+    func testARequestBufferedAcrossAReconnectOfTheSameSessionIsDropped() async throws {
+        let w = wallet()
+        let engine = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
+        w.engineSession = engine
+        engine.connect(appToken: "t1")                                   // socket generation 1
+        var buffered = try keyOnlyProofMessage(flowId: "old")
+        buffered.socketGeneration = engine.socketGeneration
+        engine.forceReconnect(appToken: "t2")                            // generation 2: the buffered one is obsolete
+        let sender = RecordingSender()
+        try await w.answerGenerateProof(engine: engine, msg: buffered)
+        w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty, "no key for the old socket's flow"); w.lock.unlock()
+        _ = sender
+        var fresh = try keyOnlyProofMessage(flowId: "new")
+        fresh.socketGeneration = engine.socketGeneration
+        try await w.answerGenerateProof(engine: engine, msg: fresh)
+        w.lock.lock(); XCTAssertNotNil(w.credentialResponseKeys["new"]); w.lock.unlock()
+        engine.disconnect()
+    }
+
+    /// A buffered `generate_proof` for a flow that already ended is rejected: no key, no reply.
+    func testABufferedProofRequestForAnEndedFlowIsRejected() async throws {
+        let w = wallet()
+        w.cancelTransactionTasks(flowId: "gone")                         // the flow's terminal cleanup ran first
+        let sender = RecordingSender()
+        try await w.answerGenerateProof(engine: sender, msg: try keyOnlyProofMessage(flowId: "gone"))
+        XCTAssertTrue(sender.sent.isEmpty)
+        w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty); w.lock.unlock()
+        XCTAssertThrowsError(try w.requireLiveSession(flowId: "gone")) { XCTAssertEqual($0 as? CredentialResponseError, .flowEnded) }
+        // Another flow is unaffected.
+        try await w.answerGenerateProof(engine: sender, msg: try keyOnlyProofMessage(flowId: "alive"))
+        XCTAssertNotNil(sender.sent.first?.credentialResponseEncryptionJwk)
     }
 
     /// A request that arrives on a superseded engine session is dropped: no key, no answer.

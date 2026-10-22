@@ -20,10 +20,16 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
     case sessionEnded
     /// A pending (deferred) response carried a delivered seed.
     case deferredSeed
+    /// The request arrived on a socket that has since been replaced: dropped, never answered.
+    case staleSocket
+    /// The request is for a flow that already ended.
+    case flowEnded
 
     var wmpErrorCode: String? {
         switch self {
         case .deferredSeed: return "DEFERRED_SEED"
+        case .staleSocket: return "STALE_SOCKET"
+        case .flowEnded: return "FLOW_ENDED"
         case .sessionEnded: return "SESSION_ENDED"
         case .unsupportedRequiredPair: return "UNSUPPORTED_RESPONSE_ENCRYPTION"
         case .noKey: return "NO_RESPONSE_KEY"
@@ -226,13 +232,21 @@ extension SirosWallet {
     /// Validating and claiming are ONE step under the teardown lock: the generation it returns is read in the same
     /// critical section as the "session is live" check, so a teardown that lands after the check cannot be followed
     /// by a claim made on a generation taken after it.
+    ///
+    /// A request is also refused when its flow already ended (a buffered request handled after the flow's terminal
+    /// cleanup must not take the incremented end counter as a live generation), and, on the WebSocket, when it was
+    /// received on a socket the engine session has since replaced.
     @discardableResult
-    func requireLiveSession(flowId: String, engine: (any SignResponseSender)? = nil) throws -> [Int] {
+    func requireLiveSession(flowId: String, engine: (any SignResponseSender)? = nil, socketGeneration: Int? = nil) throws -> [Int] {
         lock.lock(); defer { lock.unlock() }
         if blindSessionEnded { throw CredentialResponseError.sessionEnded }
         if let engine, let current = engineSession, (engine as AnyObject) !== (current as AnyObject) {
             throw CredentialResponseError.sessionEnded
         }
+        if let socketGeneration, let current = engineSession, current.socketGeneration != socketGeneration {
+            throw CredentialResponseError.staleSocket
+        }
+        if (flowEndSeq[flowId] ?? 0) > 0 { throw CredentialResponseError.flowEnded }
         return credentialResponseGenerationLocked(flowId: flowId)
     }
 
@@ -289,7 +303,7 @@ extension SirosWallet {
     /// nothing else; a failure answers with an error that carries no plaintext and drops the flow's state.
     func answerDecryptCredentialResponse(engine: any SignResponseSender, msg: SignRequestMessage) async {
         let liveGeneration: [Int]
-        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine) } catch {
+        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration) } catch {
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
             }
@@ -408,7 +422,7 @@ extension SirosWallet {
     /// and, when the engine asked for response encryption, a fresh key's public JWK.
     func answerGenerateProof(engine: any SignResponseSender, msg: SignRequestMessage) async throws {
         let liveGeneration: [Int]
-        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine) } catch {
+        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration) } catch {
             // A request from a superseded socket is dropped; one for an ended session is refused. Neither allocates.
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
