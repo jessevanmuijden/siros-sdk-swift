@@ -206,6 +206,16 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         await credentialsKeystore.setCredentialRefreshToken(batchId: batchId, entry: entry)
     }
 
+    /// See `JweKeystore.credentialMetadata(id:)`.
+    public func credentialMetadata(id: Int64) async -> [[String: Any]]? {
+        await credentialsKeystore.credentialMetadata(id: id)
+    }
+
+    /// See `JweKeystore.setCredentialMetadata(id:_:)`.
+    public func setCredentialMetadata(id: Int64, _ entries: [[String: Any]]?) async throws {
+        try await credentialsKeystore.setCredentialMetadata(id: id, entries)
+    }
+
     /// See `JweKeystore.removeCredentialRefreshToken`.
     public func removeCredentialRefreshToken(batchId: Int64) async {
         await credentialsKeystore.removeCredentialRefreshToken(batchId: batchId)
@@ -656,6 +666,8 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
             signer: { data in try await self.signer.sign(keyId: key.keyId, data: data) }
         )
     }
+
+    public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { credentialsKeystore.unsupportedSchemaVersion }
 
     public func exportEncryptedContainer() async throws -> Data {
         // WSCD signing keys themselves are not exportable as a JWE container

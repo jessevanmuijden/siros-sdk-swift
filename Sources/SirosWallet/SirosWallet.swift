@@ -673,6 +673,23 @@ public final class SirosWallet: @unchecked Sendable {
         from instances: [StoredCredential],
         isZkPresentation: ((StoredCredential) -> Bool)? = nil
     ) -> [StoredCredential] {
+        let eligible = policyEligibleInstances(from: instances, isZkPresentation: isZkPresentation)
+        // A container this build must not rewrite is read-only: a consumption would
+        // be recorded in memory only, and reopening would make the used instance
+        // eligible again (a one-time-use credential presented twice). So an
+        // instance whose presentation would be consumed is not offered.
+        guard keystore.unsupportedSchemaVersion != nil else { return eligible }
+        switch credentialConsumptionPolicy {
+        case .neverConsume: return eligible
+        case .consumeAll: return []
+        case .consumeNonZkp: return eligible.filter { isZkPresentation?($0) ?? false }
+        }
+    }
+
+    private func policyEligibleInstances(
+        from instances: [StoredCredential],
+        isZkPresentation: ((StoredCredential) -> Bool)?
+    ) -> [StoredCredential] {
         let keyIds = availableKeyIds
         if let isZkPresentation {
             return CredentialUtils.eligibleInstances(
