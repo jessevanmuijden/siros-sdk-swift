@@ -391,9 +391,17 @@ extension SirosWallet {
 
     /// Applies what proof generation decided, only if the request was not cancelled meanwhile (a cancelled
     /// sign child must not write issuance state or install a key for a flow that is being torn down).
-    private func applyProofResult(_ attestedKeyIds: [String]?) throws {
+    ///
+    /// The flow's captured generation is validated under the same lock that commits the key ids: a proof that
+    /// finishes after its flow was cancelled or failed (or the session ended) must not write the old flow's key ids
+    /// into whatever issuance runs now.
+    func applyProofResult(_ attestedKeyIds: [String]?, flowId: String, generation: [Int]) throws {
         try Task.checkCancellation()
-        lock.lock(); activeAttestedKeyIds = attestedKeyIds; lock.unlock()
+        lock.lock(); defer { lock.unlock() }
+        guard !blindSessionEnded, generation == credentialResponseGenerationLocked(flowId: flowId) else {
+            throw CancellationError()
+        }
+        activeAttestedKeyIds = attestedKeyIds
     }
 
     /// `generate_proof` on the engine WebSocket: the proofs (none when the request is for the key alone)
@@ -425,10 +433,12 @@ extension SirosWallet {
                 audience: msg.params.audience ?? "", nonce: msg.params.nonce ?? "", count: msg.params.count ?? 1,
                 proofTypesSupported: msg.params.proofTypesSupported, proofTypeHint: msg.params.proofType
             )
-            try applyProofResult(generated.attestedKeyIds)
+            try applyProofResult(generated.attestedKeyIds, flowId: msg.flowId, generation: generation)
             proofs = generated.proofs
         }
         try Task.checkCancellation()
+        // A flow that ended meanwhile gets no reply (not even proofs) built from its stale state.
+        if generation != credentialResponseGeneration(flowId: msg.flowId) { throw CancellationError() }
         let jwk = credentialResponseEncryptionJwk(flowId: msg.flowId, request: encryption, generation: generation)
         engine.sendSignResponse(
             flowId: msg.flowId, proofs: proofs.isEmpty ? nil : proofs, credentialResponseEncryptionJwk: jwk, messageId: msg.messageId
@@ -450,10 +460,11 @@ extension SirosWallet {
                 audience: params.audience, nonce: params.nonce, count: params.count ?? 1,
                 proofTypesSupported: params.proofTypesSupported, proofTypeHint: params.proofType
             )
-            try applyProofResult(generated.attestedKeyIds)
+            try applyProofResult(generated.attestedKeyIds, flowId: flowId, generation: generation)
             proofs = generated.proofs
         }
         try Task.checkCancellation()
+        if generation != credentialResponseGeneration(flowId: flowId) { throw CancellationError() }
         let jwk = credentialResponseEncryptionJwk(flowId: flowId, request: encryption, generation: generation)
         return SignSubFlowResult(proofs: proofs.isEmpty ? nil : proofs, credentialResponseEncryptionJwk: jwk)
     }

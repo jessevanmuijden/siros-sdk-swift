@@ -639,6 +639,26 @@ final class EngineTypesTests: XCTestCase {
         session.disconnect()
     }
 
+    /// A failure reported by a socket that has since been replaced (forceReconnect) says nothing about the current
+    /// one: it neither tells the owner nor schedules a reconnect.
+    func testAnObsoleteSocketsLateFailureIsIgnored() throws {
+        let session = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
+        session.connect(appToken: "t1")
+        let old = try XCTUnwrap(session.webSocketTask)
+        session.forceReconnect(appToken: "t2")
+        let current = try XCTUnwrap(session.webSocketTask)
+        XCTAssertFalse(old === current)
+        let lock = NSLock(); var told = 0
+        session.onSocketReplaced = { lock.lock(); told += 1; lock.unlock() }
+        session.scheduleReconnect(from: old)
+        lock.lock(); let afterStale = told; lock.unlock()
+        XCTAssertEqual(afterStale, 0, "a stale failure is ignored")
+        session.scheduleReconnect(from: current)
+        lock.lock(); let afterCurrent = told; lock.unlock()
+        XCTAssertGreaterThanOrEqual(afterCurrent, 1, "the current socket's failure still counts")
+        session.disconnect()
+    }
+
     func testALateFailureAfterDisconnectDoesNotTellTheOwner() {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
         session.lastAppToken = "app-token"

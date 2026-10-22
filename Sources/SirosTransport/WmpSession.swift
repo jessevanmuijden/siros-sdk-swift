@@ -25,6 +25,18 @@ public final class WmpSession: @unchecked Sendable {
     /// transient `.failed` (one failed resume that the retry loop goes on from). A hook rather than a state
     /// observer, so it never takes elements from `stateStream`, which a host may be reading.
     public var onTerminal: (@Sendable () -> Void)?
+    private var terminalFired = false
+    private let terminalLock = NSLock()
+
+    /// Fires `onTerminal` once per session, whichever of a permanent disconnect or `close()` comes first; a new
+    /// `create()` re-arms it.
+    private func fireTerminalOnce() {
+        terminalLock.lock()
+        let first = !terminalFired
+        terminalFired = true
+        terminalLock.unlock()
+        if first { onTerminal?() }
+    }
 
     /// Called after a lost connection has been resumed.
     public var onResumed: (@Sendable () -> Void)?
@@ -69,6 +81,7 @@ public final class WmpSession: @unchecked Sendable {
         sender: String? = nil,
         capabilitiesOffered: [String: AnyCodable]? = nil
     ) async throws {
+        terminalLock.lock(); terminalFired = false; terminalLock.unlock()
         setState(.connecting)
         try await transport.connect()
         startMessageLoop()
@@ -144,7 +157,7 @@ public final class WmpSession: @unchecked Sendable {
         try await sendNotification(method: "wmp.session.close", params: params)
         await transport.disconnect()
         setState(.closed)
-        onTerminal?()
+        fireTerminalOnce()
         sessionId = nil
         resumptionToken = nil
     }
@@ -284,7 +297,7 @@ public final class WmpSession: @unchecked Sendable {
         }
 
         setState(.failed)
-        onTerminal?()
+        fireTerminalOnce()
         // Cancel all pending requests
         pendingLock.lock()
         let pending = pendingRequests
