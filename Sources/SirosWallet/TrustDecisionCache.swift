@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+import CoreFoundation
 #if canImport(CryptoKit)
 import CryptoKit
 #else
@@ -51,18 +52,36 @@ final class TrustDecisionCache: @unchecked Sendable {
     private final class Flight: @unchecked Sendable {
         private let lock = NSLock()
         private var result: Result<Response, Error>?
-        private var waiters: [CheckedContinuation<Result<Response, Error>, Never>] = []
+        private var waiters: [UUID: CheckedContinuation<Result<Response, Error>, Never>] = [:]
+        private var cancelledBeforeRegistering: Set<UUID> = []
 
+        /// Waits for the leader. Cancelling THIS task resumes only this waiter with
+        /// `CancellationError`; the leader and the other waiters are unaffected.
         func wait() async -> Result<Response, Error> {
-            await withCheckedContinuation { continuation in
-                if let ready = settleOrEnqueue(continuation) { continuation.resume(returning: ready) }
+            let id = UUID()
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    if let ready = settleOrEnqueue(id, continuation) { continuation.resume(returning: ready) }
+                }
+            } onCancel: {
+                if let waiter = cancel(id) { waiter.resume(returning: .failure(CancellationError())) }
             }
         }
 
-        private func settleOrEnqueue(_ c: CheckedContinuation<Result<Response, Error>, Never>) -> Result<Response, Error>? {
+        // The handler may run before the body registers (or after the leader finished);
+        // every ordering resumes the continuation exactly once.
+        private func settleOrEnqueue(_ id: UUID, _ c: CheckedContinuation<Result<Response, Error>, Never>) -> Result<Response, Error>? {
             lock.lock(); defer { lock.unlock() }
             if let result { return result }
-            waiters.append(c)
+            if cancelledBeforeRegistering.remove(id) != nil { return .failure(CancellationError()) }
+            waiters[id] = c
+            return nil
+        }
+
+        private func cancel(_ id: UUID) -> CheckedContinuation<Result<Response, Error>, Never>? {
+            lock.lock(); defer { lock.unlock() }
+            if let waiter = waiters.removeValue(forKey: id) { return waiter }
+            if result == nil { cancelledBeforeRegistering.insert(id) }
             return nil
         }
 
@@ -70,8 +89,8 @@ final class TrustDecisionCache: @unchecked Sendable {
             let pending: [CheckedContinuation<Result<Response, Error>, Never>] = {
                 lock.lock(); defer { lock.unlock() }
                 result = value
-                let w = waiters
-                waiters = []
+                let w = Array(waiters.values)
+                waiters = [:]
                 return w
             }()
             for waiter in pending { waiter.resume(returning: value) }
@@ -122,6 +141,8 @@ final class TrustDecisionCache: @unchecked Sendable {
         // a call that began before clear() never registers a result.
         let startedGeneration = locked { generation }
         while true {
+            // A cancelled caller never gets an answer, cached, shared or fresh.
+            try Task.checkCancellation()
             switch claim(key: key, generation: startedGeneration) {
             case .stale:
                 // Invalidated since this call began (its connection is gone): never
@@ -131,7 +152,9 @@ final class TrustDecisionCache: @unchecked Sendable {
                 return response.body
             case .follow(let flight):
                 switch await flight.wait() {
-                case .success(let response): return response.body
+                case .success(let response):
+                    try Task.checkCancellation()
+                    return response.body
                 case .failure(let error):
                     if error is LeaderCancelled { continue }
                     throw error
@@ -213,8 +236,11 @@ final class TrustDecisionCache: @unchecked Sendable {
         return body()
     }
 
+    /// A JSON boolean, not a number: `JSONSerialization` yields `NSNumber` for
+    /// both, and `{"decision":1}` also satisfies `is Bool`, so check the CF type.
     private static func isDecision(_ response: [String: Any]) -> Bool {
-        response["decision"] is Bool
+        guard let number = response["decision"] as? NSNumber else { return false }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 
     /// Cache key: SHA-256 over the full evaluation request body (keys sorted, so

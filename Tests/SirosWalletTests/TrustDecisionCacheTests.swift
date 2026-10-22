@@ -94,6 +94,59 @@ final class TrustDecisionCacheTests: XCTestCase {
         XCTAssertEqual(calls.n, 4)
     }
 
+    func testNumericDecisionsAreNotBooleansAndAreNotCached() async throws {
+        let (cache, _) = makeCache()
+        let calls = Counter()
+        // As BackendApiClient decodes them: JSONSerialization yields NSNumber for 1/0 and for true/false.
+        for json in [#"{"decision":1}"#, #"{"decision":0}"#] {
+            let decoded = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+            for _ in 0..<2 { _ = try await cache.getOrEvaluate(key: json) { calls.bump(); return decoded } }
+        }
+        XCTAssertEqual(calls.n, 4, "a number is not a decision")
+        for json in [#"{"decision":true}"#, #"{"decision":false}"#] {
+            let decoded = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+            for _ in 0..<2 { _ = try await cache.getOrEvaluate(key: json) { calls.bump(); return decoded } }
+        }
+        XCTAssertEqual(calls.n, 6, "real booleans are cached")
+    }
+
+    func testACancelledFollowerGetsCancellationNotTheLeadersResultAndTheLeaderIsUnaffected() async throws {
+        let (cache, _) = makeCache()
+        let entered = expectation(description: "leader started")
+        let gate = AsyncStream<Void>.makeStream()
+        let leader = Task {
+            try await cache.getOrEvaluate(key: "k") {
+                entered.fulfill()
+                for await _ in gate.stream { break }
+                return self.allow()
+            }
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        let follower = Task { try await cache.getOrEvaluate(key: "k") { XCTFail("followers do not evaluate"); return self.allow() } }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        follower.cancel()
+        do {
+            _ = try await follower.value
+            XCTFail("a cancelled follower must not receive a result")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        gate.continuation.yield()
+        let result = try await leader.value
+        XCTAssertEqual(result["decision"] as? Bool, true)
+        XCTAssertEqual(cache.size, 1, "the leader's decision was still cached")
+    }
+
+    func testACancelledCallerDoesNotReceiveACachedDecisionEither() async throws {
+        let (cache, _) = makeCache()
+        _ = try await cache.getOrEvaluate(key: "k") { self.allow() }
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await cache.getOrEvaluate(key: "k") { self.allow() }
+        }
+        do { _ = try await task.value; XCTFail("expected cancellation") } catch { XCTAssertTrue(error is CancellationError) }
+    }
+
     func testATtlOfZeroDisablesTheCache() async throws {
         let (cache, _) = makeCache(ttl: 0)
         XCTAssertFalse(cache.enabled)
