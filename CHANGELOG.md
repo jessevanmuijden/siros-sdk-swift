@@ -171,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **WMP child flows, further review follow-ups.** A child cancelled while its replay send is suspended is not requeued
+  when that send fails; a second resume during a suspended replay that then fails triggers another drain; a redelivered
+  start for a cancelled child does not run its handler again; a child start refused for good (its flow ended, or the
+  profile stopped) releases the route the peer registered for it.
 - **WMP child flows and session end, review follow-ups.** Shutdown is one-shot, so a retired session's close
   cannot run the application's cleanup again after a replacement session has begun. A session created without a
   `resumption_token` now ends at once when its connection is lost (terminal hook, pending requests failed)
