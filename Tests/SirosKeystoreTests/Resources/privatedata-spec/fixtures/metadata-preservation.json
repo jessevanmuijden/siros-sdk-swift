@@ -1,0 +1,21 @@
+{
+  "id": "metadata-preservation-001",
+  "description": "Credential and keypair metadata must be preserved exactly, as must every member this reader does not understand",
+  "version": "4",
+  "fields": {
+    "credentials": [
+      "format",
+      "kid",
+      "instanceId",
+      "batchId",
+      "credentialIssuerIdentifier",
+      "credentialConfigurationId",
+      "metadata"
+    ],
+    "keypairs": ["did", "algorithm", "publicKey", "createdAt"],
+    "settings": ["openidRefreshTokenMaxAgeInSeconds"]
+  },
+  "credentialMetadata": "OPTIONAL array of {type: non-empty string, value: any JSON}; stored exactly as supplied, order preserved, duplicate types allowed, absent (never null, never []) when empty",
+  "unknownMembers": "Every unrecognised member of an S.credentials[] entry and of S MUST be preserved with an identical value; an implementation that cannot MUST refuse to rewrite",
+  "expected": "all fields retained through decrypt/re-encrypt"
+}
