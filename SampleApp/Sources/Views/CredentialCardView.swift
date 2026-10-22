@@ -77,9 +77,23 @@ struct CredentialCardView: View {
     private var isExhausted: Bool { credentialBatchExhausted(instances) }
 
     var body: some View {
-        let meta = credential.metadata
-        let bgColor = meta?.backgroundColor.flatMap { Color(hex: $0) } ?? .accentColor
-        let fgColor = meta?.textColor.flatMap { Color(hex: $0) } ?? .white
+        // A credential whose metadata has not been built yet is still a
+        // credential, and it already carries what a card needs: its
+        // configuration id, its issuer and its own type. Reading that directly
+        // means the card does not depend on whether anything has populated
+        // `metadata`.
+        let meta = credential.metadata ?? CredentialUtils.buildFallbackMetadata(credential)
+        // A type that declares no colour gets a tint derived from its type
+        // identifier: stable across devices and launches, different between
+        // types (it used to be one accent colour for all of them).
+        let bgRGB = meta.backgroundColor.flatMap { CardRGB(hex: $0) }
+            ?? typeTintColor(typeId: meta.vct ?? meta.doctype, dark: colorScheme == .dark)
+        let bgColor = bgRGB.map { Color(red: $0.red, green: $0.green, blue: $0.blue) } ?? .accentColor
+        // Text colour: the issuer's if declared, else whichever of black and
+        // white reads better on the actual background.
+        let fgColor = meta.textColor.flatMap { Color(hex: $0) }
+            ?? bgRGB.map { contrastingCardTextColor(on: $0) }.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
+            ?? .white
 
         let card = Group {
             switch svgState {
@@ -167,26 +181,42 @@ struct CredentialCardView: View {
 
     @ViewBuilder
     private func flatCard(meta: CredentialMetadata?, bgColor: Color, fgColor: Color) -> some View {
+        let issuerName = issuerLabel(name: meta?.issuer?.name, url: meta?.issuer?.url)
+        let labels = cardLabels(name: meta?.name, format: credential.format, typeId: meta?.vct ?? meta?.doctype)
         VStack(alignment: .leading, spacing: 0) {
-            // Top: issuer badge
-            HStack(spacing: 8) {
-                issuerBadge(meta: meta, fgColor: fgColor)
-                Text(meta?.issuer?.name ?? "Unknown Issuer")
-                    .font(.caption)
-                    .foregroundStyle(fgColor.opacity(0.8))
-                Spacer()
-                Text(credential.format.uppercased())
-                    .font(.caption2.bold())
-                    .foregroundStyle(fgColor.opacity(0.6))
+            // Top: issuer badge (logo or initial), when the credential says who
+            // issued it. When it does not, the row is left out rather than
+            // filled in: a circle holding "?" beside the words "Unknown
+            // Issuer" tells the holder nothing twice, an empty corner once.
+            if issuerName != nil || meta?.logo?.uri != nil {
+                HStack(spacing: 8) {
+                    issuerBadge(meta: meta, issuerName: issuerName, fgColor: fgColor)
+                    if let issuerName {
+                        Text(issuerName)
+                            .font(.caption)
+                            .foregroundStyle(fgColor.opacity(0.8))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                }
             }
 
             Spacer()
 
-            // Bottom: credential name
-            Text(meta?.name ?? credential.format)
+            // Bottom: credential name, then the type beneath it. The wire
+            // format is not shown as a slot of its own: it is what a credential
+            // is encoded as, not what it is.
+            Text(labels.title)
                 .font(.title3.bold())
                 .foregroundStyle(fgColor)
                 .lineLimit(2)
+
+            if let typeBadge = labels.typeBadge {
+                Text(typeBadge)
+                    .font(.caption2)
+                    .foregroundStyle(fgColor.opacity(0.6))
+                    .lineLimit(1)
+            }
 
             if let description = meta?.description {
                 Text(description)
@@ -222,16 +252,25 @@ struct CredentialCardView: View {
     }
 
     @ViewBuilder
-    private func issuerBadge(meta: CredentialMetadata?, fgColor: Color) -> some View {
-        let initial = (meta?.issuer?.name ?? "?").prefix(1).uppercased()
-        Circle()
-            .fill(fgColor.opacity(0.15))
+    private func issuerBadge(meta: CredentialMetadata?, issuerName: String?, fgColor: Color) -> some View {
+        if let logo = (meta?.logo?.uri).flatMap({ URL(string: $0) }), ["http", "https"].contains(logo.scheme?.lowercased()) {
+            AsyncImage(url: logo) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Circle().fill(fgColor.opacity(0.15))
+            }
             .frame(width: 32, height: 32)
-            .overlay(
-                Text(initial)
-                    .font(.caption.bold())
-                    .foregroundStyle(fgColor)
-            )
+            .clipShape(Circle())
+        } else if let initial = issuerName?.prefix(1).uppercased() {
+            Circle()
+                .fill(fgColor.opacity(0.15))
+                .frame(width: 32, height: 32)
+                .overlay(
+                    Text(initial)
+                        .font(.caption.bold())
+                        .foregroundStyle(fgColor)
+                )
+        }
     }
 
     private func loadSvg(preferDark: Bool) async {
