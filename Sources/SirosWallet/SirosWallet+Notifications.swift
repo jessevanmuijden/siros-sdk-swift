@@ -47,6 +47,8 @@ extension SirosWallet {
         // happens to be current by the time each credential is stored.
         let vctmDocument = activeVctmDocument
         let attestedKeyIds = activeAttestedKeyIds
+        // Read BEFORE any await, together with the state it describes.
+        let epochAtStart = issuanceEpoch
         // A completed flow has no further sign_presentation coming - drop
         // its cached DCQL match results (if any; a no-op for an issuance
         // flow, which never populates this map) so it doesn't linger
@@ -56,7 +58,7 @@ extension SirosWallet {
         lock.unlock()
 
         // Fail closed on issuer trust before anything is stored or superseded.
-        if await issuanceTrustGateHandled(msg, offer: offer) { return }
+        if await issuanceTrustGateHandled(msg, offer: offer, epoch: epochAtStart) { return }
 
         // Shared across every copy in this response so the UI can group them
         // into one card (see StoredCredential.batchId) - ALWAYS assigned,

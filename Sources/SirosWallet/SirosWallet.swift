@@ -528,6 +528,12 @@ public final class SirosWallet: @unchecked Sendable {
     /// above; guarded by the same `lock`. See `resetIssuanceGuards()` for
     /// why every terminal path must clear it.
     var issuanceInFlight = false
+    /// Changed by every `resetIssuanceGuards()` (cancel, logout, error and
+    /// completion paths). A `flow_complete` reads it before its first await and
+    /// drops itself if it changed: a cancelled flow's completion must not store
+    /// credentials, delete a newer renewal's source batch or clear a newer
+    /// flow's guards. Guarded by `lock`.
+    var issuanceEpoch = 0
     /// When set, the next `flow_complete` is a renewal's - see
     /// `renewCredential`/`SirosWallet+Notifications.swift`'s `handleFlowComplete`.
     /// Not `private` for the same cross-file-extension-access reason as

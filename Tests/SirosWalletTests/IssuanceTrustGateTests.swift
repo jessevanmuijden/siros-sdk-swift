@@ -268,6 +268,55 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertTrue(h.listener.completed.isEmpty)
     }
 
+    func testANegativeEngineReportRefusesACompletionWithNoCredentials() async {
+        let h = makeHarness()
+        h.wallet.issuanceInFlight = true
+        var msg = flowComplete(credentials: [])
+        msg.credentials = nil
+        msg.refreshToken = "rt-must-not-be-captured"
+        msg.issuerTrust = IssuerTrustReport(issuer: "https://issuer.example", trusted: false, reason: "no")
+        await h.wallet.handleFlowComplete(msg: msg)
+
+        XCTAssertEqual(h.listener.untrusted.count, 1)
+        XCTAssertEqual(h.listener.errors, [issuerNotTrustedMessage])
+        XCTAssertTrue(h.listener.completed.isEmpty, "the flow is not reported complete")
+        XCTAssertFalse(h.wallet.issuanceInFlight)
+    }
+
+    func testACancelDuringTheTrustCheckDropsTheCompletionAndSparesANewerRenewal() async {
+        let h = makeHarness()
+        let wallet = h.wallet
+        let old = StoredCredential(id: 7, format: "vc+sd-jwt", raw: sdJwt(), batchId: 100, instanceId: 0)
+        await h.store.save(old)
+        wallet.mdocIssuanceTrustHook = { _ in
+            wallet.cancelCurrentFlow()                     // the user cancels ...
+            wallet.lock.lock(); wallet.pendingRenewalSourceBatchId = 100; wallet.issuanceInFlight = true
+            wallet.lock.unlock()                           // ... and a newer renewal starts
+            return TrustResult(trusted: true)
+        }
+        await wallet.handleFlowComplete(msg: flowComplete(credentials: [mdocCredential, sdJwtCredential]))
+
+        let stored = await h.store.getAll()
+        XCTAssertEqual(stored.map(\.id), [7], "the cancelled flow stored nothing and deleted nothing")
+        XCTAssertEqual(wallet.pendingRenewalSourceBatchId, 100, "the newer renewal keeps its source batch")
+        XCTAssertTrue(wallet.issuanceInFlight, "and its guard")
+        XCTAssertTrue(h.listener.completed.isEmpty && h.listener.errors.isEmpty)
+    }
+
+    func testACancelDuringTheTrustCheckDoesNotLetARefusalClearANewerFlowsGuards() async {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.mdocIssuanceTrustHook = { _ in
+            wallet.cancelCurrentFlow()
+            wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.lock.unlock()
+            return TrustResult(trusted: false)
+        }
+        await wallet.handleFlowComplete(msg: flowComplete(credentials: [mdocCredential]))
+        XCTAssertTrue(wallet.issuanceInFlight)
+        XCTAssertTrue(h.listener.untrusted.isEmpty)
+        XCTAssertTrue(h.notifier.events.isEmpty)
+    }
+
     func testARefusedRenewalKeepsTheOldBatch() async {
         let h = makeHarness()
         let old = StoredCredential(id: 7, format: "vc+sd-jwt", raw: sdJwt(), batchId: 100, instanceId: 0)

@@ -16,26 +16,36 @@ extension SirosWallet {
     /// - Returns: true when the completion has been dealt with and the caller
     ///   must stop (the issuance was refused, or the session ended while the
     ///   trust check was awaiting the network); false to carry on and store.
-    func issuanceTrustGateHandled(_ msg: FlowCompleteMessage, offer: CredentialOffer?) async -> Bool {
-        guard let credentials = msg.credentials, !credentials.isEmpty else { return false }
+    func issuanceTrustGateHandled(_ msg: FlowCompleteMessage, offer: CredentialOffer?, epoch: Int) async -> Bool {
+        let credentials = msg.credentials ?? []
         lock.lock(); let generation = sessionGeneration; lock.unlock()
+        // Also for a completion with no credentials: an explicit negative engine
+        // report refuses regardless of how many credentials came with it, so no
+        // refresh token is captured and the flow is not reported complete.
         let refusal = await issuanceTrustRefusal(
             credentials: credentials,
             engineTrust: msg.issuerTrust,
             mdocTrust: { await self.mdocIssuanceTrustResult($0) }
         )
-        lock.lock(); let sessionEnded = sessionGeneration != generation; lock.unlock()
-        if sessionEnded {
-            // The trust check awaited the network and the session ended meanwhile
-            // (logout / account deletion): this completion no longer owns any state.
-            #if canImport(os)
-            logger.warning("Flow \(msg.flowId, privacy: .public) completed after its session ended; dropping it")
-            #endif
-            return true
+        guard let refusal else {
+            return !isStillOwner(generation: generation, epoch: epoch, flowId: msg.flowId)
         }
-        guard let refusal else { return false }
-        await refuseUntrustedIssuance(msg: msg, offer: offer, reason: refusal)
+        await refuseUntrustedIssuance(msg: msg, offer: offer, reason: refusal, generation: generation, epoch: epoch)
         return true
+    }
+
+    /// Whether this completion still owns the issuance state: the session did
+    /// not end (logout / account replacement) and the issuance was not reset
+    /// (cancel, a newer flow) while the trust check awaited the network.
+    private func isStillOwner(generation: Int, epoch: Int, flowId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let owner = sessionGeneration == generation && issuanceEpoch == epoch
+        #if canImport(os)
+        if !owner {
+            logger.warning("Flow \(flowId, privacy: .public) was cancelled or its session ended during its trust check; dropping its completion")
+        }
+        #endif
+        return owner
     }
 
     /// Decodes an issued `mso_mdoc` credential and evaluates its issuer; nil
@@ -57,12 +67,44 @@ extension SirosWallet {
     /// batch is left untouched, and the issuer is told the wallet did not
     /// accept the credential (OID4VCI `credential_failure`, best effort, a
     /// fixed code and no detail).
-    private func refuseUntrustedIssuance(msg: FlowCompleteMessage, offer: CredentialOffer?, reason: String) async {
+    private func refuseUntrustedIssuance(
+        msg: FlowCompleteMessage, offer: CredentialOffer?, reason: String, generation: Int, epoch: Int
+    ) async {
+        // One claim, under the lock a logout / cancel also takes: ownership check,
+        // guard release and the state commit are a single step, so a cancelled
+        // flow cannot clear a newer flow's guards and a logout cannot be undone
+        // by restoring the old user's state. The credentials shown come from the
+        // current state; no store read can suspend in between.
+        lock.lock()
+        guard sessionGeneration == generation, issuanceEpoch == epoch else {
+            lock.unlock()
+            #if canImport(os)
+            logger.warning("Refusal of flow \(msg.flowId, privacy: .public) dropped: its session or issuance was superseded")
+            #endif
+            return
+        }
+        resetIssuanceGuardsLocked()
+        let newState: WalletState?
+        switch _state {
+        case .flowActive(let userId, let displayName, _, _, _, let creds):
+            newState = .ready(userId: userId, displayName: displayName, credentials: creds)
+        default:
+            newState = nil
+        }
+        var continuations: [AsyncStream<WalletState>.Continuation] = []
+        if let newState {
+            _state = newState
+            continuations = Array(stateContinuations.values)
+        }
+        let notifier = credentialNotifier
+        let listener = eventListener
+        lock.unlock()
+        for c in continuations { if let newState { c.yield(newState) } }
+
         let issuer = offer?.credentialIssuerIdentifier ?? msg.credentialIssuer ?? msg.issuerTrust?.issuer
         #if canImport(os)
         logger.error("Refusing issuance for flow \(msg.flowId, privacy: .public) from \(issuer ?? "unknown issuer", privacy: .public): \(reason, privacy: .public)")
         #endif
-        lock.lock(); let notifier = credentialNotifier; lock.unlock()
         for notificationId in (msg.credentials ?? []).compactMap({ $0.notificationId }) {
             notifier?.sendCredentialNotification(
                 flowId: msg.flowId,
@@ -71,17 +113,7 @@ extension SirosWallet {
                 eventDescription: "issuer_not_trusted"
             )
         }
-        resetIssuanceGuards()
-        lock.lock(); let listener = eventListener; lock.unlock()
         listener?.onIssuerNotTrusted(flowId: msg.flowId, issuer: issuer, reason: reason)
         listener?.onFlowError(flowId: msg.flowId, errorMessage: issuerNotTrustedMessage, redirectUri: msg.redirectUri)
-        switch state {
-        case .flowActive(let userId, let displayName, _, _, _, _),
-             .ready(let userId, let displayName, _, _):
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
-        default:
-            break
-        }
     }
 }

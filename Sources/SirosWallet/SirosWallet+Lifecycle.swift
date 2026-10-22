@@ -44,6 +44,15 @@ extension SirosWallet {
     /// cross-file-extension-access reason as `activeOffer` etc.
     func resetIssuanceGuards() {
         lock.lock()
+        resetIssuanceGuardsLocked()
+        lock.unlock()
+    }
+
+    /// `resetIssuanceGuards()` with `lock` already held. Also bumps
+    /// `issuanceEpoch`: whatever completion was already underway for the state
+    /// being cleared no longer owns it (see `issuanceTrustGateHandled`).
+    func resetIssuanceGuardsLocked() {
+        issuanceEpoch &+= 1
         activeOffer = nil
         activeVctm = nil
         activeVctmDocument = nil
@@ -58,7 +67,6 @@ extension SirosWallet {
         // (success or error) routes through here, same as `activeOffer`
         // etc. above.
         pendingRenewalSourceBatchId = nil
-        lock.unlock()
     }
 
     /// Cancel the current flow.
