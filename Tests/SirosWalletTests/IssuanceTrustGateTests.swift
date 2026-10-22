@@ -357,6 +357,36 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertEqual(h.listener.completed, ["p"])
     }
 
+    func testAnUntaggedCompletionWithIssuanceMetadataButNoCredentialsIsRefusedToo() async {
+        let h = makeHarness()
+        h.wallet.issuanceInFlight = true
+        h.wallet.pendingRenewalSourceBatchId = 100
+        var msg = flowComplete(credentials: [], startTag: nil)
+        msg.credentials = nil
+        msg.refreshToken = "rt-must-not-be-captured"
+        msg.credentialIssuer = "https://issuer.example"
+        msg.selectedCredentialConfigurationId = "pid"
+        await h.wallet.handleFlowComplete(msg: msg)
+
+        XCTAssertTrue(h.wallet.issuanceInFlight, "a newer renewal's guards are untouched")
+        XCTAssertEqual(h.wallet.pendingRenewalSourceBatchId, 100)
+        XCTAssertTrue(h.listener.completed.isEmpty, "not reported complete")
+    }
+
+    func testAnIssuanceThatWasCancelledWhilePreparingNoLongerOwnsItsStart() {
+        let h = makeHarness()
+        let wallet = h.wallet
+        // A takes the guard and captures its epoch (what startIssuanceByOffer does) ...
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        XCTAssertTrue(wallet.startStillOwned(aEpoch))
+        // ... is cancelled during its metadata fetch; B takes the guard.
+        wallet.cancelCurrentFlow()
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let bEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        XCTAssertNotEqual(aEpoch, bEpoch)
+        XCTAssertFalse(wallet.startStillOwned(aEpoch), "A's suspended start unwinds instead of sending a flow nobody owns")
+        XCTAssertTrue(wallet.startStillOwned(bEpoch))
+    }
+
     // MARK: - The signed docType
 
     private func msoPayload(docType: String?, tagged: Bool = true) -> [UInt8] {

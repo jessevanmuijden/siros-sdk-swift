@@ -600,13 +600,6 @@ extension SirosWallet {
         }
         let engine = Self.createEngineSession(engineBase, config.tenantId)
         lock.lock(); engineSession = engine; credentialNotifier = engine; lock.unlock()
-        // Every flow_start is tagged with the issuance epoch it is sent under, so its
-        // completion is judged by the state ITS flow started under.
-        engine.startTagProvider = { [weak self] in
-            guard let self else { return nil }
-            self.lock.lock(); defer { self.lock.unlock() }
-            return self.issuanceEpoch
-        }
         engine.connect(appToken: appToken, tokenProvider: { [weak self] in
             guard let tokens = self?.authTokens else {
                 throw SirosError.wallet(message: "Not connected")

@@ -180,12 +180,14 @@ extension SirosWallet {
                 // run once showed "No OAuth Client Attestations were
                 // provided" when resume skipped it) gets the headers from
                 // `handleSignRequest`'s answer. Nothing to pre-resolve here.
+                lock.lock(); let resumeEpoch = issuanceEpoch; lock.unlock()
                 engine.resumeIssuance(
                     offer: pending.offer,
                     credentialOfferUri: pending.credentialOfferUri,
                     redirectUri: pending.redirectUri,
                     authCode: code,
-                    codeVerifier: pending.codeVerifier
+                    codeVerifier: pending.codeVerifier,
+                    startTag: resumeEpoch
                 )
             } catch {
                 lock.lock(); let listener = eventListener; lock.unlock()

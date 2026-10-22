@@ -439,18 +439,16 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     private var issuerTrustReports: [String: IssuerTrustReport] = [:]
     private let issuerTrustLock = NSLock()
 
-    /// Tags a flow with the caller's state at the moment its `flow_start` was sent
-    /// (the wallet returns its issuance epoch), so a completion can later be judged
-    /// by the state ITS flow started under, even if the flow was cancelled and a
-    /// newer one started before its first progress arrived. Read at send time, on
-    /// the calling thread, never under a session lock.
-    public var startTagProvider: (@Sendable () -> Int?)?
+    /// A flow carries the tag its caller attached to its `flow_start` (the wallet's
+    /// issuance epoch, captured when the issuance guard was taken - not when the
+    /// message is finally sent, which can be after a cancel and a newer start).
+    /// See `StartTagTracker` for how a tag is tied to the flow id the engine
+    /// assigns, and why it refuses to guess when that is ambiguous.
     let startTags = StartTagTracker()
     /// Held across tagging AND sending, so concurrent starts enqueue in send order.
     private let flowStartLock = NSLock()
 
-    private func sendFlowStart(_ message: FlowStartMessage) {
-        let tag = startTagProvider?()
+    private func sendFlowStart(_ message: FlowStartMessage, tag: Int? = nil) {
         flowStartLock.lock(); defer { flowStartLock.unlock() }
         // A start sent with no socket is dropped by send(); it must not be queued.
         if webSocketTask != nil { startTags.enqueue(tag) }
@@ -566,7 +564,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         offer: String? = nil,
         credentialOfferUri: String? = nil,
         redirectUri: String? = nil,
-        authorizationDetails: [AuthorizationDetail]? = nil
+        authorizationDetails: [AuthorizationDetail]? = nil,
+        startTag: Int? = nil
     ) {
         sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
@@ -574,7 +573,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             credentialOfferUri: credentialOfferUri,
             redirectUri: redirectUri,
             authorizationDetails: (authorizationDetails?.isEmpty ?? true) ? nil : authorizationDetails
-        ))
+        ), tag: startTag)
     }
 
     /// Start an OID4VCI issuance flow with a pre-built Wallet Instance
@@ -615,7 +614,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         selectedCredentialConfigurationId: String,
         reissuanceKid: String? = nil,
         dpopJwk: String? = nil,
-        dpopKeyId: String? = nil
+        dpopKeyId: String? = nil,
+        startTag: Int? = nil
     ) {
         sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
@@ -625,7 +625,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             reissuanceKid: reissuanceKid,
             dpopJwk: dpopJwk,
             dpopKeyId: dpopKeyId
-        ))
+        ), tag: startTag)
     }
 
     /// Start an OID4VP credential presentation flow.
@@ -865,7 +865,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         credentialOfferUri: String? = nil,
         redirectUri: String? = nil,
         authCode: String,
-        codeVerifier: String? = nil
+        codeVerifier: String? = nil,
+        startTag: Int? = nil
     ) {
         sendFlowStart(FlowStartMessage(
             protocol: "oid4vci",
@@ -874,7 +875,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             redirectUri: redirectUri,
             authCode: authCode,
             codeVerifier: codeVerifier
-        ))
+        ), tag: startTag)
     }
 
     /// Resume an OID4VCI issuance flow with a pre-built Wallet Instance

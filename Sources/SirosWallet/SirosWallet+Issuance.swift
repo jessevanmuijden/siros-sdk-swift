@@ -739,6 +739,10 @@ extension SirosWallet {
         }
         issuanceInFlight = true
         activeOffer = offer
+        // The epoch this issuance owns, captured WHEN THE GUARD IS TAKEN: the awaits below
+        // can outlast a cancel and a newer start, and the flow_start must be tied to
+        // (and judged by) this issuance, not whichever one is current when it is sent.
+        let startEpoch = issuanceEpoch
         lock.unlock()
         do {
 
@@ -789,13 +793,17 @@ extension SirosWallet {
                 offerJson = "{}"
             }
 
+            // Cancelled (or superseded) while preparing: unwind instead of sending the
+            // engine a flow nobody owns any more (Kotlin: cancelCurrentFlow's epoch).
+            guard startStillOwned(startEpoch) else { return }
             // Wallet attestation is engine-requested (`request_attestation`
             // sign request, answered in `handleSignRequest`) - nothing to
             // resolve or attach up front.
             engine.startIssuance(
                 offer: offerJson,
                 redirectUri: config.redirectUri.isEmpty ? nil : config.redirectUri,
-                authorizationDetails: authorizationDetailsForActiveOffer()
+                authorizationDetails: authorizationDetailsForActiveOffer(),
+                startTag: startEpoch
             )
         } catch {
             // A synchronous start failure here means the flow was never
@@ -840,6 +848,7 @@ extension SirosWallet {
             throw SirosError.wallet(message: "Another issuance is already in progress")
         }
         issuanceInFlight = true
+        let startEpoch = issuanceEpoch // see startIssuanceByOffer
         lock.unlock()
         do {
             if let offer = await resolveOfferForDisplay(offerUri) {
@@ -868,16 +877,19 @@ extension SirosWallet {
             // resolves the offer and the issuer's authorization server itself
             // and tells us the exact PoP audience/client_id, so there is no
             // second client-side fetch of the offer or metadata for it here.
+            guard startStillOwned(startEpoch) else { return }
             switch IssuanceStart.resolve(offerUri: offerUri) {
             case .offer(let offer):
                 engine.startIssuance(
                     offer: offer,
-                    authorizationDetails: authorizationDetailsForActiveOffer()
+                    authorizationDetails: authorizationDetailsForActiveOffer(),
+                    startTag: startEpoch
                 )
             case .credentialOfferUri(let uri):
                 engine.startIssuance(
                     credentialOfferUri: uri,
-                    authorizationDetails: authorizationDetailsForActiveOffer()
+                    authorizationDetails: authorizationDetailsForActiveOffer(),
+                    startTag: startEpoch
                 )
             }
         } catch {

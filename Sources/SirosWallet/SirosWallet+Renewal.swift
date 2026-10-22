@@ -135,6 +135,7 @@ extension SirosWallet {
             throw SirosError.wallet(message: "Another issuance is already in progress")
         }
         issuanceInFlight = true
+        let startEpoch = issuanceEpoch // see startIssuanceByOffer
         lock.unlock()
         do {
             let candidates = await exportCredentialRefreshTokens()
@@ -158,13 +159,15 @@ extension SirosWallet {
                 logger.warning("Failed to refresh issuer metadata for renewal display; card will show raw format: \(error.localizedDescription)")
                 #endif
             }
+            guard startStillOwned(startEpoch) else { return }
             lock.lock(); pendingRenewalSourceBatchId = batchId; lock.unlock()
             engine.startRenewal(
                 refreshToken: candidate.refreshToken,
                 credentialIssuer: candidate.credentialIssuerIdentifier,
                 selectedCredentialConfigurationId: candidate.credentialConfigurationId,
                 dpopJwk: candidate.dpopJwk,
-                dpopKeyId: candidate.dpopKeyId
+                dpopKeyId: candidate.dpopKeyId,
+                startTag: startEpoch
             )
         } catch {
             // Same rationale as `startIssuance`'s catch block: a synchronous

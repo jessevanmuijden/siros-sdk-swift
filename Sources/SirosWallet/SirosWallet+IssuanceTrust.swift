@@ -18,13 +18,14 @@ extension SirosWallet {
     ///   trust check was awaiting the network); false to carry on and store.
     func issuanceTrustGateHandled(_ msg: FlowCompleteMessage, offer: CredentialOffer?, epoch tag: Int?) async -> Bool {
         let credentials = msg.credentials ?? []
-        // A completion that would store credentials or that carries a negative
-        // report must be able to prove which issuance it belongs to. Without a start
-        // tag it cannot (cannot compare => refuse): it is dropped, nothing stored.
+        // A completion that would store credentials, carries a negative report or
+        // carries issuance metadata (a refresh token, the issuer, the configuration)
+        // must be able to prove which issuance it belongs to. Without a start tag it
+        // cannot (cannot compare => refuse): it is dropped, nothing stored or captured.
         let epoch: Int
         if let tag {
             epoch = tag
-        } else if !credentials.isEmpty || msg.issuerTrust?.trusted == false {
+        } else if !credentials.isEmpty || msg.issuerTrust?.trusted == false || Self.carriesIssuanceMetadata(msg) {
             #if canImport(os)
             logger.error("Flow \(msg.flowId, privacy: .public) completed with no start tag; its issuance cannot be established, dropping it")
             #endif
@@ -129,5 +130,20 @@ extension SirosWallet {
         }
         listener?.onIssuerNotTrusted(flowId: msg.flowId, issuer: issuer, reason: reason)
         listener?.onFlowError(flowId: msg.flowId, errorMessage: issuerNotTrustedMessage, redirectUri: msg.redirectUri)
+    }
+
+    /// Whether the completion carries anything only an issuance produces, which
+    /// `handleFlowComplete` would act on (capture a refresh token, supersede a batch).
+    static func carriesIssuanceMetadata(_ msg: FlowCompleteMessage) -> Bool {
+        msg.refreshToken != nil || msg.dpopJwk != nil || msg.dpopKeyId != nil
+            || msg.credentialIssuer != nil || msg.selectedCredentialConfigurationId != nil
+    }
+
+    /// Whether the issuance that took the guard at `epoch` still owns it: a
+    /// cancel (or a newer start) since then bumped the epoch, and its suspended
+    /// start must unwind instead of sending a flow nobody owns.
+    func startStillOwned(_ epoch: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return issuanceEpoch == epoch
     }
 }

@@ -70,13 +70,46 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         XCTAssertNil(msg?.issuerTrust)
     }
 
-    // MARK: - Start tags (a flow keeps the tag of ITS flow_start)
+    // MARK: - Start tags (pair only when unambiguous)
 
-    func testAFlowKeepsTheTagOfItsOwnStartEvenIfANewerFlowStartedBeforeItsFirstProgress() async {
+    private final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var offset: Duration = .zero
+        private let base = ContinuousClock.now
+        func now() -> ContinuousClock.Instant { lock.lock(); defer { lock.unlock() }; return base.advanced(by: offset) }
+        func advance(_ d: Duration) { lock.lock(); offset += d; lock.unlock() }
+    }
+
+    func testASingleUnansweredStartTagsItsFlow() async {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
-        session.startTags.enqueue(0) // A started under epoch 0 ... and was cancelled
-        session.startTags.enqueue(1) // ... B started under epoch 1 before A's first progress was handled
-        await session.handleMessage(progress(flowId: "A", trusted: false)) // A's first progress arrives first
+        session.startTags.enqueue(3)
+        await session.handleMessage(progress(flowId: "A", trusted: true))
+        await session.handleMessage(complete(flowId: "A"))
+        let msg = await nextComplete(session)
+        XCTAssertEqual(msg?.startTag, 3)
+    }
+
+    func testTwoUnansweredStartsCannotBeToldApartSoNeitherFlowGetsATag() async {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        // The engine runs each flow_start in its own goroutine: B's progress may come first.
+        session.startTags.enqueue(0) // A
+        session.startTags.enqueue(1) // B
+        await session.handleMessage(progress(flowId: "B", trusted: true))
+        await session.handleMessage(progress(flowId: "A", trusted: false))
+        await session.handleMessage(complete(flowId: "A"))
+        await session.handleMessage(complete(flowId: "B"))
+        var it = session.flowComplete().makeAsyncIterator()
+        let a = await it.next()
+        let b = await it.next()
+        XCTAssertNil(a?.startTag, "guessing FIFO here could hand A's tag to B")
+        XCTAssertNil(b?.startTag)
+    }
+
+    func testStartsThatAreAnsweredOneAtATimeKeepTheirOwnTags() async {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.startTags.enqueue(0)
+        await session.handleMessage(progress(flowId: "A", trusted: true))
+        session.startTags.enqueue(1) // B starts only after A was answered
         await session.handleMessage(progress(flowId: "B", trusted: true))
         await session.handleMessage(complete(flowId: "A"))
         await session.handleMessage(complete(flowId: "B"))
@@ -87,9 +120,28 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         XCTAssertEqual(b?.startTag, 1)
     }
 
-    func testAFlowWhoseProgressWasNeverSeenHasNoTag() async {
+    func testAFlowThatCompletesBeforeAnyProgressIsPairedUnderTheSameRule() {
+        let tracker = StartTagTracker()
+        tracker.enqueue(9)
+        XCTAssertEqual(tracker.take(flowId: "A"), 9)
+        let ambiguous = StartTagTracker()
+        ambiguous.enqueue(1); ambiguous.enqueue(2)
+        XCTAssertNil(ambiguous.take(flowId: "A"))
+        XCTAssertNil(ambiguous.take(flowId: "B"))
+    }
+
+    func testAStartTheEngineNeverAnsweredExpiresAndDoesNotMakeLaterFlowsAmbiguous() {
+        let clock = Clock()
+        let tracker = StartTagTracker(ttl: .seconds(60), now: { clock.now() })
+        tracker.enqueue(0) // never answered
+        clock.advance(.seconds(61))
+        tracker.enqueue(1)
+        tracker.firstProgress(flowId: "B")
+        XCTAssertEqual(tracker.take(flowId: "B"), 1)
+    }
+
+    func testAFlowWhoseProgressWasNeverSeenAndNoStartIsQueuedHasNoTag() async {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
-        session.startTags.enqueue(5)
         await session.handleMessage(complete(flowId: "A"))
         let msg = await nextComplete(session)
         XCTAssertNil(msg?.startTag)
