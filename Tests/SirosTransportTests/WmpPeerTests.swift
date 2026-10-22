@@ -51,6 +51,16 @@ private final class StubProfile: WmpProfile, WmpFlowHandler, WmpMethodHandler, W
     }
 }
 
+private final class ShutdownProfile: WmpProfile, WmpShutdownProfile, @unchecked Sendable {
+    let name = "shutdown"
+    let capabilities: [String] = []
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+    func initialize(ctx: WmpPeerContext) {}
+    func shutdown() { lock.lock(); _count += 1; lock.unlock() }
+}
+
 // MARK: - Helpers
 
 private extension WmpPeerTests {
@@ -85,6 +95,40 @@ private extension WmpPeerTests {
 // MARK: - Tests
 
 final class WmpPeerTests: XCTestCase {
+
+    /// A profile's in-flight child handlers stop when the session ends, however it ends: an explicit close, a
+    /// session that failed for good (reconnects exhausted), and a caller that tears the wallet down.
+    func testProfilesAreShutDownWhenTheSessionEnds() async throws {
+        // 1. close()
+        let (peerA, transportA, _) = makePeer()
+        let shutdownA = ShutdownProfile()
+        peerA.use(shutdownA)
+        try await connectPeer(peerA, transport: transportA)
+        try? await peerA.close()
+        XCTAssertEqual(shutdownA.count, 1)
+
+        // 2. a teardown by a caller that cannot wait for close()
+        let (peerB, transportB, _) = makePeer()
+        let shutdownB = ShutdownProfile()
+        peerB.use(shutdownB)
+        try await connectPeer(peerB, transport: transportB)
+        peerB.shutdownProfiles()
+        XCTAssertEqual(shutdownB.count, 1)
+
+        // 3. a session that fails for good: no close() is ever called
+        let transportC = FakeTransport()
+        let sessionC = WmpSession(
+            transport: transportC,
+            config: WmpSessionConfig(requestTimeoutMs: 2_000, maxReconnectAttempts: 1, reconnectBaseMs: 1, reconnectMaxMs: 1)
+        )
+        let peerC = WmpPeer(session: sessionC)
+        let shutdownC = ShutdownProfile()
+        peerC.use(shutdownC)
+        try await connectPeer(peerC, transport: transportC)
+        transportC.simulateFailure()
+        for _ in 0..<150 where shutdownC.count == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertGreaterThanOrEqual(shutdownC.count, 1, "a failed session ends its children without a close()")
+    }
 
     func testProfileInitializeCalledOnUse() {
         let (peer, _, profile) = makePeer()

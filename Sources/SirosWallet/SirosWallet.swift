@@ -1333,6 +1333,7 @@ public final class SirosWallet: @unchecked Sendable {
         apiClient = nil
         lock.unlock()
         engine?.disconnect()
+        peer?.shutdownProfiles()
         if let peer { Task { try? await peer.close() } }
         cancelEngineTasks()
         releaseZkProvers()

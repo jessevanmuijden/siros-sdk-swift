@@ -93,6 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A cancelled sign request (a WMP child flow) installs no key, writes no issuance state and keeps no
   response; the `credential_failure` of a rejected response is handed to the transport (WMP: awaited)
   before the error answer; an encrypted completion that reports no credentials is an error, not a success.
+  The WMP handlers also end when the session fails for good (reconnects exhausted) or closes, and the wallet
+  stops them (`WmpPeer.shutdownProfiles()`) before it clears blind-issuance state on logout, `destroy()` and
+  an ended session, instead of relying on an unawaited `close()`.
   The AES block primitive is CommonCrypto on Apple platforms and a FIPS 197 reference elsewhere (CI);
   the unwrap and CBC are built on it. Tests: 12 JWEs from go-jose v4.1.6 (every alg/enc pair, vendored
   with its generator), RFC 7518 Appendix C, RFC 3394, RFC 7516 A.3 and FIPS 197 vectors.
