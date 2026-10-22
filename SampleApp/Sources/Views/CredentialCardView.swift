@@ -89,11 +89,11 @@ struct CredentialCardView: View {
         let bgRGB = meta.backgroundColor.flatMap { CardRGB(hex: $0) }
             ?? typeTintColor(typeId: cardTypeId(metadata: meta, credential: credential), dark: colorScheme == .dark)
         let bgColor = bgRGB.map { Color(red: $0.red, green: $0.green, blue: $0.blue) } ?? .accentColor
-        // Text colour: the issuer's if declared, else whichever of black and
-        // white reads better on the actual background.
-        let fgColor = meta.textColor.flatMap { Color(hex: $0) }
-            ?? bgRGB.map { contrastingCardTextColor(on: $0) }.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
-            ?? .white
+        // Text colour: the issuer's if declared AND readable on the resolved
+        // background (a declared white on a generated light tint is 1.66:1),
+        // else whichever of black and white reads better.
+        let fgRGB = resolvedCardTextColor(declared: meta.textColor.flatMap { CardRGB(hex: $0) }, on: bgRGB)
+        let fgColor = fgRGB.map { Color(red: $0.red, green: $0.green, blue: $0.blue) } ?? .white
 
         let card = Group {
             switch svgState {

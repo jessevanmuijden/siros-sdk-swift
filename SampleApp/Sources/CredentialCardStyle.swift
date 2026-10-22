@@ -65,6 +65,17 @@ func contrastingCardTextColor(on background: CardRGB) -> CardRGB {
     cardContrastRatio(.black, background) >= cardContrastRatio(.white, background) ? .black : .white
 }
 
+/// The text colour for a card: the `declared` one only if it reaches the
+/// readable floor against the resolved `background` (an issuer may declare a
+/// text colour without a background, which then lands on a generated tint),
+/// otherwise the better of black and white. Nil only when there is neither a
+/// declared colour nor a background to judge against.
+func resolvedCardTextColor(declared: CardRGB?, on background: CardRGB?) -> CardRGB? {
+    guard let background else { return declared }
+    if let declared, cardContrastRatio(declared, background) >= minReadableContrastRatio { return declared }
+    return contrastingCardTextColor(on: background)
+}
+
 /// HSL to RGB; hue in degrees, saturation and lightness 0...1.
 func cardColorFromHSL(hue: Double, saturation: Double, lightness: Double) -> CardRGB {
     let c = (1 - abs(2 * lightness - 1)) * saturation

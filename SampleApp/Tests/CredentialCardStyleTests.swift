@@ -239,6 +239,32 @@ final class CredentialCardStyleTests: XCTestCase {
         XCTAssertEqual(contrastingCardTextColor(on: .black), .white)
     }
 
+    /// An issuer that declares a text colour but no background lands on a
+    /// generated tint: white on the light tint of `uri:eu.ebw.oid.1` is 1.66:1.
+    func testADeclaredTextColourThatIsUnreadableOnTheTintIsReplaced() throws {
+        let tint = try XCTUnwrap(typeTintColor(typeId: "uri:eu.ebw.oid.1", dark: false))
+        XCTAssertLessThan(cardContrastRatio(.white, tint), 2.0, "premise: white is unreadable on this tint")
+        let resolved = try XCTUnwrap(resolvedCardTextColor(declared: .white, on: tint))
+        XCTAssertNotEqual(resolved, .white)
+        XCTAssertGreaterThanOrEqual(cardContrastRatio(resolved, tint), minReadableContrastRatio)
+    }
+
+    func testAReadableDeclaredTextColourIsKept() throws {
+        let tint = try XCTUnwrap(typeTintColor(typeId: "uri:eu.ebw.oid.1", dark: false))
+        let dark = try XCTUnwrap(CardRGB(hex: "#101010"))
+        XCTAssertEqual(resolvedCardTextColor(declared: dark, on: tint), dark)
+        // Declared white on the DARK tint is readable and stays.
+        let darkTint = try XCTUnwrap(typeTintColor(typeId: "uri:eu.ebw.oid.1", dark: true))
+        XCTAssertGreaterThanOrEqual(cardContrastRatio(.white, darkTint), minReadableContrastRatio)
+        XCTAssertEqual(resolvedCardTextColor(declared: .white, on: darkTint), .white)
+    }
+
+    func testTextColourWithNothingToJudgeAgainst() {
+        XCTAssertEqual(resolvedCardTextColor(declared: .white, on: nil), .white)
+        XCTAssertNil(resolvedCardTextColor(declared: nil, on: nil))
+        XCTAssertEqual(resolvedCardTextColor(declared: nil, on: .white), .black)
+    }
+
     func testHslConversionHitsThePrimaries() {
         XCTAssertEqual(cardColorFromHSL(hue: 0, saturation: 1, lightness: 0.5), CardRGB(red: 1, green: 0, blue: 0))
         XCTAssertEqual(cardColorFromHSL(hue: 120, saturation: 1, lightness: 0.5), CardRGB(red: 0, green: 1, blue: 0))
