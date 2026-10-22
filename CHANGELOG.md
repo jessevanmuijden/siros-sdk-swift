@@ -215,7 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers as above, without holding the start request while the user decides. A child that is
   cancelled, whose parent is cancelled, completes or fails, or whose session closes (`WmpPeer.close`) is
   cancelled, released from the peer's tracking at once (not when its handler returns) and answers nothing,
-  even if its handler returns normally; after `shutdown()` no child is started, and a finished child is released from the peer's tracking. The old progress-step route is
+  even if its handler returns normally; after `shutdown()` no child is started and a queued child never enters its handler; a cancel made locally (`WmpPeer.cancelFlow`) stops the flow here at once; a failing match child reports `MATCH_ERROR`, and a finished child is released from the peer's tracking. The old progress-step route is
   left as it was. **`wmp.flow.error` now carries the protocol's numeric code (-31006)**: go-wmp reads
   `code` as an int, so the string codes the profile sent made the whole notification undecodable and
   the refusal was lost; the application code moves to `data.error_code` and the text to `message`.
