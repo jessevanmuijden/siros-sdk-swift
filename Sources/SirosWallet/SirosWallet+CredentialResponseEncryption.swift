@@ -142,6 +142,8 @@ extension SirosWallet {
                 // A cancelled request is not a rejection: no `credential_failure`, no cleanup here.
                 throw CancellationError()
             } catch {
+                // A request cancelled while the receiver was suspended is not a rejection, whatever the receiver threw.
+                if Task.isCancelled { throw CancellationError() }
                 // The response was read and rejected: the issuer is owed a credential_failure for it
                 // (the engine registered the notification context before relaying the first JWE).
                 await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
@@ -157,7 +159,15 @@ extension SirosWallet {
             lock.unlock()
             throw CredentialResponseError.noKey
         }
-        decryptedCredentialResponses[flowId, default: []].append(response)
+        // Only a response that carries credentials is kept (a deferred poll's answer has nothing to pair, and its
+        // metadata tree, up to 1 MiB, must not pile up per poll), and never more than the engine's 256 credentials
+        // for the flow.
+        let heldCount = decryptedCredentialResponses[flowId, default: []].reduce(0) { $0 + $1.credentials.count }
+        guard heldCount + response.credentials.count <= 256 else {
+            lock.unlock()
+            throw CredentialResponseError.malformedResponse
+        }
+        if !response.credentials.isEmpty { decryptedCredentialResponses[flowId, default: []].append(response) }
         lock.unlock()
         if let transactionId = response.transactionId {
             return CredentialResponseControl(transactionId: transactionId, interval: response.interval)

@@ -275,6 +275,62 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// Repeated deferred polls do not pile up a metadata tree each: only a response that carries credentials is
+    /// kept, and never more than 256 credentials for the flow.
+    func testDeferredPollsAreNotRetainedAndTheCredentialCountIsBounded() async throws {
+        let w = wallet()
+        let key = try installOwnKey(w, flowId: "rp")
+        for _ in 0..<10 {
+            let body = #"{"transaction_id":"tx","interval":1,"credential_metadata":{"x":"\#(String(repeating: "m", count: 1000))"}}"#
+            _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(body, to: key), deferred: true)
+        }
+        w.lock.lock(); let held = w.decryptedCredentialResponses["rp"]?.count ?? 0; w.lock.unlock()
+        XCTAssertEqual(held, 0, "ten polls retain nothing")
+        func batch(_ n: Int) -> String {
+            #"{"credentials":["# + (0..<n).map { _ in #"{"credential":"c"}"# }.joined(separator: ",") + "]}"
+        }
+        _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(200), to: key), deferred: false)
+        do {
+            _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(100), to: key), deferred: true)
+            XCTFail("more than 256 credentials for one flow")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse) }
+        XCTAssertEqual(w.takeDecryptedCredentialResponses(flowId: "rp").flatMap(\.credentials).count, 200)
+    }
+
+    /// A request cancelled while the receiver is suspended is not a rejection even if the receiver then throws an
+    /// ordinary error: no `credential_failure` for the parent issuance.
+    func testACancelledRequestWhoseReceiverThrowsAnOrdinaryErrorSendsNoFailure() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        struct Boom: Error {}
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        try installKey(w, flowId: "ce")
+        let gate = Gate()
+        w.credentialMetadataReceiver = { _, _, _ in
+            while await !gate.isOpen { await Task.yield() }
+            throw Boom()
+        }
+        let task = Task { try await w.decryptCredentialResponse(flowId: "ce", jwe: Self.jwe, deferred: false) }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        task.cancel()
+        await gate.release()
+        do { _ = try await task.value; XCTFail("cancelled") } catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertTrue(notifier.sent.isEmpty)
+    }
+
+    /// The WMP session ending (the profile's shutdown) clears what blind issuance holds.
+    func testShuttingTheSessionDownClearsBlindIssuanceState() async throws {
+        let w = wallet()
+        try installKey(w, flowId: "sd")
+        _ = try await w.decryptCredentialResponse(flowId: "sd", jwe: Self.jwe, deferred: false)
+        try installKey(w, flowId: "sd2")
+        w.clearBlindIssuanceState()
+        w.lock.lock(); let n = (w.credentialResponseKeys.count, w.decryptedCredentialResponses.count); w.lock.unlock()
+        XCTAssertEqual(n.0, 0)
+        XCTAssertEqual(n.1, 0)
+    }
+
     /// A completion the wallet cannot read ends the issuance and leaves the wallet ready, not flow-active.
     func testAnUnreadableEncryptedCompletionLeavesTheWalletReady() async throws {
         let w = wallet()

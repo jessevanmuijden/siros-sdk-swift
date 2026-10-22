@@ -165,14 +165,9 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
     }
 
     private func startDispatch() {
-        // A session that fails for good (reconnects exhausted) or closes ends the handlers running for it,
-        // whether or not anyone calls `close()`.
-        Task { [weak self] in
-            guard let self else { return }
-            for await state in self.session.stateStream where state == .failed || state == .closed {
-                self.registry.shutdownProfiles()
-            }
-        }
+        // A session that ends for good (reconnects exhausted, or closed) ends the handlers running for it, whether
+        // or not anyone calls `close()`. A hook, not a reader of `stateStream`: that stream belongs to the host.
+        session.onTerminal = { [weak self] in self?.registry.shutdownProfiles() }
         Task { [weak self] in
             guard let self else { return }
             for await msg in self.session.notifications() {

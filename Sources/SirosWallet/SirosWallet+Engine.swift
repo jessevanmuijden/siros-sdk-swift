@@ -163,6 +163,11 @@ extension SirosWallet {
                 self?.resetIssuanceGuards()
                 self?.cancelTransactionTasks(flowId: flowId)
                 self?.eventListener?.onFlowError(flowId: flowId, errorMessage: "\(code ?? ""): \(message ?? "")", redirectUri: nil)
+            },
+            onShutdown: { [weak self] in
+                // The WMP session ended (closed, or failed for good): what blind issuance holds goes with it.
+                self?.clearBlindIssuanceState()
+                self?.resetIssuanceGuards()
             }
         ))
         peer.use(profile)
@@ -604,6 +609,8 @@ extension SirosWallet {
         }
         let engine = Self.createEngineSession(engineBase, config.tenantId)
         lock.lock(); engineSession = engine; credentialNotifier = engine; lock.unlock()
+        // A replaced socket ends the flows that ran on the old one: their response keys and opened responses go too.
+        engine.onSocketReplaced = { [weak self] in self?.clearBlindIssuanceState() }
         engine.connect(appToken: appToken, tokenProvider: { [weak self] in
             guard let tokens = self?.authTokens else {
                 throw SirosError.wallet(message: "Not connected")

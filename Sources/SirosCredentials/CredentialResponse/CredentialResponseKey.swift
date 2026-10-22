@@ -157,7 +157,7 @@ public struct DecryptedCredentialResponse: Sendable, Equatable {
         case .string(let text):
             guard !text.isEmpty else { throw ParseError.malformed("an empty credential") }
             return text
-        case .object, .array:
+        case .object:
             return try json(value)
         default:
             throw ParseError.malformed("a credential is neither a string nor an object")

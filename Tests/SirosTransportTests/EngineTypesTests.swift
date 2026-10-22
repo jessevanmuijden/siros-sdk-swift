@@ -580,4 +580,14 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertNil(object["vp_token"])
         XCTAssertNil(object["error"])
     }
+
+    /// Losing the socket tells the owner once, before a replacement is attempted, so what it keeps for the flows
+    /// that ran on the old socket can go.
+    func testALostSocketTellsTheOwnerOnceBeforeReconnecting() {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        var told = 0
+        session.onSocketReplaced = { told += 1 }
+        session.scheduleReconnect()
+        XCTAssertEqual(told, 1)
+    }
 }
