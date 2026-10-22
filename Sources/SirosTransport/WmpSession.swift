@@ -100,7 +100,6 @@ public final class WmpSession: @unchecked Sendable {
         resumptionToken = parsed.resumptionToken
 
         setState(.active)
-        onResumed?()
     }
 
     /// Resume an existing session after reconnection.
@@ -128,6 +127,7 @@ public final class WmpSession: @unchecked Sendable {
         }
 
         setState(.active)
+        onResumed?()
     }
 
     /// Close the session gracefully.

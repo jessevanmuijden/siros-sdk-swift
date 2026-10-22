@@ -375,6 +375,51 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.notifications.isEmpty, "no complete and no error for a cancelled child")
     }
 
+    /// Two answers are queued for the resume. While the first replay send is suspended the second's parent is
+    /// cancelled (or the profile shuts down): the second answer is revalidated before it is sent and never goes out.
+    func testAReplayDoesNotSendAnAnswerCancelledWhileAnEarlierSendWasSuspended() async throws {
+        for ending in ["cancelParent", "shutdown"] {
+            let ctx = ReplayPeerContext()
+            let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+            profile.initialize(ctx: ctx)
+            for (child, parent) in [("c1", "p1"), ("c2", "p2")] {
+                await profile.runChildFlow(params: childStart(flowType: "sign", flowId: child, params: [
+                    "action": .string("sign_presentation"), "parent_flow_id": .string(parent),
+                ]))
+            }
+            ctx.startReplay()
+            profile.sessionResumed()
+            for _ in 0..<200 where ctx.inFlight.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+            let first = try XCTUnwrap(ctx.inFlight.first)
+            let second = first == "c1" ? "c2" : "c1"
+            if ending == "shutdown" { profile.shutdown() } else {
+                await profile.handleCancel(params: FlowCancelParams(flowId: second == "c1" ? "p1" : "p2"))
+            }
+            ctx.release()
+            try await Task.sleep(nanoseconds: 200_000_000)
+            XCTAssertEqual(ctx.sentFlowIds, [first], "\(ending): only the send already under way completes; \(second) is not sent")
+        }
+    }
+
+    /// Cancelling a child whose answer is queued for the resume is a child cancel: the wallet's parent-flow
+    /// cancellation callback is not invoked (it would reset the parent's guards).
+    func testCancellingAChildWithAQueuedAnswerDoesNotCancelTheParentInTheWallet() async throws {
+        let ctx = ReplayPeerContext()           // every send fails: the answer is queued
+        var cancelled: [String] = []
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") },
+            onCancel: { cancelled.append($0) }
+        ))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c1", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ]))
+        await profile.handleCancel(params: FlowCancelParams(flowId: "c1"))
+        XCTAssertTrue(cancelled.isEmpty, "only a child operation was cancelled")
+        await profile.handleCancel(params: FlowCancelParams(flowId: "p1"))
+        XCTAssertEqual(cancelled, ["p1"], "a flow of its own still is")
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
@@ -937,6 +982,36 @@ private final class FlakyPeerContext: WmpPeerContext, @unchecked Sendable {
     func notify(method: String, params: [String: AnyCodable]?) async throws {
         if failing { throw WmpSessionError.connectionFailed }
         lock.lock(); _sent.append((method, params)); lock.unlock()
+    }
+    func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
+}
+
+/// Fails every send until `startReplay()`, then suspends each send until `release()`, recording what went out.
+private final class ReplayPeerContext: WmpPeerContext, @unchecked Sendable {
+    let codec = WmpCodec()
+    private let lock = NSLock()
+    private var replaying = false
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+    private var open = false
+    private var _inFlight: [String] = []
+    private var _sent: [String] = []
+    var inFlight: [String] { lock.lock(); defer { lock.unlock() }; return _inFlight }
+    var sentFlowIds: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
+    func startReplay() { lock.lock(); replaying = true; lock.unlock() }
+    func release() {
+        lock.lock(); open = true; let all = blocked; blocked = []; lock.unlock()
+        for c in all { c.resume() }
+    }
+    func releaseFlow(flowId: String) {}
+    func notify(method: String, params: [String: AnyCodable]?) async throws {
+        lock.lock(); let go = replaying; lock.unlock()
+        if !go { throw WmpSessionError.connectionFailed }
+        let id = params?["flow_id"]?.stringValue ?? "?"
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock(); _inFlight.append(id)
+            if open { lock.unlock(); c.resume() } else { blocked.append(c); lock.unlock() }
+        }
+        lock.lock(); _sent.append(id); lock.unlock()
     }
     func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
 }

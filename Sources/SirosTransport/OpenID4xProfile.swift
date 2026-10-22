@@ -703,11 +703,17 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     /// The session came back after a loss: the answers that could not be sent go out now.
     public func sessionResumed() {
         childLock.lock()
-        let pending = unsentAnswers
+        let pending = Array(unsentAnswers.keys)
         childLock.unlock()
         guard !pending.isEmpty else { return }
         Task { [self] in
-            for (childId, answer) in pending {
+            for childId in pending {
+                // Revalidated at each step: a parent that ended or a shutdown while an earlier send was suspended
+                // has already dropped the entry (or stopped the profile), and its answer must not go out now.
+                childLock.lock()
+                let answer = stopped ? nil : unsentAnswers[childId]
+                childLock.unlock()
+                guard let answer else { continue }
                 guard (try? await peer?.notify(method: answer.method, params: answer.params)) != nil else { continue }
                 childLock.lock(); unsentAnswers.removeValue(forKey: childId); childLock.unlock()
                 peer?.releaseFlow(flowId: childId)
@@ -783,7 +789,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         childLock.lock()
         var running: [Task<Void, Never>] = []
         var ids: [String] = []
-        let wasChild = childTasks[flowId] != nil
+        // A child whose answer is queued for the resume is still a child, though it no longer has a task.
+        let wasChild = childTasks[flowId] != nil || unsentAnswers[flowId] != nil
         endedParents.append(flowId)
         if endedParents.count > maxEndedParents { endedParents.removeFirst(endedParents.count - maxEndedParents) }
         for (childId, answer) in unsentAnswers where childId == flowId || answer.parent == flowId {
