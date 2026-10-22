@@ -690,7 +690,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let sender = RecordingSender()
         let json = """
         {"type":"sign_request","flow_id":"u1","message_id":"m","action":"generate_proof","params":{"audience":"a","nonce":"n",
-         "credential_response_encryption":{"alg":"ECDH-ES+A192KW","enc":"A256GCM","required":true}}}
+         "credential_response_encryption":{"alg":"ECDH-ES+A512KW","enc":"A256GCM","required":true}}}
         """
         try await w.answerGenerateProof(engine: sender, msg: try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8)))
         XCTAssertEqual(sender.sent.count, 1)
@@ -702,7 +702,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         // Over WMP the same is a refusal with that code.
         do {
             _ = try await w.wmpGenerateProof(flowId: "u2", params: SignSubFlowParams(
-                action: "generate_proof", credentialResponseEncryption: CredentialResponseEncryptionRequest(alg: "ECDH-ES+A192KW", enc: "A256GCM", required: true)
+                action: "generate_proof", credentialResponseEncryption: CredentialResponseEncryptionRequest(alg: "ECDH-ES+A512KW", enc: "A256GCM", required: true)
             ))
             XCTFail("required and unsupported")
         } catch { XCTAssertEqual((error as? WmpErrorCodeProviding)?.wmpErrorCode, "UNSUPPORTED_RESPONSE_ENCRYPTION") }
@@ -749,7 +749,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
 
     func testEveryPairTheContractNamesIsAdvertised() {
         let w = wallet()
-        for alg in ["ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A256KW"] {
+        for alg in ["ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A192KW", "ECDH-ES+A256KW"] {
             for enc in ["A128GCM", "A256GCM", "A128CBC-HS256", "A256CBC-HS512"] {
                 let jwk = w.credentialResponseEncryptionJwk(flowId: "f", request: .init(alg: alg, enc: enc, required: false))
                 XCTAssertEqual(jwk?["alg"], alg, "\(alg) \(enc)")

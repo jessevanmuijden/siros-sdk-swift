@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   building a JWE around a wrong `vp_token`; a response that cannot be built (no validated `client_id`, a bad key, an unsupported pair, too large) and any other sign failure is ANSWERED with an error `sign_response` (the original `message_id`, a code and no detail) instead of left to the engine's sign timeout; a verifier JWK with a malformed member, or any private `d`, is refused rather than filtered; a selected credential that is gone from the store is a refusal, not a shorter presentation; `response_encryption: null` or an unreadable one is refused on the
   WebSocket too (`ResponseEncryptionMember`). Cross-checked against go-jose
   v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
+- **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
+  Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1

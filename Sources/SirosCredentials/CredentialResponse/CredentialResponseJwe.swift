@@ -29,7 +29,7 @@ public struct CredentialResponseEncryptionParams: Sendable, Equatable {
         self.enc = enc
     }
 
-    public static let supportedAlgs = ["ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A256KW"]
+    public static let supportedAlgs = ["ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A192KW", "ECDH-ES+A256KW"]
     public static let supportedEncs = ["A128GCM", "A256GCM", "A128CBC-HS256", "A256CBC-HS512"]
 
     public var isSupported: Bool { Self.supportedAlgs.contains(alg) && Self.supportedEncs.contains(enc) }
@@ -38,7 +38,7 @@ public struct CredentialResponseEncryptionParams: Sendable, Equatable {
 /// A Credential Response JWE (compact serialization) opened with a recipient P-256 key:
 /// ECDH-ES (RFC 7518 section 4.6) with the content encryptions A128GCM, A256GCM,
 /// A128CBC-HS256 and A256CBC-HS512, directly or with AES Key Wrap (`ECDH-ES+A128KW`,
-/// `ECDH-ES+A256KW`, RFC 3394).
+/// `ECDH-ES+A192KW`, `ECDH-ES+A256KW`, RFC 3394).
 public enum CredentialResponseJwe {
 
     /// Decrypt `compact` with `recipient`. When `expected` is given the header's `alg` and
@@ -103,7 +103,7 @@ public enum CredentialResponseJwe {
             guard encryptedKey.count == content.keyBytes + 8 else {
                 throw CredentialResponseJweError.malformed("the encrypted key has the wrong length")
             }
-            let kekBytes = alg == "ECDH-ES+A128KW" ? 16 : 32
+            let kekBytes = alg == "ECDH-ES+A128KW" ? 16 : (alg == "ECDH-ES+A192KW" ? 24 : 32)
             let kek = concatKdf(z: z, algorithmId: alg, apu: apu, apv: apv, keyBits: kekBytes * 8)
             guard let unwrapped = try? AesBlock.keyUnwrap(kek: kek, wrapped: Array(encryptedKey)),
                   unwrapped.count == content.keyBytes else {
