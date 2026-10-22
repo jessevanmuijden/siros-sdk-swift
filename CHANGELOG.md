@@ -228,6 +228,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **WMP child flows and session end, review follow-ups.** Shutdown is one-shot, so a retired session's close
+  cannot run the application's cleanup again after a replacement session has begun. A session created without a
+  `resumption_token` now ends at once when its connection is lost (terminal hook, pending requests failed)
+  instead of staying marked active, and the terminal hook is installed before `create`. A sign payload that does
+  not decode is `INVALID_PARAMS`, not a sign failure. A child stays tracked until its terminal answer is sent, so
+  a redelivered start cannot run a second handler; an answer that could not be sent (connection down) is kept and
+  sent when the session resumes (`WmpSession.onResumed`, `WmpResumeProfile`), without running the handler again.
 - **WMP: flow actions and trust answers now match go-wmp, and the old sign/match progress route is gone
   (no shim).** `trust_result` put `trusted`, `framework` and `reason` next to `action`; go-wmp's
   `FlowActionParams` reads them under `params`, so the engine saw an empty payload. They are sent under

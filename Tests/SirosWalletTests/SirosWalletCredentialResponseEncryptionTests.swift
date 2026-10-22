@@ -275,10 +275,41 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// A decrypt whose flow was cancelled while its receiver was suspended fails later, after another issuance has
+    /// begun: its failure must not reset the new issuance's guards, key or state.
+    func testALateFailureOfACancelledFlowLeavesTheNextIssuanceAlone() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        struct Boom: Error {}
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        try installKey(w, flowId: "A")
+        let gate = Gate()
+        w.credentialMetadataReceiver = { _, _, _ in
+            while await !gate.isOpen { await Task.yield() }
+            throw Boom()
+        }
+        let a = Task { try await w.wmpDecryptCredentialResponse(flowId: "A", params: SignSubFlowParams(action: "decrypt_credential_response", jwe: Self.jwe, deferred: false)) }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        w.cancelCurrentFlow()                       // issuance A is cancelled ...
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        try installKey(w, flowId: "B")              // ... and B begins
+        await gate.release()
+        do { _ = try await a.value; XCTFail("A's decrypt fails") } catch { /* reported to the engine for A only */ }
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is not reset by A's late failure")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        XCTAssertTrue(listener.errors.isEmpty, "B is not failed")
+    }
+
     /// Repeated deferred polls do not pile up a metadata tree each: only a response that carries credentials is
     /// kept, and never more than 256 credentials for the flow.
     func testDeferredPollsAreNotRetainedAndTheCredentialCountIsBounded() async throws {
         let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
         let key = try installOwnKey(w, flowId: "rp")
         for _ in 0..<10 {
             let body = #"{"transaction_id":"tx","interval":1,"credential_metadata":{"x":"\#(String(repeating: "m", count: 1000))"}}"#
@@ -286,14 +317,17 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
         w.lock.lock(); let held = w.decryptedCredentialResponses["rp"]?.count ?? 0; w.lock.unlock()
         XCTAssertEqual(held, 0, "ten polls retain nothing")
-        func batch(_ n: Int) -> String {
-            #"{"credentials":["# + (0..<n).map { _ in #"{"credential":"c"}"# }.joined(separator: ",") + "]}"
+        func batch(_ n: Int, notification: String? = nil) -> String {
+            #"{"credentials":["# + (0..<n).map { _ in #"{"credential":"c"}"# }.joined(separator: ",") + "]"
+                + (notification.map { #","notification_id":"\#($0)""# } ?? "") + "}"
         }
         _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(200), to: key), deferred: false)
         do {
-            _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(100), to: key), deferred: true)
+            _ = try await w.decryptCredentialResponse(flowId: "rp", jwe: try encrypt(batch(100, notification: "n-over"), to: key), deferred: true)
             XCTFail("more than 256 credentials for one flow")
         } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse) }
+        XCTAssertEqual(notifier.sent.map(\.event), [CredentialNotificationEvent.failure], "the issuer is told of the rejection")
+        XCTAssertEqual(notifier.sent.first?.notificationId, "n-over")
         XCTAssertEqual(w.takeDecryptedCredentialResponses(flowId: "rp").flatMap(\.credentials).count, 200)
     }
 
