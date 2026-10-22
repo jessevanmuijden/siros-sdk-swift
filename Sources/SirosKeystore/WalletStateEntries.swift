@@ -19,14 +19,18 @@ enum WalletStateEntries {
 
     // MARK: - Credentials
 
-    static func credentialEntries(credentials: [Int64: String], existingS: [String: Any]?) -> [[String: Any]] {
+    /// - Parameter metadata: the keystore's `S.credentials[].metadata` per credential, the source of truth
+    ///   for that member (a credential with none has no `metadata` member, whatever the loaded entry had).
+    static func credentialEntries(
+        credentials: [Int64: String], metadata: [Int64: Any] = [:], existingS: [String: Any]?
+    ) -> [[String: Any]] {
         var originals: [Int64: [String: Any]] = [:]
         for case let entry as [String: Any] in (existingS?["credentials"] as? [Any]) ?? [] {
             if let id = int64(entry["credentialId"]) { originals[id] = entry }
         }
         let order = positions(of: existingS?["credentials"]) { int64($0["credentialId"]) }
         return credentials.keys.sorted { inOrder($0, $1, order) }.compactMap { id in
-            credentials[id].map { credentialEntry(id: id, data: $0, original: originals[id]) }
+            credentials[id].map { credentialEntry(id: id, data: $0, original: originals[id], metadata: metadata[id]) }
         }
     }
 
@@ -35,7 +39,7 @@ enum WalletStateEntries {
     /// added THIS session has no entry in the loaded container yet; without that
     /// fallback its batchId/instanceId would reset to 0 on every export until the
     /// container is reloaded once). Every other member is the original's, as is.
-    private static func credentialEntry(id: Int64, data: String, original: [String: Any]?) -> [String: Any] {
+    private static func credentialEntry(id: Int64, data: String, original: [String: Any]?, metadata: Any?) -> [String: Any] {
         let parsed = (try? JSONSerialization.jsonObject(with: Data(data.utf8))) as? [String: Any]
         var entry: [String: Any] = original ?? [:]
         entry["credentialId"] = id
@@ -49,7 +53,7 @@ enum WalletStateEntries {
         entry["credentialConfigurationId"] = (original?["credentialConfigurationId"] as? String)
             ?? (parsed?["credential_configuration_id"] as? String) ?? ""
         // `metadata: null` and `metadata: []` read as "no metadata", and a writer MUST NOT emit either.
-        entry["metadata"] = WalletStateSchema.writableMetadata(entry["metadata"])
+        entry["metadata"] = WalletStateSchema.writableMetadata(metadata)
         return entry
     }
 
