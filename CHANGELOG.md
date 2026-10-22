@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `credential_metadata` itself, and answers `sign_response` with exactly ONE of `{credential_count: N}`
     (1 to 256), `{transaction_id, interval}` (deferred) or `{error, error_code}` (a code, never any
     plaintext); credentials together with a `transaction_id` are refused. A key-only `generate_proof`
-    (response encryption wanted, no `proof_types_supported`) returns the JWK and no proofs. The
+    (response encryption wanted, no `proof_types_supported` and no `proof_type`) returns the JWK and no proofs. The
     encrypted key length is checked before any unwrapping. On WMP a failure is a flow error with that
     code, and the wallet ends the issuance locally too.
   - `flow_complete.credentials[i]` of an encrypted response has no `credential`

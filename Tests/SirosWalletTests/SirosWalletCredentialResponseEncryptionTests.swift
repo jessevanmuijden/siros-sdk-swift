@@ -626,6 +626,9 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertTrue(SirosWallet.isKeyOnlyProofRequest(request: request, proofTypesSupported: nil))
         XCTAssertTrue(SirosWallet.isKeyOnlyProofRequest(request: request, proofTypesSupported: [:]))
         XCTAssertFalse(SirosWallet.isKeyOnlyProofRequest(request: request, proofTypesSupported: ["jwt": .object_([:])]))
+        // A named proof_type still wants a proof (over either transport).
+        XCTAssertFalse(SirosWallet.isKeyOnlyProofRequest(request: request, proofTypesSupported: nil, proofType: "jwt"))
+        XCTAssertFalse(SirosWallet.isKeyOnlyProofRequest(request: request, proofTypesSupported: [:], proofType: "attestation"))
         // Without response encryption it is an ordinary proof request, whatever it lists.
         XCTAssertFalse(SirosWallet.isKeyOnlyProofRequest(request: nil, proofTypesSupported: nil))
     }

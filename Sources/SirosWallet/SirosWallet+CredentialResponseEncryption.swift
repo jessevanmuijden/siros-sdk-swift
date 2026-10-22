@@ -98,8 +98,11 @@ extension SirosWallet {
 
     /// Whether a `generate_proof` request is for the key alone: the engine asked for response
     /// encryption for a configuration without `proof_types_supported`, so no proofs are returned.
-    static func isKeyOnlyProofRequest(request: CredentialResponseEncryptionRequest?, proofTypesSupported: [String: AnyCodable]?) -> Bool {
-        request != nil && (proofTypesSupported ?? [:]).isEmpty
+    /// A request that names a `proof_type` still wants a proof, whatever `proof_types_supported` says.
+    static func isKeyOnlyProofRequest(
+        request: CredentialResponseEncryptionRequest?, proofTypesSupported: [String: AnyCodable]?, proofType: String? = nil
+    ) -> Bool {
+        request != nil && (proofTypesSupported ?? [:]).isEmpty && (proofType ?? "").isEmpty
     }
 
     // MARK: - decrypt_credential_response
@@ -339,7 +342,7 @@ extension SirosWallet {
         }
         let generation = credentialResponseGeneration(flowId: msg.flowId)
         let encryption = msg.params.credentialResponseEncryption
-        let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: msg.params.proofTypesSupported)
+        let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: msg.params.proofTypesSupported, proofType: msg.params.proofType)
         var proofs: [ProofObject] = []
         if !keyOnly {
             let generated = try await proofObjects(
@@ -364,7 +367,7 @@ extension SirosWallet {
         }
         let generation = credentialResponseGeneration(flowId: flowId)
         let encryption = params.credentialResponseEncryption
-        let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: params.proofTypesSupported)
+        let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: params.proofTypesSupported, proofType: params.proofType)
         var proofs: [ProofObject] = []
         if !keyOnly {
             let generated = try await proofObjects(
