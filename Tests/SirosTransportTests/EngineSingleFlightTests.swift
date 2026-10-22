@@ -44,7 +44,9 @@ final class EngineSingleFlightTests: XCTestCase {
         var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return _running }
         var wasCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
         var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
-        func resume() {}
+        /// Called when the session resumes (starts) this socket.
+        var onResume: (@Sendable (FakeSocket) -> Void)?
+        func resume() { onResume?(self) }
 
         func cancel(closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
             lock.lock(); _running = false; _cancelled = true; let deferred = deferFailureOnCancel; lock.unlock()
@@ -79,8 +81,15 @@ final class EngineSingleFlightTests: XCTestCase {
         private let lock = NSLock()
         private var _all: [FakeSocket] = []
         var all: [FakeSocket] { lock.lock(); defer { lock.unlock() }; return _all }
+        private var _violations = 0
+        /// Times a socket was started while another one was still open.
+        var violations: Int { lock.lock(); defer { lock.unlock() }; return _violations }
         func make() -> FakeSocket {
             let s = FakeSocket()
+            s.onResume = { [unowned self] started in
+                lock.lock(); defer { lock.unlock() }
+                _violations += _all.filter { $0 !== started && !$0.wasCancelled && $0.isRunning }.count
+            }
             lock.lock(); _all.append(s); lock.unlock()
             return s
         }
@@ -268,5 +277,80 @@ final class EngineSingleFlightTests: XCTestCase {
         gate.continuation.yield()
         await settle()
         XCTAssertEqual(session.currentState, .connecting, "not .reauthRequired")
+    }
+
+    // MARK: - Copilot review findings (lock discipline)
+
+    func testASocketThatFailedOnSendIsCancelledNotJustForgotten() async {
+        let session = makeSession()
+        session.connect(appToken: "tok")
+        await waitReceiving()
+        sockets.all[0].failSends = true
+        session.sendTrustResult(flowId: "f", trusted: true) // the send fails while its receive is still pending
+        XCTAssertTrue(sockets.all[0].wasCancelled, "the failed socket must not stay alive beside its replacement")
+        await settle()
+        XCTAssertEqual(sockets.all.count, 2)
+        XCTAssertFalse(sockets.all[1].wasCancelled)
+    }
+
+    func testACancellationHandlerThatQueriesTheSessionCannotDeadlockAReplacement() async {
+        final class Box: @unchecked Sendable { var session: WalletEngineSession! }
+        let box = Box()
+        let session = makeSession()
+        box.session = session
+        let entered = expectation(description: "attempt parked in the token refresh")
+        session.connect(
+            appToken: "tok",
+            tokenProvider: {
+                await withTaskCancellationHandler {
+                    entered.fulfill()
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                } onCancel: {
+                    _ = box.session.isConnected // re-enters the session from inside cancel()
+                }
+                return "late"
+            }
+        )
+        await waitReceiving()
+        sockets.all[0].fail()
+        await fulfillment(of: [entered], timeout: 5)
+        let done = expectation(description: "forceReconnect returned")
+        DispatchQueue.global().async {
+            session.forceReconnect(appToken: "tok2") // cancels the parked attempt
+            done.fulfill()
+        }
+        await fulfillment(of: [done], timeout: 5)
+        XCTAssertEqual(sockets.all.count, 2)
+    }
+
+    func testConcurrentLifecycleCallsLeaveExactlyOneLiveSocket() async {
+        let session = makeSession()
+        session.connect(appToken: "tok")
+        DispatchQueue.concurrentPerform(iterations: 40) { i in
+            if i % 2 == 0 { session.forceReconnect(appToken: "t\(i)") } else { session.connect(appToken: "t\(i)") }
+        }
+        await settle()
+        let live = sockets.all.filter { !$0.wasCancelled }
+        XCTAssertEqual(live.count, 1, "every superseded predecessor was cancelled before its replacement could be superseded")
+        XCTAssertEqual(sockets.all.count, 41)
+        XCTAssertEqual(sockets.violations, 0, "no socket was started while a predecessor was still open")
+    }
+
+    func testATokenRejectionCallbackThatReconnectsIsNotOverwrittenByReauthRequired() async {
+        struct Rejected: Error {}
+        final class Box: @unchecked Sendable { var session: WalletEngineSession! }
+        let box = Box()
+        let session = makeSession()
+        box.session = session
+        session.connect(
+            appToken: "tok",
+            tokenProvider: { throw Rejected() },
+            onTokenRejected: { _ in box.session.forceReconnect(appToken: "fresh") }
+        )
+        await waitReceiving()
+        sockets.all[0].fail()
+        await waitUntil("callback reconnected") { self.sockets.all.count == 2 }
+        await settle()
+        XCTAssertEqual(session.currentState, .connecting, "the callback's reconnect is the newer transition")
     }
 }

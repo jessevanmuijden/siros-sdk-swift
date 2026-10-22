@@ -69,6 +69,15 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// nothing once that is no longer current. All changes of `epoch`,
     /// `webSocketTask` and `pendingReconnect` happen under `connLock`.
     private let connLock = NSLock()
+    /// Serialises whole lifecycle operations (`doConnect`, `forceReconnect`,
+    /// `disconnect`): predecessor teardown AND replacement startup of one call
+    /// finish before the next call starts, so a concurrent connect can never
+    /// resume its socket while a predecessor it superseded is still live.
+    /// Recursive because a cancellation handler or callback fired from inside
+    /// an operation may call back into the session on the same thread. Always
+    /// taken BEFORE `connLock`; `connLock` itself is never held across a
+    /// cancel() or a callback.
+    private let lifecycleLock = NSRecursiveLock()
     private var epoch = 0
     /// The one pending backoff-then-connect attempt; any connect replaces it.
     private var pendingReconnect: Task<Void, Never>?
@@ -333,6 +342,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         var request = URLRequest(url: url)
         request.setValue("wmp.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
 
+        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
         connLock.lock()
         if let onlyIfEpoch, onlyIfEpoch != epoch {
             connLock.unlock()
@@ -341,14 +351,17 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         }
         epoch += 1
         let myEpoch = epoch
-        pendingReconnect?.cancel()
+        let pending = pendingReconnect
         pendingReconnect = nil
         let previous = webSocketTask
         let socket = socketFactory(request)
         webSocketTask = socket
         connLock.unlock()
 
-        // Superseded above, so the failure this cancel raises is recognised as stale.
+        // Outside connLock: a cancellation handler may call back into the session.
+        // The epoch was bumped above, so the failure the previous socket's cancel
+        // raises is recognised as stale.
+        pending?.cancel()
         previous?.cancel(closeCode: .goingAway, reason: nil)
         socket.resume()
 
@@ -426,10 +439,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
                     let message = try await socket.receiveMessage()
                     switch message {
                     case .string(let text):
-                        await self?.handleFrame(text, epoch: e)
+                        self?.handleFrame(text, epoch: e)
                     case .data(let data):
                         if let text = String(data: data, encoding: .utf8) {
-                            await self?.handleFrame(text, epoch: e)
+                            self?.handleFrame(text, epoch: e)
                         }
                     @unknown default:
                         break
@@ -447,22 +460,34 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// replaced socket raises from its own `cancel()`, or a second callback
     /// for a socket that already ended, finds a newer epoch and does nothing.
     private func socketEnded(epoch e: Int) {
-        connLock.lock(); defer { connLock.unlock() }
-        guard epoch == e else { return }
+        connLock.lock()
+        guard epoch == e else {
+            connLock.unlock()
+            return
+        }
         // Not a usable socket any more: isConnected/send() must not claim it during the backoff.
+        let failed = webSocketTask
         webSocketTask = nil
         epoch += 1
-        scheduleReconnectLocked()
+        let replaced = scheduleReconnectLocked()
+        connLock.unlock()
+        // A send or handshake error can arrive while its receive is still pending:
+        // cancel it so neither it nor its receive loop outlives the replacement.
+        // Outside connLock; its callbacks are stale (the epoch moved on).
+        replaced?.cancel()
+        failed?.cancel(closeCode: .goingAway, reason: nil)
     }
 
     /// Schedules the one backoff attempt. Called with `connLock` held, by
     /// `socketEnded` only.
-    private func scheduleReconnectLocked() {
+    /// - Returns: the pending attempt it replaced, for the caller to cancel
+    ///   after releasing `connLock`.
+    private func scheduleReconnectLocked() -> Task<Void, Never>? {
         // disconnect() already cleared this and set .disconnected itself.
-        guard lastAppToken != nil else { return }
+        guard lastAppToken != nil else { return nil }
         guard reconnectAttempts < maxReconnectAttempts else {
             setState(.failed)
-            return
+            return nil
         }
         setState(.reconnecting)
         reconnectAttempts += 1
@@ -470,7 +495,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         let delayMs = baseReconnectDelayMs * UInt64(1 << min(attempt - 1, 4))
         let scheduledFor = epoch
 
-        pendingReconnect?.cancel()
+        let replaced = pendingReconnect
         pendingReconnect = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
             guard let self, !Task.isCancelled, self._state == .reconnecting else { return }
@@ -479,6 +504,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
                 self.doConnect(appToken: token, onlyIfEpoch: scheduledFor)
             }
         }
+        return replaced
     }
 
     /// Mints a fresh token via `tokenProvider` (falling back to
@@ -497,10 +523,12 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         guard let provider = tokenProvider else { return lastAppToken }
         do {
             let fresh = try await provider()
-            if isCurrent(epoch: e) { lastAppToken = fresh }
+            commitFreshToken(fresh, epoch: e)
             return fresh
         } catch {
-            guard isCurrent(epoch: e) else { return nil }
+            // Validate the epoch and publish the state in ONE step: a forceReconnect
+            // landing between a check and the write could otherwise be overwritten.
+            guard markReauthRequired(epoch: e) else { return nil }
             // Regardless of why the refresh failed, this reconnect attempt
             // can't proceed without a fresh token - transition to
             // .reauthRequired either way. But NOT every failure here is a
@@ -510,19 +538,36 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             // blip talking to the auth server would otherwise accumulate
             // the same as a genuine 401, so the error is handed to the
             // caller to make that distinction rather than assumed here.
+            // After the state is published, so a callback that reconnects
+            // synchronously cannot be overwritten by it.
             onTokenRejected?(error)
-            setState(.reauthRequired)
             return nil
         }
     }
 
-    /// A frame of a superseded socket belongs to a session the engine has dropped.
-    private func handleFrame(_ text: String, epoch e: Int) async {
-        guard isCurrent(epoch: e) else { return }
-        await handleMessage(text)
+    private func commitFreshToken(_ token: String, epoch e: Int) {
+        connLock.lock(); defer { connLock.unlock() }
+        if epoch == e { lastAppToken = token }
     }
 
-    private func handleMessage(_ text: String) async {
+    private func markReauthRequired(epoch e: Int) -> Bool {
+        connLock.lock(); defer { connLock.unlock() }
+        guard epoch == e else { return false }
+        setState(.reauthRequired)
+        return true
+    }
+
+    /// A frame of a superseded socket belongs to a session the engine has dropped.
+    /// The epoch check and the publication of the frame (state change, streams)
+    /// are one step under `connLock`: a replacement cannot land in between, so an
+    /// old `handshake_complete` can never mark the new session connected.
+    private func handleFrame(_ text: String, epoch e: Int) {
+        connLock.lock(); defer { connLock.unlock() }
+        guard epoch == e else { return }
+        handleMessage(text)
+    }
+
+    private func handleMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
@@ -872,13 +917,15 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         // Supersede first (epoch), then cancel: the failure the old socket's
         // cancel raises is then stale, and a pending backoff attempt is replaced
         // rather than added to.
+        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
         connLock.lock()
         epoch += 1
-        pendingReconnect?.cancel()
+        let pending = pendingReconnect
         pendingReconnect = nil
         let old = webSocketTask
         webSocketTask = nil
         connLock.unlock()
+        pending?.cancel()
         old?.cancel(closeCode: .goingAway, reason: nil)
         sessionId = nil
         lastAppToken = appToken
@@ -944,13 +991,15 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         lastAppToken = nil
         tokenProvider = nil
         onTokenRejected = nil
+        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
         connLock.lock()
         epoch += 1
-        pendingReconnect?.cancel()
+        let pending = pendingReconnect
         pendingReconnect = nil
         let old = webSocketTask
         webSocketTask = nil
         connLock.unlock()
+        pending?.cancel()
         old?.cancel(closeCode: .normalClosure, reason: "client disconnect".data(using: .utf8))
         sessionId = nil
         setState(.disconnected)
