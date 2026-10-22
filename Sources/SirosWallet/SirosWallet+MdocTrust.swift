@@ -36,8 +36,10 @@ extension SirosWallet {
     ///   the leaf certificate's SHA-256, which identifies the certificate
     ///   itself (RICAL/VICAL validate the chain and ignore it); a caller
     ///   whose registry resolves an entity by name passes that name instead.
-    ///   `resource.id` always stays the certificate hash: it identifies the
-    ///   key material carried in `resource.key`, not the entity.
+    ///   `resource.id` always equals `subject.id`: go-trust requires it for
+    ///   every full (non resolution-only) evaluation and answers 400 otherwise,
+    ///   which go-wallet-backend's authzen proxy turns into a 502. The key
+    ///   material stays in `resource.key`. (Kotlin SDK #276.)
     func evaluateMdocTrustRemote(
         x5chain: [[UInt8]],
         actionName: String,
@@ -54,7 +56,7 @@ extension SirosWallet {
 
         var evaluationRequest: [String: Any] = [
             "subject": ["type": "key", "id": resolvedSubjectId],
-            "resource": ["type": "x5c", "id": certificateId, "key": x5c],
+            "resource": ["type": "x5c", "id": resolvedSubjectId, "key": x5c],
             "action": ["name": actionName],
         ]
         if let extraContext {
@@ -215,8 +217,16 @@ extension SirosWallet {
             // transport exception - so this is what parity with it means, not
             // a blanket match on the case.
             return underlying != nil
-        case SirosError.backendApi(let code, _, _):
-            return code == 0 || code >= 500
+        case SirosError.backendApi(let code, _, let body):
+            // 502/503/504 are what a gateway answers when it cannot reach its
+            // upstream, but go-wallet-backend's authzen proxy ALSO answers 502
+            // when the PDP was reached and refused the request as invalid
+            // (go-trust 400). So these count as unreachable only when the
+            // response carries no upstream error body: empty, `{}`, or a
+            // non-JSON gateway page. A JSON object body is the PDP speaking -
+            // a refusal, not an outage. Any other status (500 included) and a
+            // code of 0 are not "unreachable". (Kotlin SDK #276.)
+            return [502, 503, 504].contains(code) && !carriesUpstreamErrorBody(body)
         default:
             // `BackendApiClient`'s default HTTP function calls
             // `URLSession.shared.data(for:)` directly, so a DNS failure, a
@@ -234,6 +244,17 @@ extension SirosWallet {
             }
             return false
         }
+    }
+
+    /// Whether `body` is a non-empty JSON object, i.e. an error the PDP itself
+    /// produced rather than a gateway's own page.
+    private func carriesUpstreamErrorBody(_ body: String?) -> Bool {
+        guard let body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let data = body.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return !parsed.isEmpty
     }
 
     /// The shared mode/fallback decision behind `evaluateReaderTrust` and

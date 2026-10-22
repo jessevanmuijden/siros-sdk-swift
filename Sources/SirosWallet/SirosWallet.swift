@@ -573,6 +573,11 @@ public final class SirosWallet: @unchecked Sendable {
     // above.
     let trustCache = TrustCache()
 
+    /// Test seam: replaces the mdoc `issuerAuth` verification and issuer trust
+    /// evaluation the issuance trust gate runs on each issued mdoc, so a test
+    /// can drive the gate without CryptoKit or a backend. Nil in production.
+    var mdocIssuanceTrustHook: ((CredentialResult) async -> TrustResult?)?
+
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one
     // backed by a stub HTTP function, so the SDK's own re-login after a

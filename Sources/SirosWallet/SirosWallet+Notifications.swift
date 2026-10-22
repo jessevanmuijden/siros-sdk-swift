@@ -55,6 +55,9 @@ extension SirosWallet {
         pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
         lock.unlock()
 
+        // Fail closed on issuer trust before anything is stored or superseded.
+        if await issuanceTrustGateHandled(msg, offer: offer) { return }
+
         // Shared across every copy in this response so the UI can group them
         // into one card (see StoredCredential.batchId) - ALWAYS assigned,
         // even for a single-credential issuance, matching wallet-frontend's
@@ -330,16 +333,8 @@ extension SirosWallet {
                 return (false, reason)
             }
 
-            // VICAL issuer-trust (ISO 18013-5 Annex C): defensive check on
-            // the newly-issued credential's issuerAuth, surfaced via logging
-            // only - not a blocking gate, same convention as
-            // evaluateReaderTrust's remote/local-fallback reader-trust check
-            // at presentation time (see evaluateIssuerTrust's doc comment).
-            if let issuerTrust = await verifyAndEvaluateIssuerTrust(mdocDocument.issuerSigned.issuerAuth, docType: mdocDocument.docType) {
-                #if canImport(os)
-                logger.info("mdoc issuer trust for docType=\(mdocDocument.docType, privacy: .public): trusted=\(issuerTrust.trusted, privacy: .public) reason=\(issuerTrust.reason ?? "", privacy: .public)")
-                #endif
-            }
+            // The mdoc's issuer trust (ISO 18013-5 Annex C `issuerAuth`) was
+            // decided before anything was stored - see `issuanceTrustGateHandled`.
 
             var metadata: CredentialMetadata?
             if let off = offer {

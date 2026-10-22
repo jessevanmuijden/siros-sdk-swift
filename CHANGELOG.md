@@ -115,6 +115,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the message instead of the raw JSON body. A body without a code is unchanged.
 
 ### Changed
+- **Issuance fails closed on issuer trust (BEHAVIOUR-BREAKING for hosts that relied
+  on untrusted issuance being stored).** A credential is stored only if its
+  issuer's trust was established: on `flow_complete`, before anything is stored,
+  superseded, captured or synced, `SirosWallet` refuses the whole issuance when
+  the engine's own issuer evaluation (`trust_evaluated`, now joined to the
+  completion by `WalletEngineSession` as `FlowCompleteMessage.issuerTrust`) said
+  `trusted: false`, or when any `mso_mdoc` credential has no verifiable
+  `issuerAuth` or a negative `evaluateIssuerTrust` result (an unreachable trust
+  service with no positive local root counts as negative; on a platform without
+  the Security framework an mdoc cannot be verified and is refused). An absent
+  engine report is not treated as untrusted (the engine emits none in its
+  permissive no-PDP mode). Before, the mdoc check was only logged and the
+  credential was stored regardless. On refusal nothing is stored, no refresh token
+  is captured, a renewal's old batch is kept, the OID4VCI `credential_failure`
+  notification is sent (`issuer_not_trusted`) when the issuer asked for one, and
+  the host gets the new `WalletEventListener.onIssuerNotTrusted(flowId:issuer:reason:)`
+  (default no-op) followed by `onFlowError` with the English text "This issuer could
+  not be verified as trusted, so the credential was not added." The Swift SDK has no
+  per-credential trusted flag, so there is no "stored with `trusted=false`" state.
+  Ports Kotlin SDK #276 (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/276),
+  items 1 to 3; the TTL trust-decision cache (item 4) is a separate change.
+- **mdoc trust evaluation requests carry `resource.id == subject.id`.** The issuer
+  and reader requests sent the issuer URL (or certificate hash) as `subject.id` but
+  always the certificate hash as `resource.id`. go-trust requires them to be equal
+  for every full evaluation, answers 400, and go-wallet-backend's authzen proxy
+  turns that into a 502, after which the weaker local roots were used.
+- **A 5xx no longer opens the weaker local trust roots by itself.** The local
+  fallback is now taken only for a transport failure, or a 502/503/504 whose body is
+  not a JSON error object (empty, `{}`, a gateway page): go-wallet-backend's authzen
+  proxy also answers 502 when the PDP was reached and refused the request. A 500,
+  `code == 0`, any 4xx, or a PDP error body is a refusal and no longer falls back.
 - **Keystore: containers are written at `S.schemaVersion` 4 (was 3).** Version 3
   readers (older SDKs, a wallet-frontend before spec 3.0) crash on or drop
   `S.extensions` and `S.credentials[].metadata`, which is why spec 3.0 moves them

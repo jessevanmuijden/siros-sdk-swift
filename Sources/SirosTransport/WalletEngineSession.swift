@@ -428,7 +428,44 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         }
     }
 
-    private func handleMessage(_ text: String) async {
+    // MARK: - Issuer trust reports
+
+    /// Issuer trust reports awaiting their flow's completion. The engine reports
+    /// its issuer evaluation as a progress step, but the decision that needs it
+    /// is taken when the flow completes; the two arrive on separate streams, so
+    /// they are joined here, in the one place that sees the frames in order.
+    private var issuerTrustReports: [String: IssuerTrustReport] = [:]
+    private let issuerTrustLock = NSLock()
+
+    private func recordIssuerTrustReport(_ msg: FlowProgressMessage) {
+        guard msg.step == "trust_evaluated",
+              let payload = msg.payload?.objectValue,
+              payload["issuer_trust_evaluated"]?.boolValue == true else { return }
+        let report = IssuerTrustReport(
+            issuer: payload["issuer"]?.stringValue,
+            trusted: payload["trusted"]?.boolValue ?? false,
+            framework: payload["framework"]?.stringValue,
+            reason: payload["reason"]?.stringValue
+        )
+        issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
+        issuerTrustReports[msg.flowId] = report
+    }
+
+    private func attachingIssuerTrust(to msg: FlowCompleteMessage) -> FlowCompleteMessage {
+        issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
+        var copy = msg
+        copy.issuerTrust = issuerTrustReports.removeValue(forKey: msg.flowId)
+        return copy
+    }
+
+    private func discardIssuerTrustReport(flowId: String?) {
+        guard let flowId else { return }
+        issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
+        issuerTrustReports.removeValue(forKey: flowId)
+    }
+
+    /// Internal so tests can feed frames without a socket.
+    func handleMessage(_ text: String) async {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
@@ -444,14 +481,16 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             }
         case MessageTypes.flowProgress:
             if let msg = try? decoder.decode(FlowProgressMessage.self, from: data) {
+                recordIssuerTrustReport(msg)
                 flowProgressContinuation.yield(msg)
             }
         case MessageTypes.flowComplete:
             if let msg = try? decoder.decode(FlowCompleteMessage.self, from: data) {
-                flowCompleteContinuation.yield(msg)
+                flowCompleteContinuation.yield(attachingIssuerTrust(to: msg))
             }
         case MessageTypes.flowError:
             if let msg = try? decoder.decode(FlowErrorMessage.self, from: data) {
+                discardIssuerTrustReport(flowId: msg.flowId)
                 flowErrorContinuation.yield(msg)
             }
         case MessageTypes.signRequest:

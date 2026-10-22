@@ -503,6 +503,22 @@ public struct FlowProgressMessage: Codable, Sendable {
     }
 }
 
+/// What the engine reported about the issuer's trust for one issuance flow, from
+/// its `trust_evaluated` progress step (`issuer_trust_evaluated: true`).
+public struct IssuerTrustReport: Sendable, Equatable {
+    public var issuer: String?
+    public var trusted: Bool
+    public var framework: String?
+    public var reason: String?
+
+    public init(issuer: String?, trusted: Bool, framework: String? = nil, reason: String? = nil) {
+        self.issuer = issuer
+        self.trusted = trusted
+        self.framework = framework
+        self.reason = reason
+    }
+}
+
 public struct FlowCompleteMessage: Codable, Sendable {
     public var type: String
     public var flowId: String
@@ -529,6 +545,11 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// `FlowStartMessage.dpopKeyId` on renewal.
     public var dpopKeyId: String?
     public var timestamp: String?
+    /// The engine's own issuer trust evaluation for this flow (the
+    /// `trust_evaluated` progress step), attached by `WalletEngineSession`
+    /// when the flow completes; nil when the engine sent none (its permissive
+    /// no-PDP mode emits none). Not part of the wire message.
+    public var issuerTrust: IssuerTrustReport?
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp
