@@ -233,6 +233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **WMP child answers: the retry budget is per answer, and cancelled replays leave no marker.** The timed-retry budget
+  belongs to each queued answer (cleared when it is sent, ends, or the session resumes), so an answer that used its
+  retries up cannot starve the next. A replay's cancellation marker is removed when its send finishes whether or not its
+  parent is still in the bounded ended-flow list, so markers cannot accumulate over a long session.
 - **WMP child answers: failed sends are retried, and the queue handoff is atomic.** A send that fails on a healthy
   connection (a failed POST on a live stream) brings no resume event; the queued answer is now retried after a bounded
   backoff (`OpenID4xConfig.sendRetryDelaysMs`, default 1/2/4/8 s), then waits for the next resume. The task and
