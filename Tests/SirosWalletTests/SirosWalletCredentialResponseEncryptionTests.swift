@@ -421,6 +421,42 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// Validate-then-claim is one step: a request that passed the live check, then lost its session to teardown
+    /// (interleaved here by hand, no sleeps), must not claim a key; and a claim attempted after teardown is refused.
+    func testAClaimAfterTeardownRetainsNoKeyAndALateClaimIsRefused() async throws {
+        let w = wallet()
+        let request = CredentialResponseEncryptionRequest(alg: "ECDH-ES", enc: "A256GCM", required: true)
+        let generation = try w.requireLiveSession(flowId: "x")          // the request is live ...
+        w.markSessionEnded(true)                                        // ... teardown lands before it claims ...
+        XCTAssertNil(w.credentialResponseEncryptionJwk(flowId: "x", request: request, generation: generation))
+        w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty, "no private key is retained"); w.lock.unlock()
+        XCTAssertThrowsError(try w.requireLiveSession(flowId: "x"))     // ... and a later request is refused outright
+        do {
+            _ = try await w.decryptCredentialResponse(flowId: "x", jwe: Self.jwe, deferred: false)
+            XCTFail("decrypt on an ended session")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .sessionEnded) }
+    }
+
+    /// A pending (deferred) response that carries the delivered seed is refused, and the issuer is told, whether or
+    /// not a metadata receiver is installed; it is not dropped as an ordinary pending answer.
+    func testAPendingResponseCarryingTheSeedIsRefusedAndTheIssuerTold() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let key = try installOwnKey(w, flowId: "ds")
+        let body = #"{"transaction_id":"tx","interval":1,"notification_id":"n-seed","credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}"#
+        do {
+            _ = try await w.decryptCredentialResponse(flowId: "ds", jwe: try encrypt(body, to: key), deferred: true)
+            XCTFail("a pending response must not carry the seed")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .deferredSeed) }
+        XCTAssertEqual(notifier.sent.map(\.event), [CredentialNotificationEvent.failure])
+        XCTAssertEqual(notifier.sent.first?.notificationId, "n-seed")
+        // An ordinary pending response is still accepted.
+        let plain = #"{"transaction_id":"tx","interval":1}"#
+        let control = try await w.decryptCredentialResponse(flowId: "ds", jwe: try encrypt(plain, to: key), deferred: true)
+        XCTAssertEqual(control.transactionId, "tx")
+    }
+
     /// A request that arrives on a superseded engine session is dropped: no key, no answer.
     func testARequestFromASupersededEngineSessionIsDropped() async throws {
         let w = wallet()
