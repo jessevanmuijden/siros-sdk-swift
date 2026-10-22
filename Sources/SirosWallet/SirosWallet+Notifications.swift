@@ -328,6 +328,12 @@ extension SirosWallet {
         attestedKeyIds: [String]?,
         batchId: Int64
     ) async -> (stored: Bool, failureReason: String?) {
+        // A container this build must not rewrite is read-only. Storing would be
+        // silently discarded (`CredentialStore.save` does not throw), and the
+        // issuer would then be told the credential was accepted.
+        if let refusal = keystore.unsupportedSchemaVersion {
+            return (false, refusal.localizedDescription)
+        }
         guard let rawCredential = cred.credential else {
             return (false, "The issuer's credential did not arrive")
         }

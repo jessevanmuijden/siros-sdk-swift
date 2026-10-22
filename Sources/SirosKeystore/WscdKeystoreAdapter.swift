@@ -657,6 +657,8 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         )
     }
 
+    public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { credentialsKeystore.unsupportedSchemaVersion }
+
     public func exportEncryptedContainer() async throws -> Data {
         // WSCD signing keys themselves are not exportable as a JWE container
         // - they live in the hardware/remote HSM - but this adapter's
