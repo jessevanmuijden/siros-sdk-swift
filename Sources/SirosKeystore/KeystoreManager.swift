@@ -13,6 +13,13 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// Whether the keystore is currently unlocked and usable.
     var isUnlocked: Bool { get }
 
+    /// Why the unlocked container will not be rewritten, or nil when it can be
+    /// (privatedata-spec section 6). While this is non-nil the container is
+    /// read-only: stores that would have to be exported throw
+    /// `KeystoreError.unsupportedSchemaVersion`, and a flow that would store
+    /// something and then report success must check this first. Defaults to nil.
+    var unsupportedSchemaVersion: UnsupportedSchemaVersion? { get }
+
     /// Unlock the keystore using PRF-derived key material.
     ///
     /// - Parameters:
@@ -135,6 +142,24 @@ public protocol KeystoreManager: AnyObject, Sendable {
         kid: String?
     ) async throws -> String
 
+    /// As above, for an EC TS12 payment-SCA presentation: the KB-JWT also
+    /// carries the claims `transactionData` derives (`transaction_data_hashes`,
+    /// its string `transaction_data_hashes_alg`, `jti`, `response_mode` and the
+    /// two-category `amr`). With `nil` this is exactly the plain overload and
+    /// the KB-JWT is byte-for-byte what it always was.
+    ///
+    /// The default implementation refuses a non-nil `transactionData`: a
+    /// keystore that has not been written to produce these claims must not
+    /// answer an SCA request with a presentation that lacks them.
+    func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
+        kid: String?
+    ) async throws -> String
+
     /// Build an mDoc DeviceResponse (ISO 18013-5) for OID4VP presentation.
     ///
     /// - Parameter kid: the key ID bound to this credential (see
@@ -246,6 +271,11 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// attestation keys, rather than the batch-agnostic [securityProperties]
     /// above. Returns nil if not available.
     func securityProperties(keyId: String) async -> SignerSecurityProperties?
+
+    /// Whether the key can reach two TS12 authentication categories for an SCA
+    /// sign (never prompts). Asked before the user is shown a transaction. The
+    /// default answers "cannot": a keystore must opt in to SCA.
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability
 
     /// Return the attestation certificate chain for a key, if available -
     /// see `Signer.attestationChain`. Returns nil if attestation is not
@@ -376,6 +406,9 @@ public extension KeystoreManager {
         return try await generateProof(audience: audience, nonce: nonce, freshKey: freshKey)
     }
 
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability {
+        .cannot("this keystore does not report TS12 authentication factors")
+    }
     func securityProperties() async -> SignerSecurityProperties? { nil }
     func securityProperties(keyId: String) async -> SignerSecurityProperties? { nil }
     func attestationChain(keyId: String) async throws -> AttestationChain? { nil }
@@ -468,11 +501,14 @@ public struct KeyInfo: Sendable, Equatable {
     public let keyId: String
     public let algorithm: String
     public let createdAt: Int64
+    /// The WSCD plugin holding the key, when known.
+    public let pluginId: String?
 
-    public init(keyId: String, algorithm: String, createdAt: Int64 = 0) {
+    public init(keyId: String, algorithm: String, createdAt: Int64 = 0, pluginId: String? = nil) {
         self.keyId = keyId
         self.algorithm = algorithm
         self.createdAt = createdAt
+        self.pluginId = pluginId
     }
 }
 
@@ -484,6 +520,11 @@ public enum KeystoreError: Error, Sendable {
     case cryptoError(String)
     case invalidContainer(String)
     case invalidParameter(String)
+    /// The container carries a schema version, event schema version or event
+    /// type this build does not implement, so it will not rewrite it
+    /// (privatedata-spec section 6). Reading is unaffected. Not a failed merge
+    /// and not a transient error: retrying does not help, updating the app does.
+    case unsupportedSchemaVersion(UnsupportedSchemaVersion)
 }
 
 extension KeystoreError: LocalizedError {
@@ -495,6 +536,30 @@ extension KeystoreError: LocalizedError {
         case .cryptoError(let msg): return "Crypto error: \(msg)"
         case .invalidContainer(let msg): return "Invalid container: \(msg)"
         case .invalidParameter(let msg): return "Invalid parameter: \(msg)"
+        case .unsupportedSchemaVersion(let unsupported): return unsupported.errorDescription
         }
+    }
+}
+
+extension KeystoreManager {
+    public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { nil }
+
+    public func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
+        kid: String?
+    ) async throws -> String {
+        guard transactionData == nil else {
+            throw TransactionDataError(
+                .insufficientAuthenticationFactors,
+                detail: "this keystore cannot produce EC TS12 presentations"
+            )
+        }
+        return try await signVpToken(
+            credential: credential, disclosedClaims: disclosedClaims, nonce: nonce, audience: audience, kid: kid
+        )
     }
 }

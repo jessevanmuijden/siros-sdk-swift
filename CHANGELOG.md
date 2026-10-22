@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
+  `Generated/siros_dc_matcher_ffi.swift` from the v0.11.0 tag (keeping the
+  `#if os(iOS)` gate) and updated the `Package.swift` checksum to the release's
+  published SPM checksum. Nothing in this SDK calls the renamed FFI yet, so this SDK's
+  wiring is unchanged. **The engine's behaviour is not**: it is inherited from upstream
+  0.7.0-0.11.0.
+  - Matching: an absent `zk_required` now means the proof is optional (it was read as
+    required); a verifier's `multiple` is honoured; duplicate DCQL identifiers are
+    rejected; a verifier requiring cryptographic holder binding is honoured; the
+    combination count says whether it is exact.
+  - **BREAKING, nym_auth rulebook v0.4** (0.11.0): the format and its names are renamed,
+    not aliased: `circuit_zk` -> `zkp_req`, `req` -> `_req`, item `id` -> `fn_id`,
+    `circuit_id` -> `system_id`, and the response is the base64url CBOR `ZkpPresentation`
+    `{system_id, proof, issuer_key_set, proof_time, results}` instead of JSON with
+    `circuit_id` / `proof_system` / `x5chain`. FFI: `addCircuitZkSystem` ->
+    `addZkpReqSystem`, `circuitZk` -> `zkpReq`, `circuitZkPlan` -> `zkpReqPlan`,
+    `CircuitZkPlanError` -> `ZkpReqPlanError`. `birth_date`, `ssc`, `psc` and
+    `secret_seed` of a nym_auth attestation are never matched through any other format.
+  - Verified on a Mac mini (iOS simulator): with matcher 0.6.2 a `zk_system_type` request
+    without `zk_required` offered no credential; with 0.10.0 it offers it. A targeted
+    regression for that, and a human review of the inherited behaviour changes, are still
+    needed before release.
+
 ### Added
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
@@ -29,6 +53,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AccountDeletionResponse` per backend outcome, and by
   `WscdSelectionPolicy.clearAll()`. The sample app's Devices screen offers it
   with a typed confirmation.
+- **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
+  `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
+  version 3 container changes that number and nothing else. It reads versions 1
+  to 4 and **rewrites 3 and 4 only**. A container whose `S.schemaVersion`, or any
+  event's `schemaVersion`, is not 3 or 4, or that has an event without an integer `schemaVersion` or with a
+  `type` outside the ten that versions 1 to 4 define (the nine
+  `wallet-frontend` types and `set_extension`), is still unlocked and readable but
+  is never rewritten: `exportEncryptedContainer()` and the stores that exist to be
+  exported (`saveCredential`, `deleteCredential`, `clearCredentials`,
+  `savePresentationRecord`, `clearPresentationRecords`, `setExtensionEntry`,
+  `removeExtensionEntry`) throw the new `KeystoreError.unsupportedSchemaVersion(UnsupportedSchemaVersion)`,
+  which names the part (`.state`, `.event(index:)`, `.eventType(index:type:)`) and
+  what it found, and `JweKeystore.unsupportedSchemaVersion` reports the reason
+  after unlock. It is a distinct case, not a failed merge or a crypto error:
+  retrying does not help, updating the app does. The container the caller holds
+  is never overwritten. The rules are plain JSON in `WalletStateSchema`, so they
+  are tested on Linux too. Every event must carry an integer `schemaVersion`
+  (spec 3.0); one without it is refused.
+- **Keystore: unknown credential members, `metadata` and unknown keypair members
+  are written back unchanged, in order.** Every `S.credentials[]` entry is rebuilt
+  from the entry the container had (previously from a closed list of eight
+  members, which dropped everything else), the array keeps the container's order
+  (new entries are appended by id; it used to follow dictionary order), keypair
+  entries and their members survive likewise, and a keypair entry this build could
+  not load, including one that is not an object, is carried verbatim in place. Presentation entries and the members of a key's JWKs are written back unchanged too, so a 3 to 4 migration changes only `schemaVersion`; a present `S` that is not an object is refused, and `set_extension` stamped 3 is accepted (a writer emits 4). `metadata: null` and `metadata: []` are not
+  written back (spec section 6.0). This overlaps the credential-metadata work in
+  progress (#202), which adds the `metadata` accessors.
+- Test vectors: `Tests/SirosKeystoreTests/Resources/privatedata-spec/` is a
+  verbatim copy of privatedata-spec `test-vectors/` at pull request 9, head
+  `64315a5eae50e08a93772488217bbc913c82dd56`, with a recorded source and a
+  digest check (`vectors.PROVENANCE.txt`, `vectors.SHA256SUMS`).
+- **WMP HTTP+SSE transport: SSE event ids, `Last-Event-ID` and replay dedupe.** The
+  transport now parses `text/event-stream` with `SseEventParser` (the `id` field, a
+  persistent last event id, comments, multi-line `data`), sends `Last-Event-ID` when it
+  reconnects, and drops an event whose id it already delivered (`SseReplayFilter`), so a
+  replayed `wmp.flow.complete` is never handled twice. It also splits the byte stream
+  itself (`SseLineSplitter`): `URLSession.AsyncBytes.lines` omits the blank line that
+  ends an event. The parser, splitter and filter are pure and tested on Linux; the
+  transport's use of them is Apple-only and not exercised by a test. The resume cursor advances only when a block's blank line arrives, an empty `id` resets it and is never a dedupe key, one leading byte order mark is ignored per response, and each response starts with clean buffers (a disconnect mid-event never joins two responses' data). An event's
+  `description` never prints its data. The parser reads each line as Unicode scalars (the colon and the one optional
+  space are delimiters even before a combining mark), the replay filter keys ids by their UTF-8 bytes
+  (canonically equivalent but different ids are different events), and an `SseReaderGate` lets only one
+  reader run, so two overlapping `connect()` calls cannot feed one parser from two tasks; a reader touches the parser and the replay filter only inside `ifCurrent`, which holds the gate for the step, and frees the gate and publishes `.disconnected` or `.failed` as one step under the gate lock (a consumer that reconnects at once finds it open, and a stale reader never overwrites its successor's state); a reader is claimed and installed in one step (`start`) and `disconnect()` invalidates it, cancels its task and publishes in one step (`stop`), so a reconnect cannot be cancelled by an earlier disconnect; `.connected` is published only while the reader is still current.
+- **Keystore: per-credential `metadata` in the privatedata container
+  (`S.credentials[].metadata`, schema version 4).** An optional array of
+  `{"type": <non-empty string>, "value": <any JSON>}` entries, stored exactly as received (first use: an
+  issuer-delivered `org.siros.secret_seed`; per privatedata-spec section 5A.2 one entry per response-level
+  `credential_metadata` member, `value` the member's object verbatim, not a string; members of an entry
+  beyond `type`/`value` are kept). `JweKeystore` (and `WscdKeystoreAdapter`) gain
+  `credentialMetadata(id:)` and `setCredentialMetadata(id:_:)`. What is stored is an independent copy, and
+  so is what the accessor returns. The container is always written at `S.schemaVersion` 4 (the member is a
+  version 4 one), a container of a schema this build must not rewrite refuses `setCredentialMetadata` with
+  `KeystoreError.unsupportedSchemaVersion`, and `null` or `[]` is never written. The member is the keystore's
+  source of truth once unlocked: loaded with the container, replaced by the setter, and removed with the
+  credential (`deleteCredential`, `clearCredentials`, `lock`). EVERY successful replacement of the container
+  (a current one, a legacy one with no `S`, a first-time empty one) starts from no metadata. It is kept apart
+  from `StoredCredential.metadata`, which is display metadata and is not persisted in the container. A
+  malformed (non-array) `metadata` is written back verbatim. **Older clients drop the `metadata` member the
+  next time they rewrite the container**, which is accepted for this change.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK and
   facetec-api's `/process-request`.** One FaceTec session (3D liveness,
   document scan with NFC chip read, photo match) relays every request blob
@@ -85,6 +168,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They called `POST /user/session/instances/revoke-all` and
   `PUT /user/session/instances/{id}/status`, which the backend no longer has.
   Use `deleteAccount(confirmation:stepUp:)`. `listWalletInstances()` stays.
+### Changed
+- **Keystore: containers are written at `S.schemaVersion` 4 (was 3).** Version 3
+  readers (older SDKs, a wallet-frontend before spec 3.0) crash on or drop
+  `S.extensions` and `S.credentials[].metadata`, which is why spec 3.0 moves them
+  to version 4; they will not rewrite a version 4 container, which is the
+  intended effect. Changing `S.extensions`
+  (`setExtensionEntry`, `removeExtensionEntry`) now also appends a `set_extension`
+  event (schemaVersion 4, a tombstone with `value` null for a removal) to
+  `events`, chained by `parentHash` as wallet-frontend chains them (SHA-256 hex of
+  the previous event's key-sorted JSON; `lastEventHash` for the first), as spec
+  6.1.3 requires of a client with no event log; the SDK still has no event
+  merger. It still writes the legacy `wscdCredentials` and
+  `credentialRefreshTokens` members, which spec 6.2 forbids: replacing them means
+  re-shaping per-plugin state into per-`kid` `org.siros.wscd` entries and defining
+  the `org.siros.oid4vci.refresh` value, which the spec does not specify and which
+  would have to match siros-sdk-kotlin, so that is left for its own change. **Rollout (spec 3.0):** this SDK writes version 4 on every
+  write; a wallet-frontend that implements only version 3 refuses a version 4
+  container (nothing is lost, the user cannot open the wallet there). No
+  compatibility shim is provided. **Older native SDK releases are not
+  protected by this:** they always wrote version 3 and rebuilt every credential
+  entry from a closed list of members, so one that rewrites a version 4 container
+  drops `metadata` and unknown credential members, with no refusal. Upgrade (or
+  block from writing) every native client that shares an account before a
+  version 4 container, or a delivered secret, exists in it; the version number
+  alone cannot stop them.
+- **Keystore: an issued credential is not stored, nor reported accepted to the
+  issuer, while the container is unsupported** (`storeIssuedCredential` checks the
+  new `KeystoreManager.unsupportedSchemaVersion`, default nil), because
+  `CredentialStore.save` does not throw. Likewise `SirosWallet.eligibleInstances`
+  offers no instance whose presentation the consumption policy would consume
+  (all under `consumeAll`, raw disclosures under `consumeNonZkp`), since a
+  consumption could not be persisted and the instance would become eligible
+  again on reopening. Deleting or clearing a credential now also
+  forgets its preserved container entry, so a credential later saved under the same
+  id does not inherit the deleted one's `metadata`.
+- **EC TS12 payment SCA: the `amr` now comes from the WSCD manager's own sign.**
+  `siros-wscd-manager` XCFramework 0.9.1 -> 0.10.0 (vendored bindings
+  regenerated). Before the user is shown a transaction the wallet asks the
+  key's WSCD plugin (`authenticationCapability`, never prompts) whether two
+  authentication categories are reachable and refuses up front otherwise. The
+  SCA sign then asks the user for the PIN, claims in the signed KB-JWT exactly
+  the factors that sign will apply (possession from the plugin, the knowledge
+  class measured from that PIN) and signs through `signWithFactors` with
+  `requireFreshUserAuthentication`; the presentation is discarded unless the
+  sign itself reports exactly those factors. Only R2PS (OPAQUE) and FIDO2 (raw
+  transport) keys can sign an SCA presentation; softkey, R2PS WebAuthn and
+  UV-performing transports are refused (`insufficientAuthenticationFactors`).
+  Non-SCA signing is unchanged. **Breaking (unreleased TS12 API):**
+  `SirosWallet.authenticationFactorsProvider`, `AuthenticationFactorsProvider`
+  and `InterimAuthenticationFactorsProvider` are removed (the SDK no longer
+  derives factors from the key's storage kind or accepts host-asserted ones),
+  `TransactionDataBinding` carries no factors (`kbJwtClaims(factors:)` takes the
+  sign's), and `Signer` gains `authenticationCapability(keyId:)` and
+  `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
+  provider is gone.
 
 ### Deprecated
 - **`FaceTecCaptureDelegate`.** It is written against the FaceTec 9 API
