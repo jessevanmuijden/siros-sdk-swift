@@ -102,7 +102,7 @@ extension SirosWallet {
 
     // MARK: - WMP Protocol Path
 
-    private func connectViaWmp(appToken: String) async throws {
+    func connectViaWmp(appToken: String) async throws {
         markSessionEnded(false)
         // Resolve engine base URL
         let engineBase: String

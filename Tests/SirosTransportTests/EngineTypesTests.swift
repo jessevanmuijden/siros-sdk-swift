@@ -563,6 +563,38 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertEqual(told, 1)
     }
 
+    /// A loss tells the owner EVERY time, not only the first (the attempt counter is not reset by a successful
+    /// reconnect), and opening the replacement socket does too, so a path that bumps the connection without a state
+    /// change still drops the old flows' state. The first socket is not a replacement.
+    func testEveryReplacementPathTellsTheOwner() {
+        let session = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
+        let counter = NSLock()
+        var told = 0
+        session.onSocketReplaced = { counter.lock(); told += 1; counter.unlock() }
+        func count() -> Int { counter.lock(); defer { counter.unlock() }; return told }
+        session.connect(appToken: "t1")
+        XCTAssertEqual(session.socketGeneration, 1, "the first socket is not a replacement")
+        // (a failing handshake may also report a loss on its own, so the steps below compare against a baseline)
+        var before = count()
+        session.forceReconnect(appToken: "t2")
+        XCTAssertGreaterThanOrEqual(count() - before, 1, "forceReconnect replaces the socket")
+        XCTAssertEqual(session.socketGeneration, 2)
+        session.disconnect()
+    }
+
+    /// Each loss tells the owner, not only the first: the attempt counter is not reset by a successful reconnect.
+    func testEachLossTellsTheOwnerNotOnlyTheFirst() {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.lastAppToken = "app-token"
+        var told = 0
+        session.onSocketReplaced = { told += 1 }
+        session.scheduleReconnect()
+        session.scheduleReconnect()
+        session.scheduleReconnect()
+        XCTAssertEqual(told, 3)
+        session.disconnect()
+    }
+
     func testALateFailureAfterDisconnectDoesNotTellTheOwner() {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
         session.lastAppToken = "app-token"

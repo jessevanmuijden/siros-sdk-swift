@@ -87,6 +87,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// that were running on the old socket (response keys, opened responses) is not valid for a new one. Called on
     /// every automatic reconnect and when reconnecting gives up, before any new connection is made.
     public var onSocketReplaced: (() -> Void)?
+    /// How many sockets this session has opened. A replacement is a socket opened while an earlier one existed.
+    private(set) var socketGeneration = 0
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 5
     private let baseReconnectDelayMs: UInt64 = 1000
@@ -295,6 +297,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         var request = URLRequest(url: url)
         request.setValue("wmp.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
 
+        // Keyed off the replacement itself, not a state transition: whichever path opens the new socket
+        // (automatic reconnect, `forceReconnect`), what the wallet holds for flows that ran on the old one goes.
+        if socketGeneration > 0, lastAppToken != nil { onSocketReplaced?() }
+        socketGeneration += 1
         let task = session.webSocketTask(with: request)
         self.webSocketTask = task
         task.resume()
@@ -383,10 +389,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     }
 
     func scheduleReconnect() {
-        // Flows that were running on the old socket are gone with it: told once, and only for a connection that was
+        // Flows that were running on the old socket are gone with it: told at each loss, and only for a connection that was
         // lost, not for one this session was told to drop (`disconnect()` clears the token), whose late failure
         // must not reach a replacement session's state.
-        if reconnectAttempts == 0, lastAppToken != nil { onSocketReplaced?() }
+        if lastAppToken != nil { onSocketReplaced?() }
         guard lastAppToken != nil, reconnectAttempts < maxReconnectAttempts else {
             setState(.failed)
             return
