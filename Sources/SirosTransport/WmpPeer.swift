@@ -158,7 +158,16 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
 
     // MARK: - Dispatch Loop
 
+    /// Stops the profiles' in-flight work (child flows running application handlers) and keeps them from
+    /// starting more. For session teardown by a caller that cannot wait for `close()`.
+    public func shutdownProfiles() {
+        registry.shutdownProfiles()
+    }
+
     private func startDispatch() {
+        // A session that ends for good (reconnects exhausted, or closed) ends the handlers running for it, whether
+        // or not anyone calls `close()`. A hook, not a reader of `stateStream`: that stream belongs to the host.
+        session.onTerminal = { [weak self] in self?.registry.shutdownProfiles() }
         Task { [weak self] in
             guard let self else { return }
             for await msg in self.session.notifications() {

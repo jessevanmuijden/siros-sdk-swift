@@ -667,8 +667,6 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     }
 
     public func shutdown() {
-        // The application hears of it too: what it holds for these flows (keys, opened responses) goes with them.
-        config.onShutdown?()
         childLock.lock()
         stopped = true
         var running: [Task<Void, Never>] = []
@@ -681,6 +679,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         childLock.unlock()
         for task in running { task.cancel() }
         for id in ids { peer?.releaseFlow(flowId: id) }
+        // The application hears of it last, once no child can start or answer: what it holds for these flows
+        // (keys, opened responses) goes with them.
+        config.onShutdown?()
     }
 
     public func handleComplete(params: FlowCompleteParams) async {

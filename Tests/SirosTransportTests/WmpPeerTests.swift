@@ -51,6 +51,16 @@ private final class StubProfile: WmpProfile, WmpFlowHandler, WmpMethodHandler, W
     }
 }
 
+private final class ShutdownProfile: WmpProfile, WmpShutdownProfile, @unchecked Sendable {
+    let name = "shutdown"
+    let capabilities: [String] = []
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+    func initialize(ctx: WmpPeerContext) {}
+    func shutdown() { lock.lock(); _count += 1; lock.unlock() }
+}
+
 // MARK: - Helpers
 
 private extension WmpPeerTests {
@@ -86,11 +96,44 @@ private extension WmpPeerTests {
 
 final class WmpPeerTests: XCTestCase {
 
+    /// A profile's in-flight child handlers stop when the session ends, however it ends: an explicit close, a
+    /// session that failed for good (reconnects exhausted), and a caller that tears the wallet down.
+    func testProfilesAreShutDownWhenTheSessionEnds() async throws {
+        // 1. close()
+        let (peerA, transportA, _) = makePeer()
+        let shutdownA = ShutdownProfile()
+        peerA.use(shutdownA)
+        try await connectPeer(peerA, transport: transportA)
+        try? await peerA.close()
+        XCTAssertGreaterThanOrEqual(shutdownA.count, 1, "shutdown is idempotent; the session's own close may also reach it")
+
+        // 2. a teardown by a caller that cannot wait for close()
+        let (peerB, transportB, _) = makePeer()
+        let shutdownB = ShutdownProfile()
+        peerB.use(shutdownB)
+        try await connectPeer(peerB, transport: transportB)
+        peerB.shutdownProfiles()
+        XCTAssertGreaterThanOrEqual(shutdownB.count, 1)
+
+        // 3. a session that fails for good: no close() is ever called
+        let transportC = FakeTransport()
+        let sessionC = WmpSession(
+            transport: transportC,
+            config: WmpSessionConfig(requestTimeoutMs: 2_000, maxReconnectAttempts: 1, reconnectBaseMs: 1, reconnectMaxMs: 1)
+        )
+        let peerC = WmpPeer(session: sessionC)
+        let shutdownC = ShutdownProfile()
+        peerC.use(shutdownC)
+        try await connectPeer(peerC, transport: transportC)
+        transportC.simulateFailure()
+        for _ in 0..<150 where shutdownC.count == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertGreaterThanOrEqual(shutdownC.count, 1, "a failed session ends its children without a close()")
+    }
+
     /// A cancel made locally reaches the handler and forgets the flow before it is sent, without waiting for an echo.
     func testALocalCancelStopsTheFlowHereAtOnce() async throws {
         let (peer, transport, profile) = makePeer()
         try await connectPeer(peer, transport: transport)
-        let codec = WmpCodec()
         transport.receiveFromServer(
             """
             {"jsonrpc":"2.0","method":"wmp.flow.start","params":{"wmp":{"version":"0.1","session_id":"ses-1"},"flow_type":"stub.flow","flow_id":"lc-1"}}
@@ -100,7 +143,21 @@ final class WmpPeerTests: XCTestCase {
         XCTAssertEqual(profile.startedFlows.count, 1)
         try await peer.cancelFlow(flowId: "lc-1", reason: "user")
         XCTAssertEqual(profile.cancels.map(\.flowId), ["lc-1"], "the handler is told by the local cancel itself")
-        _ = codec
+    }
+
+    /// A host reading `stateStream` still sees every state: the peer's own watching does not take elements from it.
+    func testThePeerDoesNotConsumeTheHostsStateStream() async throws {
+        let (peer, transport, _) = makePeer()
+        let seen = Task { () -> [WmpSessionState] in
+            var states: [WmpSessionState] = []
+            for await s in peer.stateStream { states.append(s); if s == .closed { break } }
+            return states
+        }
+        try await connectPeer(peer, transport: transport)
+        try? await peer.close()
+        let states = await seen.value
+        XCTAssertTrue(states.contains(.active), "\(states)")
+        XCTAssertEqual(states.last, .closed)
     }
 
     func testProfileInitializeCalledOnUse() {

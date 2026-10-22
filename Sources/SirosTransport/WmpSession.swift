@@ -21,6 +21,11 @@ public final class WmpSession: @unchecked Sendable {
 
     public var currentState: WmpSessionState { _state }
 
+    /// Called once when the session has ended for good: closed, or every reconnect attempt exhausted. NOT on a
+    /// transient `.failed` (one failed resume that the retry loop goes on from). A hook rather than a state
+    /// observer, so it never takes elements from `stateStream`, which a host may be reading.
+    public var onTerminal: (@Sendable () -> Void)?
+
     // Request-response correlation
     private nonisolated(unsafe) var pendingRequests: [String: CheckedContinuation<JsonRpcResponse, Error>] = [:]
     private let pendingLock = NSLock()
@@ -135,6 +140,7 @@ public final class WmpSession: @unchecked Sendable {
         try await sendNotification(method: "wmp.session.close", params: params)
         await transport.disconnect()
         setState(.closed)
+        onTerminal?()
         sessionId = nil
         resumptionToken = nil
     }
@@ -273,6 +279,7 @@ public final class WmpSession: @unchecked Sendable {
         }
 
         setState(.failed)
+        onTerminal?()
         // Cancel all pending requests
         pendingLock.lock()
         let pending = pendingRequests
