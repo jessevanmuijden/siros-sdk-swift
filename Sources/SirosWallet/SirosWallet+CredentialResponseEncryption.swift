@@ -16,9 +16,12 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
     case refused
     /// The engine REQUIRES response encryption with an `alg`/`enc` pair this build cannot open.
     case unsupportedRequiredPair
+    /// The session this request arrived on has ended (logout, destroy, terminal failure): nothing is allocated for it.
+    case sessionEnded
 
     var wmpErrorCode: String? {
         switch self {
+        case .sessionEnded: return "SESSION_ENDED"
         case .unsupportedRequiredPair: return "UNSUPPORTED_RESPONSE_ENCRYPTION"
         case .noKey: return "NO_RESPONSE_KEY"
         case .decryptFailed: return "DECRYPT_FAILED"
@@ -201,6 +204,23 @@ extension SirosWallet {
 
     /// Nothing of blind issuance stays reachable once the wallet is locked or the session ends: every
     /// flow's private response key and everything opened with it (credentials, a delivered seed).
+    /// Refuses a request that reaches a session that has ended, or (on the WebSocket) one that arrived on a
+    /// superseded engine session, BEFORE any key or flow state is allocated for it.
+    func requireLiveSession(engine: (any SignResponseSender)? = nil) throws {
+        lock.lock(); defer { lock.unlock() }
+        if blindSessionEnded { throw CredentialResponseError.sessionEnded }
+        if let engine, let current = engineSession, (engine as AnyObject) !== (current as AnyObject) {
+            throw CredentialResponseError.sessionEnded
+        }
+    }
+
+    var sessionHasEnded: Bool { lock.lock(); defer { lock.unlock() }; return blindSessionEnded }
+
+    /// Marks the session ended: requests that still arrive for it are refused. A new connection clears it.
+    func markSessionEnded(_ ended: Bool) {
+        lock.lock(); blindSessionEnded = ended; lock.unlock()
+    }
+
     func clearBlindIssuanceState() {
         lock.lock()
         credentialResponseKeys.removeAll()
@@ -246,6 +266,12 @@ extension SirosWallet {
     /// `decrypt_credential_response` on the engine WebSocket: answer with the control fields and
     /// nothing else; a failure answers with an error that carries no plaintext and drops the flow's state.
     func answerDecryptCredentialResponse(engine: any SignResponseSender, msg: SignRequestMessage) async {
+        do { try requireLiveSession(engine: engine) } catch {
+            if sessionHasEnded {
+                engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
+            }
+            return
+        }
         // Taken before the awaits: a failure that arrives after this flow was cancelled (and perhaps another begun)
         // is answered to the engine, but must not touch the wallet-wide state of whatever runs now.
         let generation = credentialResponseGeneration(flowId: msg.flowId)
@@ -271,6 +297,7 @@ extension SirosWallet {
 
     /// The same action over WMP; the profile reports a failure as a flow error carrying only the code.
     func wmpDecryptCredentialResponse(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
+        try requireLiveSession()
         let generation = credentialResponseGeneration(flowId: flowId)
         do {
             let control = try await decryptCredentialResponse(flowId: flowId, jwe: params.jwe, deferred: params.deferred ?? false)
@@ -350,6 +377,13 @@ extension SirosWallet {
     /// `generate_proof` on the engine WebSocket: the proofs (none when the request is for the key alone)
     /// and, when the engine asked for response encryption, a fresh key's public JWK.
     func answerGenerateProof(engine: any SignResponseSender, msg: SignRequestMessage) async throws {
+        do { try requireLiveSession(engine: engine) } catch {
+            // A request from a superseded socket is dropped; one for an ended session is refused. Neither allocates.
+            if sessionHasEnded {
+                engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
+            }
+            return
+        }
         // A required pair this build cannot open is ANSWERED with an error (the engine fails the issuance at
         // once), never left to its sign timeout.
         if let request = msg.params.credentialResponseEncryption, request.required == true, !Self.canOpen(request) {
@@ -381,6 +415,7 @@ extension SirosWallet {
     /// The same over WMP: response encryption without `proof_types_supported` is the key-only request
     /// (WMP openid4x section 3.1.5.1), and a supplied list is forwarded to the proof selection.
     func wmpGenerateProof(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
+        try requireLiveSession()
         if let request = params.credentialResponseEncryption, request.required == true, !Self.canOpen(request) {
             throw CredentialResponseError.unsupportedRequiredPair   // a flow error with its code, rejected
         }

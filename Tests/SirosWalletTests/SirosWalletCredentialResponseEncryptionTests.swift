@@ -54,6 +54,38 @@ private final class RecordingNotifier: CredentialNotifier, @unchecked Sendable {
     }
 }
 
+/// A WMP transport that answers `wmp.session.create` and records every message it is asked to send, so a test can
+/// see that a session close really went out.
+private final class AnsweringTransport: TransportProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _sent: [Data] = []
+    private var _state: TransportState = .disconnected
+    private let stateCont: AsyncStream<TransportState>.Continuation
+    let stateStream: AsyncStream<TransportState>
+    private let incomingCont: AsyncStream<Data>.Continuation
+    private let _incoming: AsyncStream<Data>
+    var currentState: TransportState { lock.lock(); defer { lock.unlock() }; return _state }
+    var sentMethods: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _sent.compactMap { (try? JSONSerialization.jsonObject(with: $0) as? [String: Any])?["method"] as? String }
+    }
+    init() {
+        var sc: AsyncStream<TransportState>.Continuation!
+        stateStream = AsyncStream { sc = $0 }; stateCont = sc
+        var ic: AsyncStream<Data>.Continuation!
+        _incoming = AsyncStream { ic = $0 }; incomingCont = ic
+    }
+    func connect() async throws { lock.lock(); _state = .connected; lock.unlock(); stateCont.yield(.connected) }
+    func send(_ message: Data) async throws {
+        lock.lock(); _sent.append(message); lock.unlock()
+        guard let object = try? JSONSerialization.jsonObject(with: message) as? [String: Any],
+              object["method"] as? String == "wmp.session.create", let id = object["id"] as? String else { return }
+        incomingCont.yield(Data(#"{"jsonrpc":"2.0","id":"\#(id)","result":{"wmp":{"version":"0.1","session_id":"s-1"},"resumption_token":"rt"}}"#.utf8))
+    }
+    func incoming() -> AsyncStream<Data> { _incoming }
+    func disconnect() async { lock.lock(); _state = .disconnected; lock.unlock(); stateCont.yield(.disconnected) }
+}
+
 /// A notifier whose hand-over takes a while: the failure must be recorded before the rejecting call returns.
 private final class SlowAwaitableNotifier: AwaitableCredentialNotifier, @unchecked Sendable {
     private let lock = NSLock()
@@ -302,6 +334,71 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertTrue(kept.0, "B's in-flight guard is not reset by A's late failure")
         XCTAssertTrue(kept.1, "B's key is kept")
         XCTAssertTrue(listener.errors.isEmpty, "B is not failed")
+    }
+
+    // MARK: - Teardown
+
+    private func connectedPeer() async throws -> (WmpPeer, AnsweringTransport) {
+        let transport = AnsweringTransport()
+        let peer = WmpPeer(session: WmpSession(transport: transport, config: WmpSessionConfig(requestTimeoutMs: 2_000)))
+        try await peer.connect(authToken: "t")
+        return (peer, transport)
+    }
+
+    private func keyOnlyProofMessage(flowId: String) throws -> SignRequestMessage {
+        let json = """
+        {"type":"sign_request","flow_id":"\(flowId)","message_id":"m","action":"generate_proof","params":{"audience":"a","nonce":"n",
+         "credential_response_encryption":{"alg":"ECDH-ES","enc":"A256GCM","required":true}}}
+        """
+        return try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8))
+    }
+
+    /// `destroy()` and the local session end capture the peer BEFORE clearing the reference and close it on a task
+    /// that does not depend on the wallet: the session close really goes out.
+    func testDestroyAndLocalSessionEndActuallyCloseTheWmpPeer() async throws {
+        for how in ["destroy", "endSessionLocally"] {
+            let w = wallet()
+            let (peer, transport) = try await connectedPeer()
+            w.lock.lock(); w.wmpPeer = peer; w.lock.unlock()
+            if how == "destroy" { w.destroy() } else { w.endSessionLocally() }
+            for _ in 0..<200 where !transport.sentMethods.contains("wmp.session.close") { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(transport.sentMethods.contains("wmp.session.close"), "\(how): the close ran")
+            XCTAssertEqual(transport.currentState, .disconnected, how)
+            w.lock.lock(); XCTAssertNil(w.wmpPeer, how); w.lock.unlock()
+        }
+    }
+
+    /// A request that reaches a session that has ended is refused before any key is generated, on both transports.
+    func testRequestsForAnEndedSessionAllocateNothing() async throws {
+        let w = wallet()
+        w.markSessionEnded(true)
+        let sender = RecordingSender()
+        try await w.answerGenerateProof(engine: sender, msg: try keyOnlyProofMessage(flowId: "late"))
+        XCTAssertEqual(sender.sent.first?.errorCode, "SESSION_ENDED")
+        XCTAssertNil(sender.sent.first?.credentialResponseEncryptionJwk)
+        do {
+            _ = try await w.wmpGenerateProof(flowId: "late2", params: SignSubFlowParams(
+                action: "generate_proof", credentialResponseEncryption: CredentialResponseEncryptionRequest(alg: "ECDH-ES", enc: "A256GCM", required: true)
+            ))
+            XCTFail("an ended session is not served")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .sessionEnded) }
+        w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty, "no key was generated"); w.lock.unlock()
+        // A new connection serves requests again.
+        w.markSessionEnded(false)
+        try await w.answerGenerateProof(engine: sender, msg: try keyOnlyProofMessage(flowId: "again"))
+        XCTAssertNotNil(sender.sent.last?.credentialResponseEncryptionJwk)
+    }
+
+    /// A request that arrives on a superseded engine session is dropped: no key, no answer.
+    func testARequestFromASupersededEngineSessionIsDropped() async throws {
+        let w = wallet()
+        w.engineSession = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        let stale = RecordingSender()
+        try await w.answerGenerateProof(engine: stale, msg: try keyOnlyProofMessage(flowId: "old"))
+        XCTAssertTrue(stale.sent.isEmpty, "nothing is answered to the old socket")
+        w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty); w.lock.unlock()
+        await w.answerDecryptCredentialResponse(engine: stale, msg: try decryptMessage(flowId: "old", jwe: Self.jwe))
+        XCTAssertTrue(stale.sent.isEmpty)
     }
 
     /// Repeated deferred polls do not pile up a metadata tree each: only a response that carries credentials is

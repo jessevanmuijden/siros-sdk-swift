@@ -104,6 +104,7 @@ extension SirosWallet {
     // MARK: - WMP Protocol Path
 
     private func connectViaWmp(appToken: String) async throws {
+        markSessionEnded(false)
         // Resolve engine base URL
         let engineBase: String
         if !config.engineUrl.isEmpty {
@@ -598,6 +599,7 @@ extension SirosWallet {
     // MARK: - Legacy Engine Path
 
     func connectEngine(appToken: String) async throws {
+        markSessionEnded(false)
         // Resolve engine base URL: explicit config > discovery > same as backend
         let engineBase: String
         if !config.engineUrl.isEmpty {
