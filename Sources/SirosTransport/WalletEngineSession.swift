@@ -52,7 +52,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     public let stateStream: AsyncStream<State>
     public var currentState: State { _state }
 
-    private var webSocketTask: URLSessionWebSocketTask?
+    private(set) var webSocketTask: URLSessionWebSocketTask?
+    private let socketLock = NSLock()
     private var sessionId: String?
     var lastAppToken: String?
     /// Mints a fresh handshake token on demand - called before every
@@ -302,7 +303,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         if socketGeneration > 0, lastAppToken != nil { onSocketReplaced?() }
         socketGeneration += 1
         let task = session.webSocketTask(with: request)
-        self.webSocketTask = task
+        socketLock.lock(); self.webSocketTask = task; socketLock.unlock()
         task.resume()
 
         // Send handshake
@@ -311,7 +312,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
            let text = String(data: data, encoding: .utf8) {
             task.send(.string(text)) { [weak self] error in
                 if error != nil {
-                    self?.scheduleReconnect()
+                    self?.scheduleReconnect(from: task)
                 }
             }
         }
@@ -381,14 +382,21 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
                         break
                     }
                 } catch {
-                    self?.scheduleReconnect()
+                    self?.scheduleReconnect(from: task)
                     return
                 }
             }
         }
     }
 
-    func scheduleReconnect() {
+    /// - Parameter socket: the socket whose failure this is. A failure of a socket that has since been replaced
+    ///   (`forceReconnect`, an earlier reconnect) says nothing about the current one and is ignored, so a late
+    ///   callback cannot clear a replacement issuance's state or schedule a second reconnect.
+    func scheduleReconnect(from socket: URLSessionWebSocketTask? = nil) {
+        if let socket {
+            socketLock.lock(); let stale = webSocketTask !== socket; socketLock.unlock()
+            if stale { return }
+        }
         // Flows that were running on the old socket are gone with it: told at each loss, and only for a connection that was
         // lost, not for one this session was told to drop (`disconnect()` clears the token), whose late failure
         // must not reach a replacement session's state.
@@ -803,8 +811,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// `awaitConnected()`) before sending a fresh `flow_start`, since the
     /// original socket may have gone stale during the browser round-trip.
     public func forceReconnect(appToken: String) {
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
+        socketLock.lock(); let old = webSocketTask; webSocketTask = nil; socketLock.unlock()
+        old?.cancel(with: .goingAway, reason: nil)
         sessionId = nil
         lastAppToken = appToken
         reconnectAttempts = 0
@@ -908,7 +916,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         // immediately.
         ws.send(.string(text)) { [weak self] error in
             if error != nil {
-                self?.scheduleReconnect()
+                self?.scheduleReconnect(from: ws)
             }
         }
     }

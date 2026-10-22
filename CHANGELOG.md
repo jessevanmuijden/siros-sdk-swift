@@ -231,6 +231,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **Review follow-ups (WMP replay, stale sockets, cancellation).** Replayed child answers are claimed under the lock
+  before their send is awaited (a second resume cannot resend them), an answer queued by a send that began before a
+  resume is retried at once, shutdown releases the routing entries of children with queued answers, and a session
+  notifies its terminal state once whether it failed or was closed. A late failure of a replaced engine socket is
+  ignored (it neither clears issuance state nor schedules a reconnect). A proof that finishes after its flow was
+  cancelled writes no attested key ids and gets no reply. `cancelCurrentFlow()` stops the active WMP flow's children
+  (`WmpPeer.cancelFlowNow`) and sends the cancel on the peer.
 - **Blind issuance: validate-then-claim is one step, and a pending response never carries a seed.** The "session is
   live" check now returns the flow generation from the same critical section, and the response key is stored only if
   the session has not ended in that section, so a request that resumes after logout or destroy retains no key.

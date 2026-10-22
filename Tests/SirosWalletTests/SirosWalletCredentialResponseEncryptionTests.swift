@@ -82,6 +82,7 @@ private final class AnsweringTransport: TransportProtocol, @unchecked Sendable {
               object["method"] as? String == "wmp.session.create", let id = object["id"] as? String else { return }
         incomingCont.yield(Data(#"{"jsonrpc":"2.0","id":"\#(id)","result":{"wmp":{"version":"0.1","session_id":"s-1"},"resumption_token":"rt"}}"#.utf8))
     }
+    func receiveFromServer(_ data: Data) { incomingCont.yield(data) }
     func incoming() -> AsyncStream<Data> { _incoming }
     func disconnect() async { lock.lock(); _state = .disconnected; lock.unlock(); stateCont.yield(.disconnected) }
 }
@@ -455,6 +456,47 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let plain = #"{"transaction_id":"tx","interval":1}"#
         let control = try await w.decryptCredentialResponse(flowId: "ds", jwe: try encrypt(plain, to: key), deferred: true)
         XCTAssertEqual(control.transactionId, "tx")
+    }
+
+    /// A proof that finishes after its flow was cancelled must not write the old flow's key ids into the issuance
+    /// that runs now.
+    func testAStaleProofResultDoesNotWriteAttestedKeyIds() throws {
+        let w = wallet()
+        let generation = w.credentialResponseGeneration(flowId: "A")
+        w.cancelCurrentFlow()                                         // A is cancelled ...
+        w.lock.lock(); w.activeAttestedKeyIds = ["new"]; w.lock.unlock()   // ... and the next issuance has its ids
+        XCTAssertThrowsError(try w.applyProofResult(["old"], flowId: "A", generation: generation))
+        w.lock.lock(); XCTAssertEqual(w.activeAttestedKeyIds, ["new"]); w.lock.unlock()
+        XCTAssertNoThrow(try w.applyProofResult(["fresh"], flowId: "A", generation: w.credentialResponseGeneration(flowId: "A")))
+    }
+
+    /// `cancelCurrentFlow()` on WMP stops the parent's children before it returns: a child suspended in its handler
+    /// that then returns normally answers nothing, and the cancel goes out on the peer.
+    func testCancelCurrentFlowStopsWmpChildrenAndSendsTheCancel() async throws {
+        final class Gate: @unchecked Sendable {
+            private let lock = NSLock(); private var c: CheckedContinuation<Void, Never>?; private var opened = false; private var _in = false
+            var entered: Bool { lock.lock(); defer { lock.unlock() }; return _in }
+            func wait() async { await withCheckedContinuation { (k: CheckedContinuation<Void, Never>) in lock.lock(); _in = true; if opened { lock.unlock(); k.resume() } else { c = k; lock.unlock() } } }
+            func open() { lock.lock(); opened = true; let k = c; c = nil; lock.unlock(); k?.resume() }
+        }
+        let w = wallet()
+        let (peer, transport) = try await connectedPeer()
+        let gate = Gate()
+        peer.use(OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            await gate.wait()
+            return SignSubFlowResult(proofs: [ProofObject(proofType: "jwt", jwt: "a.b.c")])
+        })))
+        w.lock.lock(); w.wmpPeer = peer; w.lock.unlock()
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "p1", flowType: "oid4vci", status: "active", credentials: []))
+        transport.receiveFromServer(Data(#"{"jsonrpc":"2.0","method":"wmp.flow.start","params":{"wmp":{"version":"0.1"},"flow_id":"c1","flow_type":"sign","params":{"action":"generate_proof","nonce":"n","audience":"a","parent_flow_id":"p1"}}}"#.utf8))
+        for _ in 0..<300 where !gate.entered { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(gate.entered, "the child is suspended in its handler")
+        w.cancelCurrentFlow()
+        gate.open()                                   // the handler now returns normally
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let methods = transport.sentMethods
+        XCTAssertTrue(methods.contains("wmp.flow.cancel"), "the cancel went out on the peer: \(methods)")
+        XCTAssertFalse(methods.contains("wmp.flow.complete"), "the cancelled child answered nothing: \(methods)")
     }
 
     /// A request that arrives on a superseded engine session is dropped: no key, no answer.

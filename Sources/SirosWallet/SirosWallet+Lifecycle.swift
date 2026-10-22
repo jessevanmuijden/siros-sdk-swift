@@ -80,6 +80,10 @@ extension SirosWallet {
     public func cancelCurrentFlow() {
         if case .flowActive(let userId, let displayName, let flowId, _, _, let creds) = state {
             try? engineSession?.cancelFlow(flowId: flowId)
+            // On WMP the parent and its sign/match children live in the peer: they stop here, before the state below
+            // is cleared, so no suspended child can answer or recreate the cancelled flow's state afterwards.
+            lock.lock(); let peer = wmpPeer; lock.unlock()
+            peer?.cancelFlowNow(flowId: flowId)
             setState(.ready(userId: userId, displayName: displayName, credentials: creds))
         }
         // Only the issuance being cancelled holds response keys; a flow that ends for other reasons drops

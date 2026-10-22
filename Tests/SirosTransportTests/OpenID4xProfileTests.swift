@@ -346,6 +346,57 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(cancelled, ["p1"], "a flow of its own still is")
     }
 
+    /// A second resume while the first replay send is suspended does not send the same answer again.
+    func testASecondResumeDoesNotResendAnAnswerWhoseReplayIsSuspended() async throws {
+        let ctx = ReplayPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c1", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ]))
+        ctx.startReplay()
+        profile.sessionResumed()
+        for _ in 0..<200 where ctx.inFlight.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        profile.sessionResumed()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(ctx.inFlight, ["c1"], "the second drain finds nothing to send: the first claimed it")
+        ctx.release()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(ctx.sentFlowIds, ["c1"])
+    }
+
+    /// A resume that lands while a child's ORIGINAL send is suspended (and that send then fails) is not missed: the
+    /// answer queued afterwards is retried at once, without rerunning the handler.
+    func testAResumeDuringTheOriginalSendDoesNotLeaveTheAnswerQueued() async throws {
+        let ctx = FailAfterReleaseContext()
+        let counter = Counter()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in counter.bump(); return SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        let run = Task { await profile.runChildFlow(params: self.childStart(flowType: "sign", flowId: "c1", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ])) }
+        for _ in 0..<200 where !ctx.inFirstNotify { try await Task.sleep(nanoseconds: 10_000_000) }
+        profile.sessionResumed()                      // the connection is back; the queue is still empty
+        ctx.releaseFailing()                          // the old send now reports its failure
+        await run.value
+        for _ in 0..<200 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.sent, ["c1"], "retried without waiting for another resume")
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    /// Shutdown after a failed terminal send releases that child's routing entry too.
+    func testShutdownReleasesChildrenWithQueuedAnswers() async throws {
+        let ctx = ReplayPeerContext()           // every send fails: the answer is queued
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c1", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ]))
+        XCTAssertFalse(ctx.released.contains("c1"), "still held for the resume")
+        profile.shutdown()
+        XCTAssertTrue(ctx.released.contains("c1"))
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
@@ -928,7 +979,9 @@ private final class ReplayPeerContext: WmpPeerContext, @unchecked Sendable {
         lock.lock(); open = true; let all = blocked; blocked = []; lock.unlock()
         for c in all { c.resume() }
     }
-    func releaseFlow(flowId: String) {}
+    private var _released: [String] = []
+    var released: [String] { lock.lock(); defer { lock.unlock() }; return _released }
+    func releaseFlow(flowId: String) { lock.lock(); _released.append(flowId); lock.unlock() }
     func notify(method: String, params: [String: AnyCodable]?) async throws {
         lock.lock(); let go = replaying; lock.unlock()
         if !go { throw WmpSessionError.connectionFailed }
@@ -938,6 +991,33 @@ private final class ReplayPeerContext: WmpPeerContext, @unchecked Sendable {
             if open { lock.unlock(); c.resume() } else { blocked.append(c); lock.unlock() }
         }
         lock.lock(); _sent.append(id); lock.unlock()
+    }
+    func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
+}
+
+/// The first `notify` suspends until `releaseFailing()` and then throws; later ones succeed and are recorded.
+private final class FailAfterReleaseContext: WmpPeerContext, @unchecked Sendable {
+    let codec = WmpCodec()
+    private let lock = NSLock()
+    private var first = true
+    private var blocked: CheckedContinuation<Void, Never>?
+    private var released = false
+    private var _inFirst = false
+    private var _sent: [String] = []
+    var inFirstNotify: Bool { lock.lock(); defer { lock.unlock() }; return _inFirst }
+    var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
+    func releaseFailing() { lock.lock(); released = true; let c = blocked; blocked = nil; lock.unlock(); c?.resume() }
+    func releaseFlow(flowId: String) {}
+    func notify(method: String, params: [String: AnyCodable]?) async throws {
+        lock.lock(); let isFirst = first; first = false; lock.unlock()
+        if isFirst {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                lock.lock(); _inFirst = true
+                if released { lock.unlock(); c.resume() } else { blocked = c; lock.unlock() }
+            }
+            throw WmpSessionError.connectionFailed
+        }
+        lock.lock(); _sent.append(params?["flow_id"]?.stringValue ?? "?"); lock.unlock()
     }
     func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
 }
