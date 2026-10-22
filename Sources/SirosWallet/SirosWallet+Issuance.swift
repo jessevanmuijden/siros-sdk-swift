@@ -964,9 +964,10 @@ extension SirosWallet {
         }
         try await ensureEngineConnected(engine)
         // Snapshot at flow start: a flag flip applies to the next flow only.
+        let declare = snapshotTransactionDataEnablement()
         engine.startPresentation(
             requestUri: requestUri,
-            features: transactionDataEngineFeatures
+            features: TransactionDataDeclaration.engineFeatures(enabled: declare)
         )
     }
 }

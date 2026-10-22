@@ -44,6 +44,52 @@ fileprivate extension ForeignBytes {
     init(bufferPointer: UnsafeBufferPointer<UInt8>) {
         self.init(len: Int32(bufferPointer.count), data: bufferPointer.baseAddress)
     }
+
+    init(rawBufferPointer: UnsafeRawBufferPointer) {
+        self.init(
+            len: Int32(rawBufferPointer.count),
+            data: rawBufferPointer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+        )
+    }
+}
+
+// Converter for `&[u8]` / `[ByRef] bytes` arguments.
+//
+// Conforms to `FfiConverter` so the compiler enforces the full converter
+// method set. Only the scope-bound `lower(_:_body:)` overload is sound —
+// zero-copy byte buffers only flow foreign -> Rust, and only in argument
+// position. The four protocol-witness methods (`lift`, `lower`, `read`,
+// `write`) `fatalError` at runtime if anyone reaches them.
+//
+// The scope-bound `lower` takes a closure because the `ForeignBytes`
+// pointer is only guaranteed valid for the duration of
+// `Data.withUnsafeBytes`. Callers must run the full FFI call inside
+// the closure body.
+fileprivate enum FfiConverterByRefBytes: FfiConverter {
+    typealias SwiftType = Data
+    typealias FfiType = ForeignBytes
+
+    static func lower<R>(_ value: Data, _ body: (ForeignBytes) throws -> R) rethrows -> R {
+        return try value.withUnsafeBytes { rawBuf in
+            try body(ForeignBytes(rawBufferPointer: rawBuf))
+        }
+    }
+
+    static func lower(_ value: Data) -> ForeignBytes {
+        fatalError("ByRef bytes cannot use the plain lower: returning ForeignBytes escapes the Data.withUnsafeBytes scope. Use the scope-bound lower(_:_body:) overload instead.")
+    }
+
+    static func lift(_ value: ForeignBytes) throws -> Data {
+        fatalError("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        fatalError("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+    }
+
+    static func write(_ value: Data, into buf: inout [UInt8]) {
+        fatalError("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+    }
 }
 
 // For every type used in the interface, we provide helper methods for conveniently
@@ -286,7 +332,7 @@ private func makeRustCall<T, E: Swift.Error>(
     _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T,
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
-    uniffiEnsureInitialized()
+    uniffiEnsureSirosWscdManagerInitialized()
     var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
@@ -357,18 +403,29 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-fileprivate class UniffiHandleMap<T> {
-    private var map: [UInt64: T] = [:]
+// Initial value and increment amount for handles. 
+// These ensure that SWIFT handles always have the lowest bit set
+fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
+fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
+
+fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
+    // All mutation happens with this lock held, which is why we implement @unchecked Sendable.
     private let lock = NSLock()
-    private var currentHandle: UInt64 = 1
+    private var map: [UInt64: T] = [:]
+    private var currentHandle: UInt64 = UNIFFI_HANDLEMAP_INITIAL
 
     func insert(obj: T) -> UInt64 {
         lock.withLock {
-            let handle = currentHandle
-            currentHandle += 1
-            map[handle] = obj
-            return handle
+            return doInsert(obj)
         }
+    }
+
+    // Low-level insert function, this assumes `lock` is held.
+    private func doInsert(_ obj: T) -> UInt64 {
+        let handle = currentHandle
+        currentHandle += UNIFFI_HANDLEMAP_DELTA
+        map[handle] = obj
+        return handle
     }
 
      func get(handle: UInt64) throws -> T {
@@ -377,6 +434,15 @@ fileprivate class UniffiHandleMap<T> {
                 throw UniffiInternalError.unexpectedStaleHandle
             }
             return obj
+        }
+    }
+
+     func clone(handle: UInt64) throws -> UInt64 {
+        try lock.withLock {
+            guard let obj = map[handle] else {
+                throw UniffiInternalError.unexpectedStaleHandle
+            }
+            return doInsert(obj)
         }
     }
 
@@ -399,7 +465,13 @@ fileprivate class UniffiHandleMap<T> {
 
 
 // Public interface members begin here.
-
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -472,7 +544,11 @@ fileprivate struct FfiConverterString: FfiConverter {
             return String()
         }
         let bytes = UnsafeBufferPointer<UInt8>(start: value.data!, count: Int(value.len))
-        return String(bytes: bytes, encoding: String.Encoding.utf8)!
+        // Use Swift's native UTF-8 decoder; `String(bytes:encoding:.utf8)` goes
+        // through Foundation's NSString and silently strips a leading U+FEFF BOM.
+        // Invalid UTF-8 substitutes U+FFFD instead of trapping (unreachable
+        // given Rust's `String` invariant).
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     public static func lower(_ value: String) -> RustBuffer {
@@ -488,7 +564,8 @@ fileprivate struct FfiConverterString: FfiConverter {
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> String {
         let len: Int32 = try readInt(&buf)
-        return String(bytes: try readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!
+        // See `lift` above for why we avoid Foundation's NSString-backed decoder here.
+        return String(decoding: try readBytes(&buf, count: Int(len)), as: UTF8.self)
     }
 
     public static func write(_ value: String, into buf: inout [UInt8]) {
@@ -519,7 +596,7 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
-public protocol FfiWscdManagerProtocol : AnyObject {
+public protocol FfiWscdManagerProtocol: AnyObject, Sendable {
     
     /**
      * Activate an existing lifecycle context.
@@ -534,6 +611,12 @@ public protocol FfiWscdManagerProtocol : AnyObject {
      * proving the key was generated in a certified WSCD.
      */
     func attestationChain(kid: String) throws  -> FfiAttestationChain?
+    
+    /**
+     * Whether a sign with this key could reach two TS12 categories. Never
+     * prompts; ask it before showing the user a transaction.
+     */
+    func authenticationCapability(kid: String) throws  -> FfiFactorCapability
     
     /**
      * Delete a key.
@@ -661,61 +744,71 @@ public protocol FfiWscdManagerProtocol : AnyObject {
      */
     func sign(kid: String, data: Data, algorithm: FfiAlgorithm, auth: FfiAuthCallback, progress: FfiProgressCallback) throws  -> FfiSignature
     
+    /**
+     * Sign data and report the TS12 authentication factors applied to this
+     * very sign. Additive: `sign` and `security_properties().amr` are
+     * unchanged. See [`FfiSignOptions`] for the fresh-authentication flag.
+     */
+    func signWithFactors(kid: String, data: Data, algorithm: FfiAlgorithm, options: FfiSignOptions, auth: FfiAuthCallback, progress: FfiProgressCallback) throws  -> FfiSignOutcome
+    
 }
+open class FfiWscdManager: FfiWscdManagerProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
 
-open class FfiWscdManager:
-    FfiWscdManagerProtocol {
-    fileprivate let pointer: UnsafeMutableRawPointer!
-
-    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-    public struct NoPointer {
+    public struct NoHandle {
         public init() {}
     }
 
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
-        self.pointer = pointer
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
     }
 
     // This constructor can be used to instantiate a fake object.
-    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
     //
     // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-    public init(noPointer: NoPointer) {
-        self.pointer = nil
+    public init(noHandle: NoHandle) {
+        self.handle = 0
     }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_siros_wscd_manager_fn_clone_ffiwscdmanager(self.pointer, $0) }
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_siros_wscd_manager_fn_clone_ffiwscdmanager(self.handle, $0) }
     }
 public convenience init(config: FfiWscdConfig) {
-    let pointer =
+    let handle =
         try! rustCall() {
+        uniffiCallStatus in
     uniffi_siros_wscd_manager_fn_constructor_ffiwscdmanager_new(
-        FfiConverterTypeFfiWscdConfig.lower(config),$0
+        FfiConverterTypeFfiWscdConfig_lower(config),uniffiCallStatus
     )
 }
-    self.init(unsafeFromRawPointer: pointer)
+    self.init(unsafeFromHandle: handle)
 }
 
     deinit {
-        guard let pointer = pointer else {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
             return
         }
 
-        try! rustCall { uniffi_siros_wscd_manager_fn_free_ffiwscdmanager(pointer, $0) }
+        try! rustCall { uniffi_siros_wscd_manager_fn_free_ffiwscdmanager(handle, $0) }
     }
 
     
@@ -724,12 +817,14 @@ public convenience init(config: FfiWscdConfig) {
     /**
      * Activate an existing lifecycle context.
      */
-open func activateLifecycle(request: FfiActivateLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiActivationOutcome {
-    return try  FfiConverterTypeFfiActivationOutcome.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_activate_lifecycle(self.uniffiClonePointer(),
-        FfiConverterTypeFfiActivateLifecycleRequest.lower(request),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),
-        FfiConverterCallbackInterfaceFfiProgressCallback.lower(progress),$0
+open func activateLifecycle(request: FfiActivateLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiActivationOutcome  {
+    return try  FfiConverterTypeFfiActivationOutcome_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_activate_lifecycle(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiActivateLifecycleRequest_lower(request),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
     )
 })
 }
@@ -741,10 +836,26 @@ open func activateLifecycle(request: FfiActivateLifecycleRequest, auth: FfiAuthC
      * For hardware-backed plugins (FIDO2/R2PS), returns the certificate chain
      * proving the key was generated in a certified WSCD.
      */
-open func attestationChain(kid: String)throws  -> FfiAttestationChain? {
-    return try  FfiConverterOptionTypeFfiAttestationChain.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_attestation_chain(self.uniffiClonePointer(),
-        FfiConverterString.lower(kid),$0
+open func attestationChain(kid: String)throws  -> FfiAttestationChain?  {
+    return try  FfiConverterOptionTypeFfiAttestationChain.lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_attestation_chain(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(kid),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether a sign with this key could reach two TS12 categories. Never
+     * prompts; ask it before showing the user a transaction.
+     */
+open func authenticationCapability(kid: String)throws  -> FfiFactorCapability  {
+    return try  FfiConverterTypeFfiFactorCapability_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_authentication_capability(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(kid),uniffiCallStatus
     )
 })
 }
@@ -752,9 +863,11 @@ open func attestationChain(kid: String)throws  -> FfiAttestationChain? {
     /**
      * Delete a key.
      */
-open func deleteKey(kid: String)throws  {try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(self.uniffiClonePointer(),
-        FfiConverterString.lower(kid),$0
+open func deleteKey(kid: String)throws   {try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(kid),uniffiCallStatus
     )
 }
 }
@@ -762,12 +875,14 @@ open func deleteKey(kid: String)throws  {try rustCallWithError(FfiConverterTypeF
     /**
      * Destroy lifecycle bindings for a context.
      */
-open func destroyLifecycle(request: FfiDestroyLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiDestructionOutcome {
-    return try  FfiConverterTypeFfiDestructionOutcome.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(self.uniffiClonePointer(),
-        FfiConverterTypeFfiDestroyLifecycleRequest.lower(request),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),
-        FfiConverterCallbackInterfaceFfiProgressCallback.lower(progress),$0
+open func destroyLifecycle(request: FfiDestroyLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiDestructionOutcome  {
+    return try  FfiConverterTypeFfiDestructionOutcome_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiDestroyLifecycleRequest_lower(request),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
     )
 })
 }
@@ -777,9 +892,11 @@ open func destroyLifecycle(request: FfiDestroyLifecycleRequest, auth: FfiAuthCal
      * keys) for the host app to persist and later restore via
      * [`register_fido2_plugin_with_state`].
      */
-open func exportFido2State()throws  -> Data {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(self.uniffiClonePointer(),$0
+open func exportFido2State()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -793,10 +910,12 @@ open func exportFido2State()throws  -> Data {
      * than `generate_key` (e.g. `register_lifecycle`/`activate_lifecycle`),
      * or in a host process that didn't cache it itself.
      */
-open func exportPublicKey(kid: String)throws  -> String {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_public_key(self.uniffiClonePointer(),
-        FfiConverterString.lower(kid),$0
+open func exportPublicKey(kid: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_public_key(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(kid),uniffiCallStatus
     )
 })
 }
@@ -807,9 +926,11 @@ open func exportPublicKey(kid: String)throws  -> String {
      * Exports the actual StoredKey data (including private material)
      * so it can round-trip through import_softkey_container.
      */
-open func exportSoftkeyContainer()throws  -> Data {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_softkey_container(self.uniffiClonePointer(),$0
+open func exportSoftkeyContainer()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_softkey_container(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -817,12 +938,14 @@ open func exportSoftkeyContainer()throws  -> Data {
     /**
      * Generate a new key pair.
      */
-open func generateKey(algorithm: FfiAlgorithm, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiGeneratedKey {
-    return try  FfiConverterTypeFfiGeneratedKey.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_generate_key(self.uniffiClonePointer(),
-        FfiConverterTypeFfiAlgorithm.lower(algorithm),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),
-        FfiConverterCallbackInterfaceFfiProgressCallback.lower(progress),$0
+open func generateKey(algorithm: FfiAlgorithm, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiGeneratedKey  {
+    return try  FfiConverterTypeFfiGeneratedKey_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_generate_key(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiAlgorithm_lower(algorithm),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
     )
 })
 }
@@ -830,9 +953,11 @@ open func generateKey(algorithm: FfiAlgorithm, auth: FfiAuthCallback, progress: 
     /**
      * Import a softkey container (JSON bytes), replacing the current softkey state.
      */
-open func importSoftkeyContainer(container: Data)throws  {try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_import_softkey_container(self.uniffiClonePointer(),
-        FfiConverterData.lower(container),$0
+open func importSoftkeyContainer(container: Data)throws   {try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_import_softkey_container(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(container),uniffiCallStatus
     )
 }
 }
@@ -840,11 +965,13 @@ open func importSoftkeyContainer(container: Data)throws  {try rustCallWithError(
     /**
      * Return lifecycle status for a plugin context.
      */
-open func lifecycleStatus(pluginId: String, contextId: String)throws  -> FfiLifecycleStatus {
-    return try  FfiConverterTypeFfiLifecycleStatus.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_lifecycle_status(self.uniffiClonePointer(),
+open func lifecycleStatus(pluginId: String, contextId: String)throws  -> FfiLifecycleStatus  {
+    return try  FfiConverterTypeFfiLifecycleStatus_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_lifecycle_status(
+            self.uniffiCloneHandle(),
         FfiConverterString.lower(pluginId),
-        FfiConverterString.lower(contextId),$0
+        FfiConverterString.lower(contextId),uniffiCallStatus
     )
 })
 }
@@ -852,9 +979,11 @@ open func lifecycleStatus(pluginId: String, contextId: String)throws  -> FfiLife
     /**
      * List all keys across all registered plugins.
      */
-open func listKeys()throws  -> [FfiKeyInfo] {
-    return try  FfiConverterSequenceTypeFfiKeyInfo.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_list_keys(self.uniffiClonePointer(),$0
+open func listKeys()throws  -> [FfiKeyInfo]  {
+    return try  FfiConverterSequenceTypeFfiKeyInfo.lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_list_keys(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -865,12 +994,14 @@ open func listKeys()throws  -> [FfiKeyInfo] {
      * Returns `ReEnrollmentRequired` if the target cannot import and a new
      * credential binding is needed with the issuer.
      */
-open func migrateKey(kid: String, targetPluginId: String, auth: FfiAuthCallback)throws  -> FfiMigrationResult {
-    return try  FfiConverterTypeFfiMigrationResult.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_migrate_key(self.uniffiClonePointer(),
+open func migrateKey(kid: String, targetPluginId: String, auth: FfiAuthCallback)throws  -> FfiMigrationResult  {
+    return try  FfiConverterTypeFfiMigrationResult_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_migrate_key(
+            self.uniffiCloneHandle(),
         FfiConverterString.lower(kid),
         FfiConverterString.lower(targetPluginId),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),$0
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),uniffiCallStatus
     )
 })
 }
@@ -882,9 +1013,11 @@ open func migrateKey(kid: String, targetPluginId: String, auth: FfiAuthCallback)
      * The caller supplies a [`FfiCtap2Transport`] implementation that
      * handles USB/BLE/NFC communication with the FIDO2 authenticator.
      */
-open func registerFido2Plugin(transport: FfiCtap2Transport)throws  {try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin(self.uniffiClonePointer(),
-        FfiConverterCallbackInterfaceFfiCtap2Transport.lower(transport),$0
+open func registerFido2Plugin(transport: FfiCtap2Transport)throws   {try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceFfiCtap2Transport_lower(transport),uniffiCallStatus
     )
 }
 }
@@ -898,10 +1031,12 @@ open func registerFido2Plugin(transport: FfiCtap2Transport)throws  {try rustCall
      * still exists in credential/session metadata, but the manager has no
      * record of the credential handle needed to sign with it again).
      */
-open func registerFido2PluginWithState(transport: FfiCtap2Transport, state: Data)throws  {try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin_with_state(self.uniffiClonePointer(),
-        FfiConverterCallbackInterfaceFfiCtap2Transport.lower(transport),
-        FfiConverterData.lower(state),$0
+open func registerFido2PluginWithState(transport: FfiCtap2Transport, state: Data)throws   {try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin_with_state(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceFfiCtap2Transport_lower(transport),
+        FfiConverterData.lower(state),uniffiCallStatus
     )
 }
 }
@@ -909,12 +1044,14 @@ open func registerFido2PluginWithState(transport: FfiCtap2Transport, state: Data
     /**
      * Register lifecycle bindings for a context.
      */
-open func registerLifecycle(request: FfiRegisterLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiRegistrationOutcome {
-    return try  FfiConverterTypeFfiRegistrationOutcome.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_lifecycle(self.uniffiClonePointer(),
-        FfiConverterTypeFfiRegisterLifecycleRequest.lower(request),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),
-        FfiConverterCallbackInterfaceFfiProgressCallback.lower(progress),$0
+open func registerLifecycle(request: FfiRegisterLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiRegistrationOutcome  {
+    return try  FfiConverterTypeFfiRegistrationOutcome_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_lifecycle(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiRegisterLifecycleRequest_lower(request),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
     )
 })
 }
@@ -931,10 +1068,12 @@ open func registerLifecycle(request: FfiRegisterLifecycleRequest, auth: FfiAuthC
      * "opaque"`) is handled entirely in Rust via `r2ps_client::OpaqueClient`
      * - no host-provided PAKE callback is needed (or possible) any more.
      */
-open func registerR2psPlugin(config: FfiR2psConfig, transport: FfiHttpTransport)throws  {try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_r2ps_plugin(self.uniffiClonePointer(),
-        FfiConverterTypeFfiR2psConfig.lower(config),
-        FfiConverterCallbackInterfaceFfiHttpTransport.lower(transport),$0
+open func registerR2psPlugin(config: FfiR2psConfig, transport: FfiHttpTransport)throws   {try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_r2ps_plugin(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiR2psConfig_lower(config),
+        FfiConverterCallbackInterfaceFfiHttpTransport_lower(transport),uniffiCallStatus
     )
 }
 }
@@ -942,8 +1081,10 @@ open func registerR2psPlugin(config: FfiR2psConfig, transport: FfiHttpTransport)
     /**
      * Register the built-in softkey plugin.
      */
-open func registerSoftkeyPlugin()throws  {try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_softkey_plugin(self.uniffiClonePointer(),$0
+open func registerSoftkeyPlugin()throws   {try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_softkey_plugin(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
@@ -951,12 +1092,14 @@ open func registerSoftkeyPlugin()throws  {try rustCallWithError(FfiConverterType
     /**
      * Rotate lifecycle bindings for a context.
      */
-open func rotateLifecycle(request: FfiRotateLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiRotationOutcome {
-    return try  FfiConverterTypeFfiRotationOutcome.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_rotate_lifecycle(self.uniffiClonePointer(),
-        FfiConverterTypeFfiRotateLifecycleRequest.lower(request),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),
-        FfiConverterCallbackInterfaceFfiProgressCallback.lower(progress),$0
+open func rotateLifecycle(request: FfiRotateLifecycleRequest, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiRotationOutcome  {
+    return try  FfiConverterTypeFfiRotationOutcome_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_rotate_lifecycle(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiRotateLifecycleRequest_lower(request),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
     )
 })
 }
@@ -967,10 +1110,12 @@ open func rotateLifecycle(request: FfiRotateLifecycleRequest, auth: FfiAuthCallb
      * Returns key storage type, user authentication methods, certification level,
      * and AMR values from the last signing operation.
      */
-open func securityProperties(kid: String)throws  -> FfiSecurityProperties {
-    return try  FfiConverterTypeFfiSecurityProperties.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_security_properties(self.uniffiClonePointer(),
-        FfiConverterString.lower(kid),$0
+open func securityProperties(kid: String)throws  -> FfiSecurityProperties  {
+    return try  FfiConverterTypeFfiSecurityProperties_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_security_properties(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(kid),uniffiCallStatus
     )
 })
 }
@@ -978,74 +1123,89 @@ open func securityProperties(kid: String)throws  -> FfiSecurityProperties {
     /**
      * Sign data with the specified key.
      */
-open func sign(kid: String, data: Data, algorithm: FfiAlgorithm, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiSignature {
-    return try  FfiConverterTypeFfiSignature.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
-    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign(self.uniffiClonePointer(),
+open func sign(kid: String, data: Data, algorithm: FfiAlgorithm, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiSignature  {
+    return try  FfiConverterTypeFfiSignature_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign(
+            self.uniffiCloneHandle(),
         FfiConverterString.lower(kid),
         FfiConverterData.lower(data),
-        FfiConverterTypeFfiAlgorithm.lower(algorithm),
-        FfiConverterCallbackInterfaceFfiAuthCallback.lower(auth),
-        FfiConverterCallbackInterfaceFfiProgressCallback.lower(progress),$0
+        FfiConverterTypeFfiAlgorithm_lower(algorithm),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Sign data and report the TS12 authentication factors applied to this
+     * very sign. Additive: `sign` and `security_properties().amr` are
+     * unchanged. See [`FfiSignOptions`] for the fresh-authentication flag.
+     */
+open func signWithFactors(kid: String, data: Data, algorithm: FfiAlgorithm, options: FfiSignOptions, auth: FfiAuthCallback, progress: FfiProgressCallback)throws  -> FfiSignOutcome  {
+    return try  FfiConverterTypeFfiSignOutcome_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign_with_factors(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(kid),
+        FfiConverterData.lower(data),
+        FfiConverterTypeFfiAlgorithm_lower(algorithm),
+        FfiConverterTypeFfiSignOptions_lower(options),
+        FfiConverterCallbackInterfaceFfiAuthCallback_lower(auth),
+        FfiConverterCallbackInterfaceFfiProgressCallback_lower(progress),uniffiCallStatus
     )
 })
 }
     
 
+    
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeFfiWscdManager: FfiConverter {
-
-    typealias FfiType = UnsafeMutableRawPointer
+    typealias FfiType = UInt64
     typealias SwiftType = FfiWscdManager
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiWscdManager {
-        return FfiWscdManager(unsafeFromRawPointer: pointer)
+    public static func lift(_ handle: UInt64) throws -> FfiWscdManager {
+        return FfiWscdManager(unsafeFromHandle: handle)
     }
 
-    public static func lower(_ value: FfiWscdManager) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
+    public static func lower(_ value: FfiWscdManager) -> UInt64 {
+        return value.uniffiCloneHandle()
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiWscdManager {
-        let v: UInt64 = try readInt(&buf)
-        // The Rust code won't compile if a pointer won't fit in a UInt64.
-        // We have to go via `UInt` because that's the thing that's the size of a pointer.
-        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if (ptr == nil) {
-            throw UniffiInternalError.unexpectedNullPointer
-        }
-        return try lift(ptr!)
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
     }
 
     public static func write(_ value: FfiWscdManager, into buf: inout [UInt8]) {
-        // This fiddling is because `Int` is the thing that's the same size as a pointer.
-        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
-        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+        writeInt(&buf, lower(value))
     }
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiWscdManager_lift(_ pointer: UnsafeMutableRawPointer) throws -> FfiWscdManager {
-    return try FfiConverterTypeFfiWscdManager.lift(pointer)
+public func FfiConverterTypeFfiWscdManager_lift(_ handle: UInt64) throws -> FfiWscdManager {
+    return try FfiConverterTypeFfiWscdManager.lift(handle)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiWscdManager_lower(_ value: FfiWscdManager) -> UnsafeMutableRawPointer {
+public func FfiConverterTypeFfiWscdManager_lower(_ value: FfiWscdManager) -> UInt64 {
     return FfiConverterTypeFfiWscdManager.lower(value)
 }
 
 
-public struct FfiActivateLifecycleRequest {
+
+
+public struct FfiActivateLifecycleRequest: Equatable, Hashable {
     public var pluginId: String
     public var contextId: String
 
@@ -1055,27 +1215,15 @@ public struct FfiActivateLifecycleRequest {
         self.pluginId = pluginId
         self.contextId = contextId
     }
+
+    
+
+    
 }
 
-
-
-extension FfiActivateLifecycleRequest: Equatable, Hashable {
-    public static func ==(lhs: FfiActivateLifecycleRequest, rhs: FfiActivateLifecycleRequest) -> Bool {
-        if lhs.pluginId != rhs.pluginId {
-            return false
-        }
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(pluginId)
-        hasher.combine(contextId)
-    }
-}
-
+#if compiler(>=6)
+extension FfiActivateLifecycleRequest: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1111,7 +1259,7 @@ public func FfiConverterTypeFfiActivateLifecycleRequest_lower(_ value: FfiActiva
 }
 
 
-public struct FfiActivationOutcome {
+public struct FfiActivationOutcome: Equatable, Hashable {
     public var contextId: String
     public var state: FfiLifecycleState
 
@@ -1121,27 +1269,15 @@ public struct FfiActivationOutcome {
         self.contextId = contextId
         self.state = state
     }
+
+    
+
+    
 }
 
-
-
-extension FfiActivationOutcome: Equatable, Hashable {
-    public static func ==(lhs: FfiActivationOutcome, rhs: FfiActivationOutcome) -> Bool {
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.state != rhs.state {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(contextId)
-        hasher.combine(state)
-    }
-}
-
+#if compiler(>=6)
+extension FfiActivationOutcome: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1177,7 +1313,7 @@ public func FfiConverterTypeFfiActivationOutcome_lower(_ value: FfiActivationOut
 }
 
 
-public struct FfiAttestationChain {
+public struct FfiAttestationChain: Equatable, Hashable {
     public var certificates: [Data]
     public var clientDataHash: Data
 
@@ -1187,27 +1323,15 @@ public struct FfiAttestationChain {
         self.certificates = certificates
         self.clientDataHash = clientDataHash
     }
+
+    
+
+    
 }
 
-
-
-extension FfiAttestationChain: Equatable, Hashable {
-    public static func ==(lhs: FfiAttestationChain, rhs: FfiAttestationChain) -> Bool {
-        if lhs.certificates != rhs.certificates {
-            return false
-        }
-        if lhs.clientDataHash != rhs.clientDataHash {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(certificates)
-        hasher.combine(clientDataHash)
-    }
-}
-
+#if compiler(>=6)
+extension FfiAttestationChain: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1243,7 +1367,127 @@ public func FfiConverterTypeFfiAttestationChain_lower(_ value: FfiAttestationCha
 }
 
 
-public struct FfiDestroyLifecycleRequest {
+/**
+ * One `amr` entry: `{<category>: <method>}`. `method` is a TS12 vocabulary
+ * value such as `key_in_remote_wscd` or `pin_6_or_more_digits`.
+ */
+public struct FfiAuthFactor: Equatable, Hashable {
+    public var category: FfiFactorCategory
+    public var method: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(category: FfiFactorCategory, method: String) {
+        self.category = category
+        self.method = method
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiAuthFactor: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAuthFactor: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAuthFactor {
+        return
+            try FfiAuthFactor(
+                category: FfiConverterTypeFfiFactorCategory.read(from: &buf), 
+                method: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiAuthFactor, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiFactorCategory.write(value.category, into: &buf)
+        FfiConverterString.write(value.method, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAuthFactor_lift(_ buf: RustBuffer) throws -> FfiAuthFactor {
+    return try FfiConverterTypeFfiAuthFactor.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAuthFactor_lower(_ value: FfiAuthFactor) -> RustBuffer {
+    return FfiConverterTypeFfiAuthFactor.lower(value)
+}
+
+
+/**
+ * The factors applied to ONE sign. When `satisfies_two_categories` is false
+ * the SDK must refuse SCA; `shortfall` says why.
+ */
+public struct FfiAuthFactors: Equatable, Hashable {
+    public var factors: [FfiAuthFactor]
+    public var satisfiesTwoCategories: Bool
+    public var shortfall: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(factors: [FfiAuthFactor], satisfiesTwoCategories: Bool, shortfall: String?) {
+        self.factors = factors
+        self.satisfiesTwoCategories = satisfiesTwoCategories
+        self.shortfall = shortfall
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiAuthFactors: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAuthFactors: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAuthFactors {
+        return
+            try FfiAuthFactors(
+                factors: FfiConverterSequenceTypeFfiAuthFactor.read(from: &buf), 
+                satisfiesTwoCategories: FfiConverterBool.read(from: &buf), 
+                shortfall: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiAuthFactors, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiAuthFactor.write(value.factors, into: &buf)
+        FfiConverterBool.write(value.satisfiesTwoCategories, into: &buf)
+        FfiConverterOptionString.write(value.shortfall, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAuthFactors_lift(_ buf: RustBuffer) throws -> FfiAuthFactors {
+    return try FfiConverterTypeFfiAuthFactors.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAuthFactors_lower(_ value: FfiAuthFactors) -> RustBuffer {
+    return FfiConverterTypeFfiAuthFactors.lower(value)
+}
+
+
+public struct FfiDestroyLifecycleRequest: Equatable, Hashable {
     public var pluginId: String
     public var contextId: String
     public var mode: FfiDestroyMode
@@ -1257,35 +1501,15 @@ public struct FfiDestroyLifecycleRequest {
         self.mode = mode
         self.reason = reason
     }
+
+    
+
+    
 }
 
-
-
-extension FfiDestroyLifecycleRequest: Equatable, Hashable {
-    public static func ==(lhs: FfiDestroyLifecycleRequest, rhs: FfiDestroyLifecycleRequest) -> Bool {
-        if lhs.pluginId != rhs.pluginId {
-            return false
-        }
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.mode != rhs.mode {
-            return false
-        }
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(pluginId)
-        hasher.combine(contextId)
-        hasher.combine(mode)
-        hasher.combine(reason)
-    }
-}
-
+#if compiler(>=6)
+extension FfiDestroyLifecycleRequest: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1325,7 +1549,7 @@ public func FfiConverterTypeFfiDestroyLifecycleRequest_lower(_ value: FfiDestroy
 }
 
 
-public struct FfiDestructionOutcome {
+public struct FfiDestructionOutcome: Equatable, Hashable {
     public var contextId: String
     public var state: FfiLifecycleState
     public var remotePerformed: Bool
@@ -1337,31 +1561,15 @@ public struct FfiDestructionOutcome {
         self.state = state
         self.remotePerformed = remotePerformed
     }
+
+    
+
+    
 }
 
-
-
-extension FfiDestructionOutcome: Equatable, Hashable {
-    public static func ==(lhs: FfiDestructionOutcome, rhs: FfiDestructionOutcome) -> Bool {
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.state != rhs.state {
-            return false
-        }
-        if lhs.remotePerformed != rhs.remotePerformed {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(contextId)
-        hasher.combine(state)
-        hasher.combine(remotePerformed)
-    }
-}
-
+#if compiler(>=6)
+extension FfiDestructionOutcome: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1399,7 +1607,7 @@ public func FfiConverterTypeFfiDestructionOutcome_lower(_ value: FfiDestructionO
 }
 
 
-public struct FfiEcPublicKey {
+public struct FfiEcPublicKey: Equatable, Hashable {
     public var x: Data
     public var y: Data
 
@@ -1409,27 +1617,15 @@ public struct FfiEcPublicKey {
         self.x = x
         self.y = y
     }
+
+    
+
+    
 }
 
-
-
-extension FfiEcPublicKey: Equatable, Hashable {
-    public static func ==(lhs: FfiEcPublicKey, rhs: FfiEcPublicKey) -> Bool {
-        if lhs.x != rhs.x {
-            return false
-        }
-        if lhs.y != rhs.y {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(x)
-        hasher.combine(y)
-    }
-}
-
+#if compiler(>=6)
+extension FfiEcPublicKey: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1465,7 +1661,77 @@ public func FfiConverterTypeFfiEcPublicKey_lower(_ value: FfiEcPublicKey) -> Rus
 }
 
 
-public struct FfiGeneratedKey {
+/**
+ * Side-effect-free pre-consent answer to "can this key's plugin reach two
+ * categories?".
+ */
+public struct FfiFactorCapability: Equatable, Hashable {
+    public var canReachTwoCategories: Bool
+    /**
+     * True when only `FfiSignOptions.host_verified_factor` can supply the
+     * second category (then `can_reach_two_categories` is false).
+     */
+    public var requiresHostVerifiedFactor: Bool
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(canReachTwoCategories: Bool, 
+        /**
+         * True when only `FfiSignOptions.host_verified_factor` can supply the
+         * second category (then `can_reach_two_categories` is false).
+         */requiresHostVerifiedFactor: Bool, reason: String?) {
+        self.canReachTwoCategories = canReachTwoCategories
+        self.requiresHostVerifiedFactor = requiresHostVerifiedFactor
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiFactorCapability: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFactorCapability: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFactorCapability {
+        return
+            try FfiFactorCapability(
+                canReachTwoCategories: FfiConverterBool.read(from: &buf), 
+                requiresHostVerifiedFactor: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiFactorCapability, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.canReachTwoCategories, into: &buf)
+        FfiConverterBool.write(value.requiresHostVerifiedFactor, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFactorCapability_lift(_ buf: RustBuffer) throws -> FfiFactorCapability {
+    return try FfiConverterTypeFfiFactorCapability.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFactorCapability_lower(_ value: FfiFactorCapability) -> RustBuffer {
+    return FfiConverterTypeFfiFactorCapability.lower(value)
+}
+
+
+public struct FfiGeneratedKey: Equatable, Hashable {
     public var kid: String
     public var publicKeyJwk: String
 
@@ -1475,27 +1741,15 @@ public struct FfiGeneratedKey {
         self.kid = kid
         self.publicKeyJwk = publicKeyJwk
     }
+
+    
+
+    
 }
 
-
-
-extension FfiGeneratedKey: Equatable, Hashable {
-    public static func ==(lhs: FfiGeneratedKey, rhs: FfiGeneratedKey) -> Bool {
-        if lhs.kid != rhs.kid {
-            return false
-        }
-        if lhs.publicKeyJwk != rhs.publicKeyJwk {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kid)
-        hasher.combine(publicKeyJwk)
-    }
-}
-
+#if compiler(>=6)
+extension FfiGeneratedKey: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1531,7 +1785,7 @@ public func FfiConverterTypeFfiGeneratedKey_lower(_ value: FfiGeneratedKey) -> R
 }
 
 
-public struct FfiKeyInfo {
+public struct FfiKeyInfo: Equatable, Hashable {
     public var kid: String
     public var algorithm: FfiAlgorithm
     public var pluginId: String
@@ -1545,35 +1799,15 @@ public struct FfiKeyInfo {
         self.pluginId = pluginId
         self.createdAt = createdAt
     }
+
+    
+
+    
 }
 
-
-
-extension FfiKeyInfo: Equatable, Hashable {
-    public static func ==(lhs: FfiKeyInfo, rhs: FfiKeyInfo) -> Bool {
-        if lhs.kid != rhs.kid {
-            return false
-        }
-        if lhs.algorithm != rhs.algorithm {
-            return false
-        }
-        if lhs.pluginId != rhs.pluginId {
-            return false
-        }
-        if lhs.createdAt != rhs.createdAt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kid)
-        hasher.combine(algorithm)
-        hasher.combine(pluginId)
-        hasher.combine(createdAt)
-    }
-}
-
+#if compiler(>=6)
+extension FfiKeyInfo: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1613,7 +1847,7 @@ public func FfiConverterTypeFfiKeyInfo_lower(_ value: FfiKeyInfo) -> RustBuffer 
 }
 
 
-public struct FfiLifecycleStatus {
+public struct FfiLifecycleStatus: Equatable, Hashable {
     public var contextId: String
     public var pluginId: String
     public var factorKind: FfiFactorKind
@@ -1629,39 +1863,15 @@ public struct FfiLifecycleStatus {
         self.state = state
         self.updatedAt = updatedAt
     }
+
+    
+
+    
 }
 
-
-
-extension FfiLifecycleStatus: Equatable, Hashable {
-    public static func ==(lhs: FfiLifecycleStatus, rhs: FfiLifecycleStatus) -> Bool {
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.pluginId != rhs.pluginId {
-            return false
-        }
-        if lhs.factorKind != rhs.factorKind {
-            return false
-        }
-        if lhs.state != rhs.state {
-            return false
-        }
-        if lhs.updatedAt != rhs.updatedAt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(contextId)
-        hasher.combine(pluginId)
-        hasher.combine(factorKind)
-        hasher.combine(state)
-        hasher.combine(updatedAt)
-    }
-}
-
+#if compiler(>=6)
+extension FfiLifecycleStatus: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1706,7 +1916,7 @@ public func FfiConverterTypeFfiLifecycleStatus_lower(_ value: FfiLifecycleStatus
 /**
  * Configuration for the R2PS plugin, passed from the host SDK.
  */
-public struct FfiR2psConfig {
+public struct FfiR2psConfig: Equatable, Hashable {
     /**
      * R2PS server URL (e.g. "https://r2ps.example.com/r2ps").
      */
@@ -1776,51 +1986,15 @@ public struct FfiR2psConfig {
         self.clientKeyPem = clientKeyPem
         self.serverPublicKeyPem = serverPublicKeyPem
     }
+
+    
+
+    
 }
 
-
-
-extension FfiR2psConfig: Equatable, Hashable {
-    public static func ==(lhs: FfiR2psConfig, rhs: FfiR2psConfig) -> Bool {
-        if lhs.serverUrl != rhs.serverUrl {
-            return false
-        }
-        if lhs.clientId != rhs.clientId {
-            return false
-        }
-        if lhs.context != rhs.context {
-            return false
-        }
-        if lhs.authMode != rhs.authMode {
-            return false
-        }
-        if lhs.rpId != rhs.rpId {
-            return false
-        }
-        if lhs.allowedCredentialIds != rhs.allowedCredentialIds {
-            return false
-        }
-        if lhs.clientKeyPem != rhs.clientKeyPem {
-            return false
-        }
-        if lhs.serverPublicKeyPem != rhs.serverPublicKeyPem {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(serverUrl)
-        hasher.combine(clientId)
-        hasher.combine(context)
-        hasher.combine(authMode)
-        hasher.combine(rpId)
-        hasher.combine(allowedCredentialIds)
-        hasher.combine(clientKeyPem)
-        hasher.combine(serverPublicKeyPem)
-    }
-}
-
+#if compiler(>=6)
+extension FfiR2psConfig: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1868,7 +2042,7 @@ public func FfiConverterTypeFfiR2psConfig_lower(_ value: FfiR2psConfig) -> RustB
 }
 
 
-public struct FfiRegisterLifecycleRequest {
+public struct FfiRegisterLifecycleRequest: Equatable, Hashable {
     public var pluginId: String
     public var contextId: String
     public var factorKind: FfiFactorKind
@@ -1880,31 +2054,15 @@ public struct FfiRegisterLifecycleRequest {
         self.contextId = contextId
         self.factorKind = factorKind
     }
+
+    
+
+    
 }
 
-
-
-extension FfiRegisterLifecycleRequest: Equatable, Hashable {
-    public static func ==(lhs: FfiRegisterLifecycleRequest, rhs: FfiRegisterLifecycleRequest) -> Bool {
-        if lhs.pluginId != rhs.pluginId {
-            return false
-        }
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.factorKind != rhs.factorKind {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(pluginId)
-        hasher.combine(contextId)
-        hasher.combine(factorKind)
-    }
-}
-
+#if compiler(>=6)
+extension FfiRegisterLifecycleRequest: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1942,7 +2100,7 @@ public func FfiConverterTypeFfiRegisterLifecycleRequest_lower(_ value: FfiRegist
 }
 
 
-public struct FfiRegistrationOutcome {
+public struct FfiRegistrationOutcome: Equatable, Hashable {
     public var contextId: String
     public var state: FfiLifecycleState
 
@@ -1952,27 +2110,15 @@ public struct FfiRegistrationOutcome {
         self.contextId = contextId
         self.state = state
     }
+
+    
+
+    
 }
 
-
-
-extension FfiRegistrationOutcome: Equatable, Hashable {
-    public static func ==(lhs: FfiRegistrationOutcome, rhs: FfiRegistrationOutcome) -> Bool {
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.state != rhs.state {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(contextId)
-        hasher.combine(state)
-    }
-}
-
+#if compiler(>=6)
+extension FfiRegistrationOutcome: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2008,7 +2154,7 @@ public func FfiConverterTypeFfiRegistrationOutcome_lower(_ value: FfiRegistratio
 }
 
 
-public struct FfiRotateLifecycleRequest {
+public struct FfiRotateLifecycleRequest: Equatable, Hashable {
     public var pluginId: String
     public var contextId: String
 
@@ -2018,27 +2164,15 @@ public struct FfiRotateLifecycleRequest {
         self.pluginId = pluginId
         self.contextId = contextId
     }
+
+    
+
+    
 }
 
-
-
-extension FfiRotateLifecycleRequest: Equatable, Hashable {
-    public static func ==(lhs: FfiRotateLifecycleRequest, rhs: FfiRotateLifecycleRequest) -> Bool {
-        if lhs.pluginId != rhs.pluginId {
-            return false
-        }
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(pluginId)
-        hasher.combine(contextId)
-    }
-}
-
+#if compiler(>=6)
+extension FfiRotateLifecycleRequest: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2074,7 +2208,7 @@ public func FfiConverterTypeFfiRotateLifecycleRequest_lower(_ value: FfiRotateLi
 }
 
 
-public struct FfiRotationOutcome {
+public struct FfiRotationOutcome: Equatable, Hashable {
     public var contextId: String
     public var state: FfiLifecycleState
 
@@ -2084,27 +2218,15 @@ public struct FfiRotationOutcome {
         self.contextId = contextId
         self.state = state
     }
+
+    
+
+    
 }
 
-
-
-extension FfiRotationOutcome: Equatable, Hashable {
-    public static func ==(lhs: FfiRotationOutcome, rhs: FfiRotationOutcome) -> Bool {
-        if lhs.contextId != rhs.contextId {
-            return false
-        }
-        if lhs.state != rhs.state {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(contextId)
-        hasher.combine(state)
-    }
-}
-
+#if compiler(>=6)
+extension FfiRotationOutcome: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2140,7 +2262,7 @@ public func FfiConverterTypeFfiRotationOutcome_lower(_ value: FfiRotationOutcome
 }
 
 
-public struct FfiSecurityProperties {
+public struct FfiSecurityProperties: Equatable, Hashable {
     public var keyStorage: FfiKeyStorageType
     public var userAuthentication: [String]
     public var certification: FfiCertificationLevel
@@ -2154,35 +2276,15 @@ public struct FfiSecurityProperties {
         self.certification = certification
         self.amr = amr
     }
+
+    
+
+    
 }
 
-
-
-extension FfiSecurityProperties: Equatable, Hashable {
-    public static func ==(lhs: FfiSecurityProperties, rhs: FfiSecurityProperties) -> Bool {
-        if lhs.keyStorage != rhs.keyStorage {
-            return false
-        }
-        if lhs.userAuthentication != rhs.userAuthentication {
-            return false
-        }
-        if lhs.certification != rhs.certification {
-            return false
-        }
-        if lhs.amr != rhs.amr {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(keyStorage)
-        hasher.combine(userAuthentication)
-        hasher.combine(certification)
-        hasher.combine(amr)
-    }
-}
-
+#if compiler(>=6)
+extension FfiSecurityProperties: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2222,7 +2324,145 @@ public func FfiConverterTypeFfiSecurityProperties_lower(_ value: FfiSecurityProp
 }
 
 
-public struct FfiSignature {
+/**
+ * Per-sign options. All defaults reproduce a plain `sign`.
+ */
+public struct FfiSignOptions: Equatable, Hashable {
+    /**
+     * Force a NEW user authentication for this sign (no cached session or
+     * token). Only paths that really perform a fresh PIN/UV in this call
+     * honour it (R2PS OPAQUE, FIDO2 on a raw transport). Any plugin that
+     * cannot guarantee it (softkey, R2PS WebAuthn, a transport that runs
+     * UV itself) fails with `Unsupported` BEFORE signing.
+     */
+    public var requireFreshUserAuthentication: Bool
+    /**
+     * A knowledge/inherence factor the host performed for this sign. Used
+     * only when the plugin observed user verification without learning its
+     * method (R2PS WebAuthn, a UV-performing CTAP2 transport).
+     */
+    public var hostVerifiedFactor: FfiAuthFactor?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Force a NEW user authentication for this sign (no cached session or
+         * token). Only paths that really perform a fresh PIN/UV in this call
+         * honour it (R2PS OPAQUE, FIDO2 on a raw transport). Any plugin that
+         * cannot guarantee it (softkey, R2PS WebAuthn, a transport that runs
+         * UV itself) fails with `Unsupported` BEFORE signing.
+         */requireFreshUserAuthentication: Bool = false, 
+        /**
+         * A knowledge/inherence factor the host performed for this sign. Used
+         * only when the plugin observed user verification without learning its
+         * method (R2PS WebAuthn, a UV-performing CTAP2 transport).
+         */hostVerifiedFactor: FfiAuthFactor? = nil) {
+        self.requireFreshUserAuthentication = requireFreshUserAuthentication
+        self.hostVerifiedFactor = hostVerifiedFactor
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiSignOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSignOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSignOptions {
+        return
+            try FfiSignOptions(
+                requireFreshUserAuthentication: FfiConverterBool.read(from: &buf), 
+                hostVerifiedFactor: FfiConverterOptionTypeFfiAuthFactor.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiSignOptions, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.requireFreshUserAuthentication, into: &buf)
+        FfiConverterOptionTypeFfiAuthFactor.write(value.hostVerifiedFactor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSignOptions_lift(_ buf: RustBuffer) throws -> FfiSignOptions {
+    return try FfiConverterTypeFfiSignOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSignOptions_lower(_ value: FfiSignOptions) -> RustBuffer {
+    return FfiConverterTypeFfiSignOptions.lower(value)
+}
+
+
+/**
+ * A signature and the factors applied to produce THIS signature.
+ */
+public struct FfiSignOutcome: Equatable, Hashable {
+    public var signature: FfiSignature
+    public var factors: FfiAuthFactors
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(signature: FfiSignature, factors: FfiAuthFactors) {
+        self.signature = signature
+        self.factors = factors
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiSignOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSignOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSignOutcome {
+        return
+            try FfiSignOutcome(
+                signature: FfiConverterTypeFfiSignature.read(from: &buf), 
+                factors: FfiConverterTypeFfiAuthFactors.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiSignOutcome, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiSignature.write(value.signature, into: &buf)
+        FfiConverterTypeFfiAuthFactors.write(value.factors, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSignOutcome_lift(_ buf: RustBuffer) throws -> FfiSignOutcome {
+    return try FfiConverterTypeFfiSignOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSignOutcome_lower(_ value: FfiSignOutcome) -> RustBuffer {
+    return FfiConverterTypeFfiSignOutcome.lower(value)
+}
+
+
+public struct FfiSignature: Equatable, Hashable {
     public var data: Data
 
     // Default memberwise initializers are never public by default, so we
@@ -2230,23 +2470,15 @@ public struct FfiSignature {
     public init(data: Data) {
         self.data = data
     }
+
+    
+
+    
 }
 
-
-
-extension FfiSignature: Equatable, Hashable {
-    public static func ==(lhs: FfiSignature, rhs: FfiSignature) -> Bool {
-        if lhs.data != rhs.data {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(data)
-    }
-}
-
+#if compiler(>=6)
+extension FfiSignature: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2280,7 +2512,7 @@ public func FfiConverterTypeFfiSignature_lower(_ value: FfiSignature) -> RustBuf
 }
 
 
-public struct FfiWscdConfig {
+public struct FfiWscdConfig: Equatable, Hashable {
     public var defaultPlugin: String
 
     // Default memberwise initializers are never public by default, so we
@@ -2288,23 +2520,15 @@ public struct FfiWscdConfig {
     public init(defaultPlugin: String) {
         self.defaultPlugin = defaultPlugin
     }
+
+    
+
+    
 }
 
-
-
-extension FfiWscdConfig: Equatable, Hashable {
-    public static func ==(lhs: FfiWscdConfig, rhs: FfiWscdConfig) -> Bool {
-        if lhs.defaultPlugin != rhs.defaultPlugin {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(defaultPlugin)
-    }
-}
-
+#if compiler(>=6)
+extension FfiWscdConfig: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2337,10 +2561,9 @@ public func FfiConverterTypeFfiWscdConfig_lower(_ value: FfiWscdConfig) -> RustB
     return FfiConverterTypeFfiWscdConfig.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
-public enum FfiAlgorithm {
+
+public enum FfiAlgorithm: Equatable, Hashable {
     
     case es256
     case edDsa
@@ -2350,8 +2573,16 @@ public enum FfiAlgorithm {
      * YubiKey 5.8 alpha firmware.
      */
     case bls12381G1Schnorr
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiAlgorithm: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2409,20 +2640,22 @@ public func FfiConverterTypeFfiAlgorithm_lower(_ value: FfiAlgorithm) -> RustBuf
 
 
 
-extension FfiAlgorithm: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiAuthMethod {
+public enum FfiAuthMethod: Equatable, Hashable {
     
     case none
     case opaque
     case webAuthn
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiAuthMethod: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2480,21 +2713,23 @@ public func FfiConverterTypeFfiAuthMethod_lower(_ value: FfiAuthMethod) -> RustB
 
 
 
-extension FfiAuthMethod: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiCertificationLevel {
+public enum FfiCertificationLevel: Equatable, Hashable {
     
     case none
     case baseline
     case substantial
     case high
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiCertificationLevel: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2558,20 +2793,22 @@ public func FfiConverterTypeFfiCertificationLevel_lower(_ value: FfiCertificatio
 
 
 
-extension FfiCertificationLevel: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiDestroyMode {
+public enum FfiDestroyMode: Equatable, Hashable {
     
     case localOnly
     case remoteRevokeIfSupported
     case strict
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiDestroyMode: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2629,20 +2866,98 @@ public func FfiConverterTypeFfiDestroyMode_lower(_ value: FfiDestroyMode) -> Rus
 
 
 
-extension FfiDestroyMode: Equatable, Hashable {}
+/**
+ * The `amr` entry's key.
+ */
+
+public enum FfiFactorCategory: Equatable, Hashable {
+    
+    case knowledge
+    case possession
+    case inherence
 
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
-public enum FfiFactorKind {
+
+}
+
+#if compiler(>=6)
+extension FfiFactorCategory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFactorCategory: FfiConverterRustBuffer {
+    typealias SwiftType = FfiFactorCategory
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFactorCategory {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .knowledge
+        
+        case 2: return .possession
+        
+        case 3: return .inherence
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiFactorCategory, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .knowledge:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .possession:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .inherence:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFactorCategory_lift(_ buf: RustBuffer) throws -> FfiFactorCategory {
+    return try FfiConverterTypeFfiFactorCategory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFactorCategory_lower(_ value: FfiFactorCategory) -> RustBuffer {
+    return FfiConverterTypeFfiFactorCategory.lower(value)
+}
+
+
+
+
+public enum FfiFactorKind: Equatable, Hashable {
     
     case opaque
     case webAuthn
     case rawSign
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiFactorKind: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2700,21 +3015,23 @@ public func FfiConverterTypeFfiFactorKind_lower(_ value: FfiFactorKind) -> RustB
 
 
 
-extension FfiFactorKind: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiKeyStorageType {
+public enum FfiKeyStorageType: Equatable, Hashable {
     
     case software
     case hardware
     case remoteHsm
     case trustedExecution
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiKeyStorageType: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2778,22 +3095,24 @@ public func FfiConverterTypeFfiKeyStorageType_lower(_ value: FfiKeyStorageType) 
 
 
 
-extension FfiKeyStorageType: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiLifecycleState {
+public enum FfiLifecycleState: Equatable, Hashable {
     
     case uninitialized
     case registered
     case active
     case suspended
     case destroyed
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiLifecycleState: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2863,21 +3182,23 @@ public func FfiConverterTypeFfiLifecycleState_lower(_ value: FfiLifecycleState) 
 
 
 
-extension FfiLifecycleState: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiMigrationResult {
+public enum FfiMigrationResult: Equatable, Hashable {
     
     case migrated(newKid: String
     )
     case reEnrollmentRequired(oldKid: String
     )
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiMigrationResult: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2933,14 +3254,8 @@ public func FfiConverterTypeFfiMigrationResult_lower(_ value: FfiMigrationResult
 
 
 
-extension FfiMigrationResult: Equatable, Hashable {}
 
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiOperationProgress {
+public enum FfiOperationProgress: Equatable, Hashable {
     
     case started(operation: String
     )
@@ -2948,8 +3263,16 @@ public enum FfiOperationProgress {
     )
     case waitingForUser
     case complete
+
+
+
+
+
 }
 
+#if compiler(>=6)
+extension FfiOperationProgress: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3018,12 +3341,8 @@ public func FfiConverterTypeFfiOperationProgress_lower(_ value: FfiOperationProg
 
 
 
-extension FfiOperationProgress: Equatable, Hashable {}
-
-
-
-
-public enum FfiWscdError {
+public 
+enum FfiWscdError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
     
     
@@ -3047,8 +3366,21 @@ public enum FfiWscdError {
     )
     case Crypto(msg: String
     )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
 }
 
+#if compiler(>=6)
+extension FfiWscdError: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3159,18 +3491,24 @@ public struct FfiConverterTypeFfiWscdError: FfiConverterRustBuffer {
 }
 
 
-extension FfiWscdError: Equatable, Hashable {}
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiWscdError_lift(_ buf: RustBuffer) throws -> FfiWscdError {
+    return try FfiConverterTypeFfiWscdError.lift(buf)
+}
 
-extension FfiWscdError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiWscdError_lower(_ value: FfiWscdError) -> RustBuffer {
+    return FfiConverterTypeFfiWscdError.lower(value)
 }
 
 
 
 
-public protocol FfiAuthCallback : AnyObject {
+public protocol FfiAuthCallback: AnyObject, Sendable {
     
     func requestPin(pluginId: String) throws  -> Data
     
@@ -3178,20 +3516,29 @@ public protocol FfiAuthCallback : AnyObject {
     
 }
 
-// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-private let IDX_CALLBACK_FREE: Int32 = 0
-// Callback return codes
-private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
-private let UNIFFI_CALLBACK_ERROR: Int32 = 1
-private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
 fileprivate struct UniffiCallbackInterfaceFfiAuthCallback {
 
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceFfiAuthCallback = UniffiVTableCallbackInterfaceFfiAuthCallback(
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiAuthCallback = UniffiVTableCallbackInterfaceFfiAuthCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceFfiAuthCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiAuthCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceFfiAuthCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiAuthCallback: handle missing in uniffiClone")
+            }
+        },
         requestPin: { (
             uniffiHandle: UInt64,
             pluginId: RustBuffer,
@@ -3214,7 +3561,7 @@ fileprivate struct UniffiCallbackInterfaceFfiAuthCallback {
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
                 writeReturn: writeReturn,
-                lowerError: FfiConverterTypeFfiWscdError.lower
+                lowerError: FfiConverterTypeFfiWscdError_lower
             )
         },
         requestWebauthnAssertion: { (
@@ -3245,20 +3592,26 @@ fileprivate struct UniffiCallbackInterfaceFfiAuthCallback {
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
                 writeReturn: writeReturn,
-                lowerError: FfiConverterTypeFfiWscdError.lower
+                lowerError: FfiConverterTypeFfiWscdError_lower
             )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) -> () in
-            let result = try? FfiConverterCallbackInterfaceFfiAuthCallback.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface FfiAuthCallback: handle missing in uniffiFree")
-            }
         }
     )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiAuthCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiAuthCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitFfiAuthCallback() {
-    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiauthcallback(&UniffiCallbackInterfaceFfiAuthCallback.vtable)
+    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiauthcallback(UniffiCallbackInterfaceFfiAuthCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -3266,7 +3619,7 @@ private func uniffiCallbackInitFfiAuthCallback() {
 @_documentation(visibility: private)
 #endif
 fileprivate struct FfiConverterCallbackInterfaceFfiAuthCallback {
-    fileprivate static var handleMap = UniffiHandleMap<FfiAuthCallback>()
+    fileprivate static let handleMap = UniffiHandleMap<FfiAuthCallback>()
 }
 
 #if swift(>=5.8)
@@ -3307,6 +3660,21 @@ extension FfiConverterCallbackInterfaceFfiAuthCallback : FfiConverter {
 }
 
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiAuthCallback_lift(_ handle: UInt64) throws -> FfiAuthCallback {
+    return try FfiConverterCallbackInterfaceFfiAuthCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiAuthCallback_lower(_ v: FfiAuthCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceFfiAuthCallback.lower(v)
+}
+
+
 
 
 /**
@@ -3325,12 +3693,11 @@ extension FfiConverterCallbackInterfaceFfiAuthCallback : FfiConverter {
  * reimplement it in a host SDK. This design is confirmed against real
  * YubiKey 5.8 hardware (2026-08-04).
  */
-public protocol FfiCtap2Transport : AnyObject {
+public protocol FfiCtap2Transport: AnyObject, Sendable {
     
     func ctap2SendCommand(command: Data) throws  -> Data
     
 }
-
 
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
@@ -3338,7 +3705,23 @@ fileprivate struct UniffiCallbackInterfaceFfiCtap2Transport {
 
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceFfiCtap2Transport = UniffiVTableCallbackInterfaceFfiCtap2Transport(
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiCtap2Transport = UniffiVTableCallbackInterfaceFfiCtap2Transport(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceFfiCtap2Transport.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiCtap2Transport: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceFfiCtap2Transport.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiCtap2Transport: handle missing in uniffiClone")
+            }
+        },
         ctap2SendCommand: { (
             uniffiHandle: UInt64,
             command: RustBuffer,
@@ -3361,20 +3744,26 @@ fileprivate struct UniffiCallbackInterfaceFfiCtap2Transport {
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
                 writeReturn: writeReturn,
-                lowerError: FfiConverterTypeFfiWscdError.lower
+                lowerError: FfiConverterTypeFfiWscdError_lower
             )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) -> () in
-            let result = try? FfiConverterCallbackInterfaceFfiCtap2Transport.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface FfiCtap2Transport: handle missing in uniffiFree")
-            }
         }
     )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiCtap2Transport> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiCtap2Transport>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitFfiCtap2Transport() {
-    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffictap2transport(&UniffiCallbackInterfaceFfiCtap2Transport.vtable)
+    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffictap2transport(UniffiCallbackInterfaceFfiCtap2Transport.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -3382,7 +3771,7 @@ private func uniffiCallbackInitFfiCtap2Transport() {
 @_documentation(visibility: private)
 #endif
 fileprivate struct FfiConverterCallbackInterfaceFfiCtap2Transport {
-    fileprivate static var handleMap = UniffiHandleMap<FfiCtap2Transport>()
+    fileprivate static let handleMap = UniffiHandleMap<FfiCtap2Transport>()
 }
 
 #if swift(>=5.8)
@@ -3423,12 +3812,27 @@ extension FfiConverterCallbackInterfaceFfiCtap2Transport : FfiConverter {
 }
 
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiCtap2Transport_lift(_ handle: UInt64) throws -> FfiCtap2Transport {
+    return try FfiConverterCallbackInterfaceFfiCtap2Transport.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiCtap2Transport_lower(_ v: FfiCtap2Transport) -> UInt64 {
+    return FfiConverterCallbackInterfaceFfiCtap2Transport.lower(v)
+}
+
+
 
 
 /**
  * Host-provided HTTP transport for R2PS protocol messages.
  */
-public protocol FfiHttpTransport : AnyObject {
+public protocol FfiHttpTransport: AnyObject, Sendable {
     
     /**
      * Send a raw request body to the R2PS server and return the response bytes.
@@ -3438,13 +3842,28 @@ public protocol FfiHttpTransport : AnyObject {
 }
 
 
-
 // Put the implementation in a struct so we don't pollute the top-level namespace
 fileprivate struct UniffiCallbackInterfaceFfiHttpTransport {
 
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceFfiHttpTransport = UniffiVTableCallbackInterfaceFfiHttpTransport(
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiHttpTransport = UniffiVTableCallbackInterfaceFfiHttpTransport(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceFfiHttpTransport.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiHttpTransport: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceFfiHttpTransport.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiHttpTransport: handle missing in uniffiClone")
+            }
+        },
         send: { (
             uniffiHandle: UInt64,
             body: RustBuffer,
@@ -3467,20 +3886,26 @@ fileprivate struct UniffiCallbackInterfaceFfiHttpTransport {
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
                 writeReturn: writeReturn,
-                lowerError: FfiConverterTypeFfiWscdError.lower
+                lowerError: FfiConverterTypeFfiWscdError_lower
             )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) -> () in
-            let result = try? FfiConverterCallbackInterfaceFfiHttpTransport.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface FfiHttpTransport: handle missing in uniffiFree")
-            }
         }
     )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiHttpTransport> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiHttpTransport>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitFfiHttpTransport() {
-    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffihttptransport(&UniffiCallbackInterfaceFfiHttpTransport.vtable)
+    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffihttptransport(UniffiCallbackInterfaceFfiHttpTransport.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -3488,7 +3913,7 @@ private func uniffiCallbackInitFfiHttpTransport() {
 @_documentation(visibility: private)
 #endif
 fileprivate struct FfiConverterCallbackInterfaceFfiHttpTransport {
-    fileprivate static var handleMap = UniffiHandleMap<FfiHttpTransport>()
+    fileprivate static let handleMap = UniffiHandleMap<FfiHttpTransport>()
 }
 
 #if swift(>=5.8)
@@ -3529,14 +3954,28 @@ extension FfiConverterCallbackInterfaceFfiHttpTransport : FfiConverter {
 }
 
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiHttpTransport_lift(_ handle: UInt64) throws -> FfiHttpTransport {
+    return try FfiConverterCallbackInterfaceFfiHttpTransport.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiHttpTransport_lower(_ v: FfiHttpTransport) -> UInt64 {
+    return FfiConverterCallbackInterfaceFfiHttpTransport.lower(v)
+}
 
 
-public protocol FfiProgressCallback : AnyObject {
+
+
+public protocol FfiProgressCallback: AnyObject, Sendable {
     
     func onProgress(progress: FfiOperationProgress) 
     
 }
-
 
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
@@ -3544,7 +3983,23 @@ fileprivate struct UniffiCallbackInterfaceFfiProgressCallback {
 
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceFfiProgressCallback = UniffiVTableCallbackInterfaceFfiProgressCallback(
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiProgressCallback = UniffiVTableCallbackInterfaceFfiProgressCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceFfiProgressCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiProgressCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceFfiProgressCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiProgressCallback: handle missing in uniffiClone")
+            }
+        },
         onProgress: { (
             uniffiHandle: UInt64,
             progress: RustBuffer,
@@ -3557,7 +4012,7 @@ fileprivate struct UniffiCallbackInterfaceFfiProgressCallback {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return uniffiObj.onProgress(
-                     progress: try FfiConverterTypeFfiOperationProgress.lift(progress)
+                     progress: try FfiConverterTypeFfiOperationProgress_lift(progress)
                 )
             }
 
@@ -3568,18 +4023,24 @@ fileprivate struct UniffiCallbackInterfaceFfiProgressCallback {
                 makeCall: makeCall,
                 writeReturn: writeReturn
             )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) -> () in
-            let result = try? FfiConverterCallbackInterfaceFfiProgressCallback.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface FfiProgressCallback: handle missing in uniffiFree")
-            }
         }
     )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiProgressCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiProgressCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitFfiProgressCallback() {
-    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiprogresscallback(&UniffiCallbackInterfaceFfiProgressCallback.vtable)
+    uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiprogresscallback(UniffiCallbackInterfaceFfiProgressCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -3587,7 +4048,7 @@ private func uniffiCallbackInitFfiProgressCallback() {
 @_documentation(visibility: private)
 #endif
 fileprivate struct FfiConverterCallbackInterfaceFfiProgressCallback {
-    fileprivate static var handleMap = UniffiHandleMap<FfiProgressCallback>()
+    fileprivate static let handleMap = UniffiHandleMap<FfiProgressCallback>()
 }
 
 #if swift(>=5.8)
@@ -3625,6 +4086,21 @@ extension FfiConverterCallbackInterfaceFfiProgressCallback : FfiConverter {
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
     }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiProgressCallback_lift(_ handle: UInt64) throws -> FfiProgressCallback {
+    return try FfiConverterCallbackInterfaceFfiProgressCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceFfiProgressCallback_lower(_ v: FfiProgressCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceFfiProgressCallback.lower(v)
 }
 
 #if swift(>=5.8)
@@ -3670,6 +4146,30 @@ fileprivate struct FfiConverterOptionTypeFfiAttestationChain: FfiConverterRustBu
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiAttestationChain.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiAuthFactor: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAuthFactor?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiAuthFactor.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiAuthFactor.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3728,6 +4228,31 @@ fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiAuthFactor: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiAuthFactor]
+
+    public static func write(_ value: [FfiAuthFactor], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiAuthFactor.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiAuthFactor] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiAuthFactor]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiAuthFactor.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer {
     typealias SwiftType = [FfiKeyInfo]
 
@@ -3754,10 +4279,11 @@ fileprivate struct FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer {
  * native SDKs so a [`FfiCtap2Transport`] implementation can reuse this
  * crate's COSE parsing instead of shipping its own.
  */
-public func decodeCoseEc2PublicKey(coseBytes: Data)throws  -> FfiEcPublicKey {
-    return try  FfiConverterTypeFfiEcPublicKey.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
+public func decodeCoseEc2PublicKey(coseBytes: Data)throws  -> FfiEcPublicKey  {
+    return try  FfiConverterTypeFfiEcPublicKey_lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
     uniffi_siros_wscd_manager_fn_func_decode_cose_ec2_public_key(
-        FfiConverterData.lower(coseBytes),$0
+        FfiConverterData.lower(coseBytes),uniffiCallStatus
     )
 })
 }
@@ -3765,10 +4291,11 @@ public func decodeCoseEc2PublicKey(coseBytes: Data)throws  -> FfiEcPublicKey {
  * Extract the previewSign signature (extension output key `6`) from a
  * getAssertion response's `authenticatorData`.
  */
-public func extractPreviewsignSignature(authenticatorData: Data)throws  -> Data {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiWscdError.lift) {
+public func extractPreviewsignSignature(authenticatorData: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeFfiWscdError_lift) {
+        uniffiCallStatus in
     uniffi_siros_wscd_manager_fn_func_extract_previewsign_signature(
-        FfiConverterData.lower(authenticatorData),$0
+        FfiConverterData.lower(authenticatorData),uniffiCallStatus
     )
 })
 }
@@ -3778,9 +4305,10 @@ public func extractPreviewsignSignature(authenticatorData: Data)throws  -> Data 
  * regardless of how a build resolved the dependency (published vs
  * `mavenLocal`/local `Package.swift` override).
  */
-public func wscdManagerVersion() -> String {
+public func wscdManagerVersion() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_siros_wscd_manager_fn_func_wscd_manager_version($0
+        uniffiCallStatus in
+    uniffi_siros_wscd_manager_fn_func_wscd_manager_version(uniffiCallStatus
     )
 })
 }
@@ -3792,99 +4320,105 @@ private enum InitializationResult {
 }
 // Use a global variable to perform the versioning checks. Swift ensures that
 // the code inside is only computed once.
-private var initializationResult: InitializationResult = {
+private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
-    let bindings_contract_version = 26
+    let bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
     let scaffolding_contract_version = ffi_siros_wscd_manager_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_func_decode_cose_ec2_public_key() != 41138) {
+    if (uniffi_siros_wscd_manager_checksum_func_decode_cose_ec2_public_key() != 53817) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_func_extract_previewsign_signature() != 41377) {
+    if (uniffi_siros_wscd_manager_checksum_func_extract_previewsign_signature() != 22369) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_func_wscd_manager_version() != 29401) {
+    if (uniffi_siros_wscd_manager_checksum_func_wscd_manager_version() != 30931) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_activate_lifecycle() != 28478) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_activate_lifecycle() != 45559) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_attestation_chain() != 40546) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_attestation_chain() != 25756) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key() != 19797) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_authentication_capability() != 43672) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle() != 23469) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key() != 50338) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state() != 37798) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle() != 3691) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_public_key() != 14419) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state() != 64045) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_softkey_container() != 4318) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_public_key() != 16251) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_generate_key() != 60570) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_softkey_container() != 12042) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_import_softkey_container() != 33000) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_generate_key() != 35191) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_lifecycle_status() != 14109) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_import_softkey_container() != 44885) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_list_keys() != 30610) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_lifecycle_status() != 52325) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_migrate_key() != 41362) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_list_keys() != 39363) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin() != 25606) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_migrate_key() != 11675) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin_with_state() != 38216) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin() != 39324) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_lifecycle() != 59574) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin_with_state() != 36526) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_r2ps_plugin() != 61563) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_lifecycle() != 32083) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_softkey_plugin() != 48657) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_r2ps_plugin() != 30249) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_rotate_lifecycle() != 1449) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_softkey_plugin() != 51291) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_security_properties() != 38213) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_rotate_lifecycle() != 41757) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign() != 5679) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_security_properties() != 41426) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new() != 22870) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign() != 4015) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() != 17826) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign_with_factors() != 3987) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() != 63746) {
+    if (uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new() != 9101) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command() != 64354) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() != 23519) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffihttptransport_send() != 15795) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() != 26184) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiprogresscallback_on_progress() != 24301) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command() != 35187) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_siros_wscd_manager_checksum_method_ffihttptransport_send() != 57917) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_siros_wscd_manager_checksum_method_ffiprogresscallback_on_progress() != 5963) {
         return InitializationResult.apiChecksumMismatch
     }
 
@@ -3895,7 +4429,9 @@ private var initializationResult: InitializationResult = {
     return InitializationResult.ok
 }()
 
-private func uniffiEnsureInitialized() {
+// Make the ensure init function public so that other modules which have external type references to
+// our types can call it.
+public func uniffiEnsureSirosWscdManagerInitialized() {
     switch initializationResult {
     case .ok:
         break

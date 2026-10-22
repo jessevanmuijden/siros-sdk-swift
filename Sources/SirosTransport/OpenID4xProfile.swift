@@ -584,8 +584,13 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
             let result = try await handler(flowId, signParams)
             await sendSignResponse(flowId: flowId, result: result)
         } catch {
-            let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? "SIGN_ERROR"
-            await sendFlowError(flowId: flowId, code: code, message: error.localizedDescription)
+            // An error that names its code is reported with that code and nothing
+            // else: no developer text goes to the peer.
+            if let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode {
+                await sendFlowError(flowId: flowId, code: code, message: code)
+            } else {
+                await sendFlowError(flowId: flowId, code: "SIGN_ERROR", message: error.localizedDescription)
+            }
         }
     }
 

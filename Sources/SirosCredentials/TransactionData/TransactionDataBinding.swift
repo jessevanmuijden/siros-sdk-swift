@@ -1,0 +1,103 @@
+// Copyright 2026 SIROS Foundation. BSD 2-Clause License.
+
+import Foundation
+
+/// One authentication factor applied for an operation, in TS12 vocabulary
+/// (TS12 v1.0.1 section 3.6).
+///
+/// `Hashable` so a reported factor list can be compared against a claimed one
+/// as a true SET (see `ScaSignFlow.run`'s final check) rather than by count
+/// and containment, which a duplicated factor could satisfy with the wrong
+/// composition. Mirrors `siros-sdk-kotlin`'s `AuthenticationFactor`
+/// (`sdk/keystore/src/main/kotlin/org/siros/sdk/keystore/TransactionBinding.kt`),
+/// which overrides `equals`/`hashCode` on exactly `category` and `method` for
+/// the same reason (`ScaSignSession.requireMatching` there compares as sets).
+public struct AuthenticationFactor: Sendable, Equatable, Hashable {
+    public enum Category: String, Sendable, CaseIterable {
+        case knowledge, possession, inherence
+    }
+
+    /// The method values TS12 defines per category (section 3.6).
+    ///
+    /// MUST stay in sync with its two siblings, which this SDK cannot edit:
+    /// the vocabulary `siros-wscd-manager` enforces in its own
+    /// `classify_secret`/possession-method mapping (`src/factors.rs`), and
+    /// `AuthenticationFactor.METHODS` in `siros-sdk-kotlin`
+    /// (`sdk/keystore/src/main/kotlin/org/siros/sdk/keystore/TransactionBinding.kt`).
+    /// A method value present here but not in one of those siblings (or vice
+    /// versa) lets this SDK claim (or accept) an `amr` entry a verifier
+    /// following the same spec from the Rust manager or the Kotlin SDK would
+    /// never produce.
+    public static let methods: [Category: Set<String>] = [
+        .knowledge: ["pin_less_than_6_digits", "pin_6_or_more_digits", "passphrase_less_than_8_chars",
+                     "passphrase_8_to_11_chars", "passphrase_12_or_more_chars", "pattern", "other"],
+        .possession: ["key_in_remote_wscd", "key_in_local_external_wscd", "key_in_local_internal_wscd",
+                      "key_in_local_native_wscd", "other"],
+        .inherence: ["fingerprint_device", "fingerprint_external", "face_device", "face_external", "other"],
+    ]
+
+    public let category: Category
+    public let method: String
+
+    public init(_ category: Category, _ method: String) {
+        self.category = category
+        self.method = method
+    }
+
+    /// Whether `method` is a value TS12 defines for this category.
+    public var isDefined: Bool { Self.methods[category]?.contains(method) ?? false }
+}
+
+/// Everything the keystore needs to add the EC TS12 claims to one SD-JWT VC
+/// KB-JWT (TS12 v1.0.1 section 3.6). Built from a validated request; the
+/// keystore never sees, parses or re-serialises the transaction itself.
+public struct TransactionDataBinding: Sendable, Equatable {
+    /// The `transaction_data` strings exactly as the verifier sent them,
+    /// verifier order, restricted to this credential's entries.
+    public let rawEntries: [String]
+    /// The chosen hash algorithm (`sha-256`, `sha-384` or `sha-512`).
+    public let hashAlgorithm: String
+    /// The OID4VP `response_mode` of the request.
+    public let responseMode: String
+
+    /// `package` access on purpose: only the SDK's own pipeline builds a binding from a validated request. It holds no authentication factors: the `amr` is supplied by the signing operation (`kbJwtClaims(factors:)`), so an application cannot mint an SCA claim by constructing one.
+    package init(rawEntries: [String], hashAlgorithm: String, responseMode: String) {
+        self.rawEntries = rawEntries
+        self.hashAlgorithm = hashAlgorithm
+        self.responseMode = responseMode
+    }
+
+    /// The KB-JWT claims TS12 adds. Throws rather than produce a claim set a
+    /// verifier would have to reject: unsupported algorithm, no entries,
+    /// fewer than two distinct factor categories, or a factor method TS12
+    /// does not define.
+    ///
+    /// - Parameter factors: the factors the signing operation reported for the
+    ///   very sign that will carry these claims, mapped 1:1 into the `amr`.
+    /// - Parameter jti: a fresh, cryptographically random value; defaults to a
+    ///   new random UUID. A parameter only so tests can pin it.
+    public func kbJwtClaims(factors: [AuthenticationFactor], jti: String = UUID().uuidString.lowercased()) throws -> [String: Any] {
+        guard !rawEntries.isEmpty else { throw TransactionDataError(.invalidEntry, detail: "no transaction_data entries to bind") }
+        var hashes: [String] = []
+        for raw in rawEntries {
+            guard let h = TransactionDataHashing.hash(raw: raw, algorithm: hashAlgorithm) else {
+                throw TransactionDataError(.unsupportedHashAlgorithm, detail: hashAlgorithm)
+            }
+            hashes.append(h)
+        }
+        guard factors.allSatisfy(\.isDefined) else {
+            throw TransactionDataError(.insufficientAuthenticationFactors, detail: "factor method outside the TS12 vocabulary")
+        }
+        guard Set(factors.map(\.category)).count >= 2 else {
+            throw TransactionDataError(.insufficientAuthenticationFactors, detail: "fewer than two distinct factor categories")
+        }
+        return [
+            "transaction_data_hashes": hashes,
+            // A string: the one algorithm used, not the verifier's array.
+            "transaction_data_hashes_alg": hashAlgorithm,
+            "jti": jti,
+            "response_mode": responseMode,
+            "amr": factors.map { [$0.category.rawValue: $0.method] },
+        ]
+    }
+}

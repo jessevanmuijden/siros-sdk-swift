@@ -128,6 +128,16 @@ struct SettingsView: View {
                     }
                 }
 
+                // EC TS12 payment SCA: the runtime switch and the log.
+                Section {
+                    Toggle(L10n.string("settings.transactionDataToggle"), isOn: $viewModel.transactionDataEnabled)
+                    Button(action: { viewModel.openTransactionLog() }) {
+                        Label(L10n.string("settings.transactionLogButton"), systemImage: "list.bullet.rectangle")
+                    }
+                } footer: {
+                    Text(L10n.string("settings.transactionDataDescription"))
+                }
+
                 // Activity
                 Section("Activity") {
                     Button(action: { viewModel.openHistory() }) {
