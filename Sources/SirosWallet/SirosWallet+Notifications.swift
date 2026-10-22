@@ -307,6 +307,12 @@ extension SirosWallet {
         attestedKeyIds: [String]?,
         batchId: Int64
     ) async -> (stored: Bool, failureReason: String?) {
+        // A container this build must not rewrite is read-only. Storing would be
+        // silently discarded (`CredentialStore.save` does not throw), and the
+        // issuer would then be told the credential was accepted.
+        if let refusal = keystore.unsupportedSchemaVersion {
+            return (false, refusal.localizedDescription)
+        }
         if cred.format == "mso_mdoc" {
             // mso_mdoc credentials are base64url-encoded CBOR (a
             // DeviceResponse-shaped envelope, per wallet-frontend#191), never
