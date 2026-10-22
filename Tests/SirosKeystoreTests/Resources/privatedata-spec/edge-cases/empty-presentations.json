@@ -1,0 +1,10 @@
+{
+  "id": "edge-empty-presentations-001",
+  "description": "Empty presentations and issuance sessions must remain empty arrays",
+  "version": "3",
+  "input": {
+    "presentations": [],
+    "credentialIssuanceSessions": []
+  },
+  "expected": "arrays preserved as [] and not converted to null/omitted"
+}
