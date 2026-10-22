@@ -244,6 +244,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **Blind issuance: validate-then-claim is one step, and a pending response never carries a seed.** The "session is
+  live" check now returns the flow generation from the same critical section, and the response key is stored only if
+  the session has not ended in that section, so a request that resumes after logout or destroy retains no key.
+  A pending (deferred) response whose `credential_metadata` carries `org.siros.secret_seed` is refused
+  (`DEFERRED_SEED`) and the issuer is told through `credential_failure` when it gave a `notification_id`, instead
+  of being dropped as an ordinary pending answer.
 - **A plain completion with an unreadable credential entry is refused whole, and a renewal never costs the credential
   it replaces.** A plain (not wallet-encrypted) `flow_complete` / `wmp.flow.complete` whose credential entry has no
   value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is

@@ -18,9 +18,12 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
     case unsupportedRequiredPair
     /// The session this request arrived on has ended (logout, destroy, terminal failure): nothing is allocated for it.
     case sessionEnded
+    /// A pending (deferred) response carried a delivered seed.
+    case deferredSeed
 
     var wmpErrorCode: String? {
         switch self {
+        case .deferredSeed: return "DEFERRED_SEED"
         case .sessionEnded: return "SESSION_ENDED"
         case .unsupportedRequiredPair: return "UNSUPPORTED_RESPONSE_ENCRYPTION"
         case .noKey: return "NO_RESPONSE_KEY"
@@ -74,6 +77,9 @@ extension SirosWallet {
         flowId: String, request: CredentialResponseEncryptionRequest?, generation: [Int]? = nil
     ) -> [String: String]? {
         lock.lock(); defer { lock.unlock() }
+        // Checked here, in the same critical section that stores the key: a request that was live when it started
+        // and resumed after teardown must not leave a retained private key behind.
+        if blindSessionEnded { return nil }
         if let generation, generation != credentialResponseGenerationLocked(flowId: flowId) { return nil }
         guard let request,
               let key = CredentialResponseKey(params: CredentialResponseEncryptionParams(alg: request.alg, enc: request.enc)) else {
@@ -117,9 +123,11 @@ extension SirosWallet {
         flowId: String, jwe: String?, deferred: Bool
     ) async throws -> CredentialResponseControl {
         lock.lock()
+        let ended = blindSessionEnded
         let key = credentialResponseKeys[flowId]
         let generation = credentialResponseGenerationLocked(flowId: flowId)
         lock.unlock()
+        if ended { throw CredentialResponseError.sessionEnded }
         guard let key else { throw CredentialResponseError.noKey }
         guard let jwe, !jwe.isEmpty else { throw CredentialResponseError.malformedResponse }
         let plaintext: Data
@@ -137,6 +145,14 @@ extension SirosWallet {
         guard response.credentials.isEmpty != (response.transactionId == nil), response.credentials.count <= 256 else {
             await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
             throw CredentialResponseError.malformedResponse
+        }
+        // A PENDING response (transaction_id) never carries the delivered seed: a seed needs the final, encrypted
+        // response. It is refused here whether or not a receiver is installed, and the issuer is told, not left
+        // to have it silently dropped before any seed check runs.
+        if response.transactionId != nil, case .object(let members)? = response.credentialMetadata,
+           members["org.siros.secret_seed"] != nil {
+            await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
+            throw CredentialResponseError.deferredSeed
         }
         if let receiver = credentialMetadataReceiver {
             do {
@@ -206,12 +222,18 @@ extension SirosWallet {
     /// flow's private response key and everything opened with it (credentials, a delivered seed).
     /// Refuses a request that reaches a session that has ended, or (on the WebSocket) one that arrived on a
     /// superseded engine session, BEFORE any key or flow state is allocated for it.
-    func requireLiveSession(engine: (any SignResponseSender)? = nil) throws {
+    ///
+    /// Validating and claiming are ONE step under the teardown lock: the generation it returns is read in the same
+    /// critical section as the "session is live" check, so a teardown that lands after the check cannot be followed
+    /// by a claim made on a generation taken after it.
+    @discardableResult
+    func requireLiveSession(flowId: String, engine: (any SignResponseSender)? = nil) throws -> [Int] {
         lock.lock(); defer { lock.unlock() }
         if blindSessionEnded { throw CredentialResponseError.sessionEnded }
         if let engine, let current = engineSession, (engine as AnyObject) !== (current as AnyObject) {
             throw CredentialResponseError.sessionEnded
         }
+        return credentialResponseGenerationLocked(flowId: flowId)
     }
 
     var sessionHasEnded: Bool { lock.lock(); defer { lock.unlock() }; return blindSessionEnded }
@@ -266,7 +288,8 @@ extension SirosWallet {
     /// `decrypt_credential_response` on the engine WebSocket: answer with the control fields and
     /// nothing else; a failure answers with an error that carries no plaintext and drops the flow's state.
     func answerDecryptCredentialResponse(engine: any SignResponseSender, msg: SignRequestMessage) async {
-        do { try requireLiveSession(engine: engine) } catch {
+        let liveGeneration: [Int]
+        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine) } catch {
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
             }
@@ -274,7 +297,7 @@ extension SirosWallet {
         }
         // Taken before the awaits: a failure that arrives after this flow was cancelled (and perhaps another begun)
         // is answered to the engine, but must not touch the wallet-wide state of whatever runs now.
-        let generation = credentialResponseGeneration(flowId: msg.flowId)
+        let generation = liveGeneration
         do {
             let control = try await decryptCredentialResponse(
                 flowId: msg.flowId, jwe: msg.params.jwe, deferred: msg.params.deferred ?? false
@@ -297,8 +320,7 @@ extension SirosWallet {
 
     /// The same action over WMP; the profile reports a failure as a flow error carrying only the code.
     func wmpDecryptCredentialResponse(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
-        try requireLiveSession()
-        let generation = credentialResponseGeneration(flowId: flowId)
+        let generation = try requireLiveSession(flowId: flowId)
         do {
             let control = try await decryptCredentialResponse(flowId: flowId, jwe: params.jwe, deferred: params.deferred ?? false)
             return SignSubFlowResult(
@@ -377,7 +399,8 @@ extension SirosWallet {
     /// `generate_proof` on the engine WebSocket: the proofs (none when the request is for the key alone)
     /// and, when the engine asked for response encryption, a fresh key's public JWK.
     func answerGenerateProof(engine: any SignResponseSender, msg: SignRequestMessage) async throws {
-        do { try requireLiveSession(engine: engine) } catch {
+        let liveGeneration: [Int]
+        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine) } catch {
             // A request from a superseded socket is dropped; one for an ended session is refused. Neither allocates.
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
@@ -393,7 +416,7 @@ extension SirosWallet {
             )
             return
         }
-        let generation = credentialResponseGeneration(flowId: msg.flowId)
+        let generation = liveGeneration
         let encryption = msg.params.credentialResponseEncryption
         let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: msg.params.proofTypesSupported, proofType: msg.params.proofType)
         var proofs: [ProofObject] = []
@@ -415,11 +438,10 @@ extension SirosWallet {
     /// The same over WMP: response encryption without `proof_types_supported` is the key-only request
     /// (WMP openid4x section 3.1.5.1), and a supplied list is forwarded to the proof selection.
     func wmpGenerateProof(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
-        try requireLiveSession()
+        let generation = try requireLiveSession(flowId: flowId)
         if let request = params.credentialResponseEncryption, request.required == true, !Self.canOpen(request) {
             throw CredentialResponseError.unsupportedRequiredPair   // a flow error with its code, rejected
         }
-        let generation = credentialResponseGeneration(flowId: flowId)
         let encryption = params.credentialResponseEncryption
         let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: params.proofTypesSupported, proofType: params.proofType)
         var proofs: [ProofObject] = []
