@@ -1321,6 +1321,8 @@ extension SirosWallet {
     func reportSignFailure(flowId: String, message: String, notifyError: Bool = true) {
         lock.lock()
         let listener = eventListener
+        // The flow ends here: a buffered request for it is refused and a previously captured generation is stale.
+        flowEndSeq[flowId, default: 0] += 1
         pendingMatchResultsByFlow.removeValue(forKey: flowId)
         legacyFlowSnapshots.removeValue(forKey: flowId)
         credentialResponseKeys.removeValue(forKey: flowId)

@@ -306,6 +306,9 @@ extension SirosWallet {
         do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration) } catch {
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
+            } else if error as? CredentialResponseError == .flowEnded {
+                // The flow's key is gone with the flow: a decrypt is answered (the engine waits for it), allocating nothing.
+                engine.sendSignResponse(flowId: msg.flowId, error: "credential response could not be taken", errorCode: CredentialResponseError.noKey.wmpErrorCode, messageId: msg.messageId)
             }
             return
         }

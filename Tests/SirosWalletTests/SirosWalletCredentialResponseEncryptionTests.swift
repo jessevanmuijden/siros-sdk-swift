@@ -522,6 +522,24 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         engine.disconnect()
     }
 
+    /// After a local failure (`reportSignFailure`) or `cancelCurrentFlow()` a buffered key-only proof request for that
+    /// flow is refused: no key and no reply.
+    func testABufferedProofRequestAfterAFailureOrACancelIsRefused() async throws {
+        for how in ["failure", "cancel"] {
+            let w = wallet()
+            let sender = RecordingSender()
+            if how == "failure" {
+                w.reportSignFailure(flowId: "bf", message: "decrypt failed", notifyError: false)
+            } else {
+                w.setState(.flowActive(userId: "u", displayName: nil, flowId: "bf", flowType: "oid4vci", status: "active", credentials: []))
+                w.cancelCurrentFlow()
+            }
+            try await w.answerGenerateProof(engine: sender, msg: try keyOnlyProofMessage(flowId: "bf"))
+            XCTAssertTrue(sender.sent.isEmpty, "\(how): no reply")
+            w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty, "\(how): no key"); w.lock.unlock()
+        }
+    }
+
     /// A buffered `generate_proof` for a flow that already ended is rejected: no key, no reply.
     func testABufferedProofRequestForAnEndedFlowIsRejected() async throws {
         let w = wallet()
