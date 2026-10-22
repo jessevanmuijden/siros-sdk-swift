@@ -54,6 +54,20 @@ private final class RecordingNotifier: CredentialNotifier, @unchecked Sendable {
     }
 }
 
+/// A notifier whose hand-over takes a while: the failure must be recorded before the rejecting call returns.
+private final class SlowAwaitableNotifier: AwaitableCredentialNotifier, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _sent: [String] = []
+    var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
+    func sendCredentialNotification(flowId: String, notificationId: String, event: String, eventDescription: String?) {
+        Task { await sendCredentialNotificationAndWait(flowId: flowId, notificationId: notificationId, event: event, eventDescription: eventDescription) }
+    }
+    func sendCredentialNotificationAndWait(flowId: String, notificationId: String, event: String, eventDescription: String?) async {
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        lock.lock(); _sent.append(event); lock.unlock()
+    }
+}
+
 private final class Listener: WalletEventListener, @unchecked Sendable {
     var errors: [String] = []
     var completed: [String] = []
@@ -166,6 +180,71 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             XCTAssertEqual(notifier.sent.first?.notificationId, "n-1", name)
             XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "l").isEmpty, name)
         }
+    }
+
+    /// The `credential_failure` is handed over BEFORE the rejecting call returns (so before the error answer).
+    func testTheFailureNotificationPrecedesTheRejection() async throws {
+        let w = wallet()
+        let notifier = SlowAwaitableNotifier()
+        w.credentialNotifier = notifier
+        let key = try installOwnKey(w, flowId: "o")
+        do {
+            _ = try await w.decryptCredentialResponse(
+                flowId: "o", jwe: try encrypt(#"{"credentials":[],"notification_id":"n-o"}"#, to: key), deferred: false
+            )
+            XCTFail("rejected")
+        } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse) }
+        XCTAssertEqual(notifier.sent, [CredentialNotificationEvent.failure], "already sent when the call returns")
+    }
+
+    /// A cancelled sign request (a WMP child flow) leaves no response behind and reports no success.
+    func testACancelledDecryptRequestKeepsNothing() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let w = wallet()
+        try installKey(w, flowId: "cx")
+        let gate = Gate()
+        w.credentialMetadataReceiver = { _, _, _ in
+            while await !gate.isOpen { await Task.yield() }   // ignores cancellation, like a handler that does
+        }
+        let task = Task { try await w.decryptCredentialResponse(flowId: "cx", jwe: Self.jwe, deferred: false) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel()
+        await gate.release()
+        do {
+            _ = try await task.value
+            XCTFail("a cancelled request must not report success")
+        } catch { XCTAssertTrue(error is CancellationError, "\(error)") }
+        XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "cx").isEmpty)
+    }
+
+    /// A key-only proof request that is cancelled installs no key.
+    func testACancelledProofRequestInstallsNoKey() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let w = wallet()
+        let gate = Gate()
+        let json = """
+        {"type":"sign_request","flow_id":"kx","message_id":"m","action":"generate_proof","params":{"audience":"a","nonce":"n",
+         "credential_response_encryption":{"alg":"ECDH-ES","enc":"A256GCM","required":true}}}
+        """
+        let message = try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8))
+        let sender = RecordingSender()
+        let task = Task {
+            while await !gate.isOpen { await Task.yield() }
+            try await w.answerGenerateProof(engine: sender, msg: message)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+        await gate.release()
+        do { try await task.value; XCTFail("cancelled") } catch { XCTAssertTrue(error is CancellationError) }
+        w.lock.lock(); let has = w.credentialResponseKeys["kx"] != nil; w.lock.unlock()
+        XCTAssertFalse(has)
+        XCTAssertTrue(sender.sent.isEmpty)
+    }
+
+    func testAnEncryptedCompletionWithNoEntriesIsNotASuccess() {
+        let decrypted = DecryptedCredentialResponse(credentials: [], transactionId: "tx")   // only a deferred answer
+        XCTAssertNil(SirosWallet.pairEncryptedCredentials(entries: [], decrypted: [decrypted]))
+        XCTAssertNil(SirosWallet.pairEncryptedCredentials(entries: [], decrypted: []))
     }
 
     func testMetadataAtTheLimitsIsAccepted() async throws {

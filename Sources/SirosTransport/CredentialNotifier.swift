@@ -37,10 +37,16 @@ public extension CredentialNotifier {
     }
 }
 
+/// A notifier that can report when the notification has been handed to the transport, so a caller that must
+/// order it before another message (a `credential_failure` before the error answer that follows it) can wait.
+public protocol AwaitableCredentialNotifier: CredentialNotifier {
+    func sendCredentialNotificationAndWait(flowId: String, notificationId: String, event: String, eventDescription: String?) async
+}
+
 /// Sends OID4VCI section 10 notifications over a WMP peer (`wmp.credential.notification`), so the
 /// wallet's acceptance or `credential_failure` reaches the issuer on this transport as it does on the
 /// engine WebSocket. A failed send is dropped, as there: the notification is best effort.
-public final class WmpCredentialNotifier: CredentialNotifier, @unchecked Sendable {
+public final class WmpCredentialNotifier: CredentialNotifier, AwaitableCredentialNotifier, @unchecked Sendable {
     private let peer: WmpPeerContext
 
     public init(peer: WmpPeerContext) {
@@ -48,13 +54,16 @@ public final class WmpCredentialNotifier: CredentialNotifier, @unchecked Sendabl
     }
 
     public func sendCredentialNotification(flowId: String, notificationId: String, event: String, eventDescription: String?) {
+        Task { await sendCredentialNotificationAndWait(flowId: flowId, notificationId: notificationId, event: event, eventDescription: eventDescription) }
+    }
+
+    public func sendCredentialNotificationAndWait(flowId: String, notificationId: String, event: String, eventDescription: String?) async {
         var params: [String: AnyCodable] = [
             "flow_id": .string(flowId),
             "notification_id": .string(notificationId),
             "event": .string(event),
         ]
         if let eventDescription { params["event_description"] = .string(eventDescription) }
-        let peer = self.peer
-        Task { try? await peer.notify(method: WmpMethods.credentialNotification, params: params) }
+        try? await peer.notify(method: WmpMethods.credentialNotification, params: params)
     }
 }
