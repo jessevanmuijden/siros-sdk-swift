@@ -181,18 +181,19 @@ final class OpenID4xProfileTests: XCTestCase {
             return SignSubFlowResult(responseJwe: "h..i.c.t")
         }))
         profile.initialize(ctx: ctx)
-        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "sign_request", payload: .object_([
+        await profile.runChildFlow(params: childStart(flowType: "sign", params: [
+            "parent_flow_id": .string("f"),
             "action": .string("sign_presentation"), "nonce": .string("n"), "audience": .string("a"), "state": .string("st"),
             "response_encryption": .object_([
                 "jwk": .object_(["kty": .string("EC"), "crv": .string("P-256"), "x": .string("X"), "y": .string("Y")]),
                 "alg": .string("ECDH-ES"), "enc": .string("A128GCM"),
             ]),
             "verified_request": .object_(["client_id": .string("c1")]),
-        ])))
+        ]))
         XCTAssertEqual(seen?.responseEncryption?.enc, "A128GCM")
         XCTAssertEqual(seen?.state, "st")
         XCTAssertEqual(seen?.verifiedRequest?.clientId, "c1")
-        let reply = ctx.notifications[0].params
+        let reply = ctx.notifications[0].params?["result"]?.objectValue
         XCTAssertEqual(reply?["response_jwe"], .string("h..i.c.t"))
         XCTAssertNil(reply?["vp_token"])
     }
