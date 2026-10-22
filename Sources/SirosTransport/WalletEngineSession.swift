@@ -83,6 +83,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// depend on) before deciding whether this should count toward
     /// `registerTokenRejection`'s forced-logout threshold.
     private var onTokenRejected: ((Error) -> Void)?
+    /// Called when the socket is lost and a replacement is about to be attempted: whatever the caller keeps for flows
+    /// that were running on the old socket (response keys, opened responses) is not valid for a new one. Called on
+    /// every automatic reconnect and when reconnecting gives up, before any new connection is made.
+    public var onSocketReplaced: (() -> Void)?
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 5
     private let baseReconnectDelayMs: UInt64 = 1000
@@ -378,7 +382,9 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         }
     }
 
-    private func scheduleReconnect() {
+    func scheduleReconnect() {
+        // Flows that were running on the old socket are gone with it.
+        if reconnectAttempts == 0 { onSocketReplaced?() }
         guard lastAppToken != nil, reconnectAttempts < maxReconnectAttempts else {
             setState(.failed)
             return

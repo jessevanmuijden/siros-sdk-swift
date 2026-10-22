@@ -550,4 +550,14 @@ final class EngineTypesTests: XCTestCase {
         let absent = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"{"type":"flow_complete","flow_id":"f"}"#.utf8))
         XCTAssertNil(absent.credentialMetadata)
     }
+
+    /// Losing the socket tells the owner once, before a replacement is attempted, so what it keeps for the flows
+    /// that ran on the old socket can go.
+    func testALostSocketTellsTheOwnerOnceBeforeReconnecting() {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        var told = 0
+        session.onSocketReplaced = { told += 1 }
+        session.scheduleReconnect()
+        XCTAssertEqual(told, 1)
+    }
 }

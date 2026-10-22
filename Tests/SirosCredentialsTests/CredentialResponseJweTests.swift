@@ -225,7 +225,8 @@ final class CredentialResponseJweTests: XCTestCase {
     func testParseRefusesWhatIsNotACredentialResponse() {
         for bad in [
             "[]", "not json", "{}", #"{"credentials":[]}"#, #"{"credentials":"x"}"#, #"{"credentials":[{}]}"#,
-            #"{"credentials":[{"credential":""}]}"#, #"{"credentials":[{"credential":1}]}"#, #"{"transaction_id":1}"#,
+            #"{"credentials":[{"credential":""}]}"#, #"{"credentials":[{"credential":1}]}"#,
+            #"{"credentials":[{"credential":[]}],"notification_id":"n"}"#, #"{"credential":[1]}"#, #"{"transaction_id":1}"#,
             #"{"transaction_id":"t","interval":-1}"#, #"{"credentials":[{"credential":"c"}],"notification_id":7}"#,
             // A duplicate member is ambiguous, so it is refused rather than resolved by order.
             #"{"credentials":[{"credential":"a"}],"credentials":[{"credential":"b"}]}"#,

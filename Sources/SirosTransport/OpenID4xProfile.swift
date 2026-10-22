@@ -519,6 +519,8 @@ public struct OpenID4xConfig: @unchecked Sendable {
     /// The peer cancelled the flow (`wmp.flow.cancel`).
     public var onCancel: ((String) async -> Void)?
     public var attestationProvider: ClientAttestationProvider?
+    /// The profile was shut down (the session ended, or failed for good): called synchronously on each shutdown.
+    public var onShutdown: (() -> Void)?
 
     public init(
         onProgress: ((String, String, AnyCodable?) async -> Void)? = nil,
@@ -528,9 +530,11 @@ public struct OpenID4xConfig: @unchecked Sendable {
         onComplete: ((String, AnyCodable?) async -> Void)? = nil,
         onCancel: ((String) async -> Void)? = nil,
         onError: ((String, String?, String?) async -> Void)? = nil,
-        attestationProvider: ClientAttestationProvider? = nil
+        attestationProvider: ClientAttestationProvider? = nil,
+        onShutdown: (() -> Void)? = nil
     ) {
         self.onCancel = onCancel
+        self.onShutdown = onShutdown
         self.onProgress = onProgress
         self.onSignRequest = onSignRequest
         self.onMatchRequest = onMatchRequest
@@ -566,6 +570,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     // Set by `shutdown()`: no child may be registered or started afterwards, so a start still buffered in the
     // peer's dispatch loop cannot launch a handler during teardown.
     private var stopped = false
+    // Parents that ended (cancelled, completed or failed) while their child start may still be on its way: a
+    // start for one of them is dropped. Bounded: only the most recent are remembered.
+    private var endedParents: [String] = []
+    private let maxEndedParents = 256
 
     public init(config: OpenID4xConfig = OpenID4xConfig()) {
         self.config = config
@@ -586,7 +594,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             let parent = params.params?.objectValue?["parent_flow_id"]?.stringValue ?? params.flowId
             // Registered under the lock the task's own `finishChild` takes, so a fast child cannot finish first.
             childLock.lock()
-            if !stopped {
+            // Not after shutdown, not for a parent that already ended, and never a second handler for a child that is
+            // already running (a redelivered start must not replace the first task's tracking).
+            if !stopped, !endedParents.contains(parent), childTasks[params.flowId] == nil {
                 childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params) }, parent)
             }
             childLock.unlock()
@@ -684,6 +694,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         var running: [Task<Void, Never>] = []
         var ids: [String] = []
         let wasChild = childTasks[flowId] != nil
+        endedParents.append(flowId)
+        if endedParents.count > maxEndedParents { endedParents.removeFirst(endedParents.count - maxEndedParents) }
         for (childId, child) in childTasks where childId == flowId || child.parent == flowId {
             cancelledChildren.insert(childId)
             running.append(child.task)
@@ -698,6 +710,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     }
 
     public func shutdown() {
+        // The application hears of it too: what it holds for these flows (keys, opened responses) goes with them.
+        config.onShutdown?()
         childLock.lock()
         stopped = true
         var running: [Task<Void, Never>] = []

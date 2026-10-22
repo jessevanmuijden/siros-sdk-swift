@@ -362,6 +362,46 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications.first?.params?["data"]?.objectValue?["error_code"], .string("MATCH_ERROR"))
     }
 
+    /// A child start for a parent that already ended is dropped, and a redelivered start never launches a second
+    /// handler or replaces the first one's tracking.
+    func testStartsForEndedParentsAndDuplicateStartsAreDropped() async throws {
+        actor Counter { var n = 0; func bump() { n += 1 }; var value: Int { n } }
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let ctx = MockPeerContext()
+        let counter = Counter()
+        let gate = Gate()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            await counter.bump()
+            while await !gate.isOpen { try await Task.sleep(nanoseconds: 10_000_000) }
+            return SignSubFlowResult(vpToken: "t")
+        }))
+        profile.initialize(ctx: ctx)
+        // A local parent cancel arrives before the child's start does.
+        await profile.handleCancel(params: FlowCancelParams(flowId: "vp-gone"))
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "late", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("vp-gone"),
+        ]))
+        // The same child delivered twice while its handler is suspended.
+        for _ in 0..<2 {
+            _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "dup", params: [
+                "action": .string("sign_presentation"), "parent_flow_id": .string("vp-live"),
+            ]))
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let entered = await counter.value
+        XCTAssertEqual(entered, 1, "the ended parent's child and the redelivered start run no handler")
+        await gate.release()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(ctx.notifications.filter { $0.method == WmpMethods.flowComplete }.count, 1)
+    }
+
+    func testShutdownTellsTheApplication() {
+        var told = 0
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
+        profile.shutdown()
+        XCTAssertEqual(told, 1)
+    }
+
     func testNoChildStartsAfterShutdown() async throws {
         let ctx = MockPeerContext()
         var ran = false
