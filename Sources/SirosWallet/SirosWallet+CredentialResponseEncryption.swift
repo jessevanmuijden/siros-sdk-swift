@@ -14,9 +14,12 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
     case malformedResponse
     /// The receiver of `credential_metadata` (delivered-secret validation) refused the response.
     case refused
+    /// The engine REQUIRES response encryption with an `alg`/`enc` pair this build cannot open.
+    case unsupportedRequiredPair
 
     var wmpErrorCode: String? {
         switch self {
+        case .unsupportedRequiredPair: return "UNSUPPORTED_RESPONSE_ENCRYPTION"
         case .noKey: return "NO_RESPONSE_KEY"
         case .decryptFailed: return "DECRYPT_FAILED"
         case .malformedResponse: return "MALFORMED_RESPONSE"
@@ -86,6 +89,11 @@ extension SirosWallet {
 
     private func credentialResponseGenerationLocked(flowId: String) -> [Int] {
         [credentialResponseEpoch, flowEndSeq[flowId] ?? 0]
+    }
+
+    /// Whether this build can open the pair the engine negotiated.
+    static func canOpen(_ request: CredentialResponseEncryptionRequest) -> Bool {
+        CredentialResponseEncryptionParams(alg: request.alg, enc: request.enc).isSupported
     }
 
     /// Whether a `generate_proof` request is for the key alone: the engine asked for response
@@ -320,6 +328,15 @@ extension SirosWallet {
     /// `generate_proof` on the engine WebSocket: the proofs (none when the request is for the key alone)
     /// and, when the engine asked for response encryption, a fresh key's public JWK.
     func answerGenerateProof(engine: any SignResponseSender, msg: SignRequestMessage) async throws {
+        // A required pair this build cannot open is ANSWERED with an error (the engine fails the issuance at
+        // once), never left to its sign timeout.
+        if let request = msg.params.credentialResponseEncryption, request.required == true, !Self.canOpen(request) {
+            engine.sendSignResponse(
+                flowId: msg.flowId, error: "response encryption is required with a pair this wallet cannot open",
+                errorCode: CredentialResponseError.unsupportedRequiredPair.wmpErrorCode, messageId: msg.messageId
+            )
+            return
+        }
         let generation = credentialResponseGeneration(flowId: msg.flowId)
         let encryption = msg.params.credentialResponseEncryption
         let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: msg.params.proofTypesSupported)
@@ -342,6 +359,9 @@ extension SirosWallet {
     /// The same over WMP: response encryption without `proof_types_supported` is the key-only request
     /// (WMP openid4x section 3.1.5.1), and a supplied list is forwarded to the proof selection.
     func wmpGenerateProof(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
+        if let request = params.credentialResponseEncryption, request.required == true, !Self.canOpen(request) {
+            throw CredentialResponseError.unsupportedRequiredPair   // a flow error with its code, rejected
+        }
         let generation = credentialResponseGeneration(flowId: flowId)
         let encryption = params.credentialResponseEncryption
         let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: params.proofTypesSupported)

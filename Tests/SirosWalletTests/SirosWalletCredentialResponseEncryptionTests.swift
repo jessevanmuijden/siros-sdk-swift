@@ -292,6 +292,25 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertNil(SirosWallet.pairEncryptedCredentials(entries: [], decrypted: []))
     }
 
+    /// Duplicate member names are refused wherever they hide, including behind escapes and inside the seed member.
+    func testDuplicateMembersAreRefusedAtEveryLevelAndBehindEscapes() async throws {
+        let bodies = [
+            #"{"a":1,"a":2}"#,
+            #"{"a":1,"\u0061":2}"#,
+            #"{"org.siros.secret_seed":{"ns":"00112233445566778899aabbccddeeff","ns":"00112233445566778899aabbccddeeff"}}"#,
+            #"{"org.siros.secret_seed":{"n\u0073":"00112233445566778899aabbccddeeff","ns":"00112233445566778899aabbccddeeff"}}"#,
+        ]
+        for metadata in bodies {
+            let w = wallet()
+            let key = try installOwnKey(w, flowId: "d")
+            let body = #"{"credentials":[{"credential":"c"}],"credential_metadata":\#(metadata)}"#
+            do {
+                _ = try await w.decryptCredentialResponse(flowId: "d", jwe: try encrypt(body, to: key), deferred: false)
+                XCTFail("\(metadata) must be refused")
+            } catch { XCTAssertEqual(error as? CredentialResponseError, .malformedResponse, metadata) }
+        }
+    }
+
     func testMetadataAtTheLimitsIsAccepted() async throws {
         let w = wallet()
         let key = try installOwnKey(w, flowId: "ok")
@@ -341,8 +360,24 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         """
         try await w.answerGenerateProof(engine: sender, msg: try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8)))
         XCTAssertEqual(sender.sent.count, 1)
-        XCTAssertNil(sender.sent.first?.credentialResponseEncryptionJwk, "declined")
+        XCTAssertNil(sender.sent.first?.credentialResponseEncryptionJwk)
+        XCTAssertEqual(sender.sent.first?.errorCode, "UNSUPPORTED_RESPONSE_ENCRYPTION", "an error answer, with the original message id")
+        XCTAssertNotNil(sender.sent.first?.error)
+        XCTAssertNil(sender.sent.first?.proofs)
         XCTAssertEqual(sender.sent.first?.messageId, "m")
+        // Over WMP the same is a refusal with that code.
+        do {
+            _ = try await w.wmpGenerateProof(flowId: "u2", params: SignSubFlowParams(
+                action: "generate_proof", credentialResponseEncryption: CredentialResponseEncryptionRequest(alg: "ECDH-ES+A192KW", enc: "A256GCM", required: true)
+            ))
+            XCTFail("required and unsupported")
+        } catch { XCTAssertEqual((error as? WmpErrorCodeProviding)?.wmpErrorCode, "UNSUPPORTED_RESPONSE_ENCRYPTION") }
+        // Not required: declined quietly, the issuance goes on in the clear.
+        let optional = RecordingSender()
+        let optionalJson = json.replacingOccurrences(of: "\"required\":true", with: "\"required\":false")
+        try await w.answerGenerateProof(engine: optional, msg: try JSONDecoder().decode(SignRequestMessage.self, from: Data(optionalJson.utf8)))
+        XCTAssertNil(optional.sent.first?.errorCode)
+        XCTAssertNil(optional.sent.first?.credentialResponseEncryptionJwk)
     }
 
     // MARK: - generate_proof
