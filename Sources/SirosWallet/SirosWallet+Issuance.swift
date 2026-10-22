@@ -720,27 +720,31 @@ extension SirosWallet {
         guard let engine = engineSession else {
             throw SirosError.wallet(message: "Not connected")
         }
-        try await ensureEngineConnected(engine)
-        // ARF section 6.6.2.3: check the provider is registered to issue what
-        // it offers before requesting it. Done before the in-flight flag is
-        // taken, so a refusal cannot leave issuance wedged.
-        try enforceIssuerEntitlement(
-            issuerUrl: offer.credentialIssuerIdentifier,
-            entitlement: await issuerEntitlementFor(
-                issuerUrl: offer.credentialIssuerIdentifier,
-                configurationId: offer.credentialConfigurationId
-            )
-        )
-
+        // The in-flight guard is taken before any network work, so the
+        // pending flow state published below cannot overlap another start; a
+        // failure anywhere after it (including the entitlement refusal)
+        // clears it again in `failIssuanceStart`.
         lock.lock()
         if issuanceInFlight {
             lock.unlock()
             throw SirosError.wallet(message: "Another issuance is already in progress")
         }
         issuanceInFlight = true
-        activeOffer = offer
         lock.unlock()
+        let epoch = beginIssuanceStart()
         do {
+            try await connectEngineForIssuance(engine, epoch: epoch)
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepCheckingEntitlement)
+            // ARF section 6.6.2.3: check the provider is registered to issue what
+            // it offers before requesting it.
+            try enforceIssuerEntitlement(
+                issuerUrl: offer.credentialIssuerIdentifier,
+                entitlement: await issuerEntitlementFor(
+                    issuerUrl: offer.credentialIssuerIdentifier,
+                    configurationId: offer.credentialConfigurationId
+                )
+            )
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepPreparingIssuance)
 
             // Try to fetch VCTM (SD-JWT) and MDDL schema (mdoc) - format-blind,
             // like `activeVctm`'s existing fetch: whichever one doesn't match
@@ -758,7 +762,11 @@ extension SirosWallet {
                 doctype: offer.doctype,
                 registryUrl: resolvedRegistryUrl
             )
+            // Published only after the epoch is re-checked: a cancelled
+            // attempt must not write into fields a newer attempt now owns.
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow)
             lock.lock()
+            activeOffer = offer
             activeVctm = vctm
             activeVctmDocument = vctmDocument
             activeMddlSchema = mddlSchema
@@ -798,12 +806,13 @@ extension SirosWallet {
                 authorizationDetails: authorizationDetailsForActiveOffer()
             )
         } catch {
-            // A synchronous start failure here means the flow was never
-            // registered server-side, so nothing will ever clear the guard
-            // via the normal flow_complete/flow_error path - without this,
-            // every future issuance attempt would be permanently blocked.
-            resetIssuanceGuards()
-            throw error
+            // A start failure here means the flow was never registered
+            // server-side, so nothing will ever clear the guard via the
+            // normal flow_complete/flow_error path - without this, every
+            // future issuance attempt would be permanently blocked. Also
+            // drops the pending flow state; a start cancelled meanwhile
+            // unwinds with `CancellationError` and leaves state alone.
+            throw failIssuanceStart(epoch, error)
         }
     }
 
@@ -833,7 +842,6 @@ extension SirosWallet {
         guard let engine = engineSession else {
             throw SirosError.wallet(message: "Not connected")
         }
-        try await ensureEngineConnected(engine)
         lock.lock()
         if issuanceInFlight {
             lock.unlock()
@@ -841,9 +849,11 @@ extension SirosWallet {
         }
         issuanceInFlight = true
         lock.unlock()
+        let epoch = beginIssuanceStart()
         do {
+            try await connectEngineForIssuance(engine, epoch: epoch)
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepPreparingIssuance)
             if let offer = await resolveOfferForDisplay(offerUri) {
-                lock.lock(); activeOffer = offer; lock.unlock()
                 let vctmDocument = await vctmFetcher.fetchDocument(
                     issuerUrl: offer.credentialIssuerIdentifier,
                     scope: offer.credentialConfigurationId,
@@ -857,12 +867,17 @@ extension SirosWallet {
                     doctype: offer.doctype,
                     registryUrl: resolvedRegistryUrl
                 )
+                // Published only after the epoch is re-checked (see
+                // `startIssuanceByOffer`).
+                try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow)
                 lock.lock()
+                activeOffer = offer
                 activeVctm = vctm
                 activeVctmDocument = vctmDocument
                 activeMddlSchema = mddlSchema
                 lock.unlock()
             }
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow)
             // Wallet attestation is engine-requested (`request_attestation`
             // sign request, answered in `handleSignRequest`): the engine
             // resolves the offer and the issuer's authorization server itself
@@ -881,12 +896,8 @@ extension SirosWallet {
                 )
             }
         } catch {
-            // A synchronous start failure here means the flow was never
-            // registered server-side, so nothing will ever clear the guard
-            // via the normal flow_complete/flow_error path - without this,
-            // every future issuance attempt would be permanently blocked.
-            resetIssuanceGuards()
-            throw error
+            // See `startIssuanceByOffer`'s matching catch block.
+            throw failIssuanceStart(epoch, error)
         }
     }
 

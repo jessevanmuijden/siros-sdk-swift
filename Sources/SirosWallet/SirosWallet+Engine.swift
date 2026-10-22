@@ -1281,14 +1281,15 @@ extension SirosWallet {
         }
 
         // Transition to FlowActive state
-        switch state {
+        let current = state
+        switch current {
         case .ready(let userId, let displayName, let creds, _),
              .flowActive(let userId, let displayName, _, _, _, let creds):
             setState(.flowActive(
                 userId: userId,
                 displayName: displayName,
                 flowId: msg.flowId,
-                flowType: msg.step,
+                flowType: current.flowTypeForEngineProgress(flowId: msg.flowId, step: msg.step),
                 status: msg.step,
                 credentials: creds
             ))

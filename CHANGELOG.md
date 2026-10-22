@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Issuance start is visible at once.** `startIssuance(offerUri:)` and
+  `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
+  before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
+  (`WalletState.FlowActive.pendingFlowId`, `WalletState.isPendingFlow`) and a
+  client-side `status` that steps through `initializing`, `connecting_engine`,
+  `establishing_session`, `checking_entitlement` (by-offer path only),
+  `preparing_issuance` and `starting_flow` (`WalletState.FlowActive.step*`)
+  until the engine's own progress events take over. Previously the wallet stayed
+  `.ready` for several seconds on a mobile network (engine reconnect,
+  entitlement check, metadata fetches), so hosts showed no feedback after the
+  user chose a credential type. A start that fails (engine unreachable,
+  entitlement refusal) returns the wallet to `.ready` and throws, as before;
+  `cancelCurrentFlow()` during the start resets at once, sends nothing to the
+  engine (there is no flow id), and the suspended start unwinds with
+  `CancellationError` instead of reaching the engine; a cancelled start cannot
+  clobber a newer one. The flow type stays `"issuance"` across the first engine
+  progress event for flows begun this way (before, it became the step name).
+  Both start paths now take the in-flight guard before connecting the engine.
+  Hosts that switch on `flowId` should treat `isPendingFlow` as "no engine flow
+  yet". Not ported yet: Kotlin's recognition of a flow cancelled after
+  `flow_start` was sent but before the engine named it (needs per-connection
+  generations in `WalletEngineSession`). Mirrors siros-sdk-kotlin
+  [#277](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/277).
+- Sample app: labels for the new steps (en, sv); a user-cancelled start is no
+  longer reported as an error.
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1
