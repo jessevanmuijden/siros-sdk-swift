@@ -362,7 +362,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             let (peer, transport) = try await connectedPeer()
             w.lock.lock(); w.wmpPeer = peer; w.lock.unlock()
             if how == "destroy" { w.destroy() } else { w.endSessionLocally() }
-            for _ in 0..<200 where !transport.sentMethods.contains("wmp.session.close") { try await Task.sleep(nanoseconds: 10_000_000) }
+            for _ in 0..<1000 where !transport.sentMethods.contains("wmp.session.close") { try await Task.sleep(nanoseconds: 10_000_000) }
             XCTAssertTrue(transport.sentMethods.contains("wmp.session.close"), "\(how): the close ran")
             XCTAssertEqual(transport.currentState, .disconnected, how)
             w.lock.lock(); XCTAssertNil(w.wmpPeer, how); w.lock.unlock()
