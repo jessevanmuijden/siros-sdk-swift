@@ -252,10 +252,27 @@ final class OpenID4xProfileTests: XCTestCase {
             case "error": await profile.handleError(params: FlowErrorParams(flowId: "vp-error", code: "x"))
             default: profile.shutdown()
             }
+            XCTAssertTrue(ctx.released.contains("c-\(trigger)"), "\(trigger): the child's routing entry is released at once, not when the handler returns")
             await gate.release()
             try await Task.sleep(nanoseconds: 250_000_000)
             XCTAssertTrue(ctx.notifications.isEmpty, trigger)
         }
+    }
+
+    /// After `shutdown()` a child start that was still buffered runs no handler.
+    func testNoChildStartsAfterShutdown() async throws {
+        let ctx = MockPeerContext()
+        var ran = false
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            ran = true
+            return SignSubFlowResult(vpToken: "x")
+        }))
+        profile.initialize(ctx: ctx)
+        profile.shutdown()
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", params: ["action": .string("sign_presentation")]))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(ran)
+        XCTAssertTrue(ctx.notifications.isEmpty)
     }
 
     func testAnIntegerFlowErrorCodeFromThePeerDecodes() throws {

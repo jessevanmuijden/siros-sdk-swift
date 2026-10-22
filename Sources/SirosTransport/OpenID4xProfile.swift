@@ -523,6 +523,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     private let childLock = NSLock()
     private var childTasks: [String: (task: Task<Void, Never>, parent: String)] = [:]
     private var cancelledChildren: Set<String> = []
+    // Set by `shutdown()`: no child may be registered or started afterwards, so a start still buffered in the
+    // peer's dispatch loop cannot launch a handler during teardown.
+    private var stopped = false
 
     public init(config: OpenID4xConfig = OpenID4xConfig()) {
         self.config = config
@@ -543,7 +546,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             let parent = params.params?.objectValue?["parent_flow_id"]?.stringValue ?? params.flowId
             // Registered under the lock the task's own `finishChild` takes, so a fast child cannot finish first.
             childLock.lock()
-            childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params) }, parent)
+            if !stopped {
+                childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params) }, parent)
+            }
             childLock.unlock()
         }
         return FlowStartResult(flowId: params.flowId, flowType: params.flowType)
@@ -567,7 +572,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
                 guard let handler = config.onMatchRequest else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
                 members = matchResponseMembers(try await handler(parentId, payload))
             }
-            guard finishChild(childId) else { return }
+            guard finishChild(childId) else { peer?.releaseFlow(flowId: childId); return }
             try? await peer?.notify(method: WmpMethods.flowComplete, params: [
                 "flow_id": .string(childId), "result": .object_(members),
             ])
@@ -575,7 +580,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         } catch {
             // A flow that was cancelled gets no reply, whether its handler ignored the cancellation, threw
             // `CancellationError` or returned normally.
-            guard finishChild(childId) else { return }
+            guard finishChild(childId) else { peer?.releaseFlow(flowId: childId); return }
             let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? "SIGN_ERROR"
             try? await peer?.notify(method: WmpMethods.flowError, params: [
                 "flow_id": .string(childId), "code": .int(FlowErrorParams.flowErrorCode), "message": .string(code),
@@ -623,23 +628,32 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     private func cancelChildren(of flowId: String) {
         childLock.lock()
         var running: [Task<Void, Never>] = []
+        var ids: [String] = []
         for (childId, child) in childTasks where childId == flowId || child.parent == flowId {
             cancelledChildren.insert(childId)
             running.append(child.task)
+            ids.append(childId)
         }
         childLock.unlock()
         for task in running { task.cancel() }
+        // The peer forgets only the flow that ended; its children are released here, without waiting for a
+        // suspended handler to return (which may be never).
+        for id in ids { peer?.releaseFlow(flowId: id) }
     }
 
     public func shutdown() {
         childLock.lock()
+        stopped = true
         var running: [Task<Void, Never>] = []
+        var ids: [String] = []
         for (childId, child) in childTasks {
             cancelledChildren.insert(childId)
             running.append(child.task)
+            ids.append(childId)
         }
         childLock.unlock()
         for task in running { task.cancel() }
+        for id in ids { peer?.releaseFlow(flowId: id) }
     }
 
     public func handleComplete(params: FlowCompleteParams) async {
