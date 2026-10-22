@@ -1467,6 +1467,12 @@ extension SirosWallet {
     /// like the WebSocket's `flow_complete`; a plain completion that carries a credential entry without its value
     /// is refused whole, as on the WebSocket, rather than reported as a success.
     func handleWmpFlowComplete(flowId: String, result: AnyCodable?) async {
+        lock.lock(); let offeredKey = credentialResponseKeys[flowId] != nil; lock.unlock()
+        if offeredKey, !Self.claimsEncryptedResponse(result) {
+            let ids = result?.objectValue?["credentials"]?.arrayValue?.compactMap { $0.objectValue?["notification_id"]?.stringValue } ?? []
+            await refusePlainCompletion(flowId: flowId, notificationIds: ids)
+            return
+        }
         // Encrypted-to-the-wallet issuance: same pairing as the WebSocket's flow_complete.
         if Self.claimsEncryptedResponse(result) {
             guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {

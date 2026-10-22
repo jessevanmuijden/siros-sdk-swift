@@ -397,6 +397,74 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.released.contains("c1"))
     }
 
+    private func queueOneAnswer(_ ctx: ScriptedPeerContext, profile: OpenID4xProfile) async {
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c1", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ]))   // the script's first step fails this send: the answer is queued
+    }
+
+    /// A child-only cancel while its replay send is suspended is not undone by that send failing: the answer is not
+    /// requeued, and a later resume sends nothing.
+    func testACancelledReplayingChildIsNotRequeuedWhenItsSendFails() async throws {
+        let ctx = ScriptedPeerContext([.fail, .blockThenFail, .succeed])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        await queueOneAnswer(ctx, profile: profile)
+        profile.sessionResumed()
+        for _ in 0..<200 where !ctx.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+        await profile.handleCancel(params: FlowCancelParams(flowId: "c1"))   // child-only cancel
+        ctx.releaseBlocked()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        profile.sessionResumed()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(ctx.sent.isEmpty, "a cancelled child's answer never goes out")
+    }
+
+    /// A second resume during a suspended replay that then fails is not lost: the answer is drained again.
+    func testAReplayThatFailsAfterAnotherResumeIsRetried() async throws {
+        let ctx = ScriptedPeerContext([.fail, .blockThenFail, .succeed])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        await queueOneAnswer(ctx, profile: profile)
+        profile.sessionResumed()
+        for _ in 0..<200 where !ctx.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+        profile.sessionResumed()                       // finds the answer claimed
+        ctx.releaseBlocked()                           // the suspended replay now fails
+        for _ in 0..<300 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.sent, ["c1"])
+    }
+
+    /// A redelivered start for a child that was cancelled does not run its handler again.
+    func testACancelledChildsRedeliveredStartDoesNotRunAgain() async throws {
+        let ctx = MockPeerContext()
+        let counter = Counter()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in counter.bump(); return SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        let start = childStart(flowType: "sign", flowId: "c1", params: ["action": .string("sign_presentation"), "parent_flow_id": .string("p1")])
+        await profile.handleCancel(params: FlowCancelParams(flowId: "c1"))   // cancelled before it ran
+        _ = try await profile.startFlow(params: start)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(counter.value, 0)
+    }
+
+    /// A start refused for good (its parent ended, or the profile stopped) releases the route the peer registered,
+    /// so a later cancel of that child cannot be mistaken for a parent cancel; a tracked duplicate keeps its own.
+    func testARefusedChildStartReleasesItsRoute() async throws {
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }))
+        profile.initialize(ctx: ctx)
+        await profile.handleCancel(params: FlowCancelParams(flowId: "p1"))   // the parent ended
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "late", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ]))
+        XCTAssertTrue(ctx.released.contains("late"), "the dropped start's route is released")
+        profile.shutdown()
+        _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "later", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p2"),
+        ]))
+        XCTAssertTrue(ctx.released.contains("later"), "and so is a start after shutdown")
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
@@ -1018,6 +1086,38 @@ private final class FailAfterReleaseContext: WmpPeerContext, @unchecked Sendable
             throw WmpSessionError.connectionFailed
         }
         lock.lock(); _sent.append(params?["flow_id"]?.stringValue ?? "?"); lock.unlock()
+    }
+    func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
+}
+
+/// Each `notify` takes the next scripted behaviour: fail at once, suspend until released and then fail, or succeed.
+private final class ScriptedPeerContext: WmpPeerContext, @unchecked Sendable {
+    enum Step { case fail, blockThenFail, succeed }
+    let codec = WmpCodec()
+    private let lock = NSLock()
+    private var script: [Step]
+    private var blocked: CheckedContinuation<Void, Never>?
+    private var released = false
+    private var _blockedNow = false
+    private var _sent: [String] = []
+    init(_ script: [Step]) { self.script = script }
+    var blockedNow: Bool { lock.lock(); defer { lock.unlock() }; return _blockedNow }
+    var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
+    func releaseBlocked() { lock.lock(); released = true; let c = blocked; blocked = nil; lock.unlock(); c?.resume() }
+    func releaseFlow(flowId: String) {}
+    func notify(method: String, params: [String: AnyCodable]?) async throws {
+        lock.lock(); let step = script.isEmpty ? Step.succeed : script.removeFirst(); lock.unlock()
+        switch step {
+        case .fail: throw WmpSessionError.connectionFailed
+        case .blockThenFail:
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                lock.lock(); _blockedNow = true
+                if released { lock.unlock(); c.resume() } else { blocked = c; lock.unlock() }
+            }
+            throw WmpSessionError.connectionFailed
+        case .succeed:
+            lock.lock(); _sent.append(params?["flow_id"]?.stringValue ?? "?"); lock.unlock()
+        }
     }
     func call(method: String, params: [String: AnyCodable]?) async throws -> JsonRpcResponse { JsonRpcResponse(id: "m", result: [:]) }
 }

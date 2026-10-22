@@ -827,6 +827,57 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure)
     }
 
+    /// A pending response carrying the seed is refused on EVERY poll, and one response's metadata is never carried
+    /// into the next: each receiver call sees only its own response's metadata.
+    func testSeedInAPendingResponseIsRefusedOnEveryPollAndMetadataIsNotCarriedOver() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let key = try installOwnKey(w, flowId: "pp")
+        let seeded = #"{"transaction_id":"tx","interval":1,"notification_id":"n-s","credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}"#
+        for _ in 0..<2 {
+            do { _ = try await w.decryptCredentialResponse(flowId: "pp", jwe: try encrypt(seeded, to: key), deferred: true); XCTFail("refused") }
+            catch { XCTAssertEqual(error as? CredentialResponseError, .deferredSeed) }
+        }
+        XCTAssertEqual(notifier.sent.count, 2, "the issuer is told on every poll")
+        actor Seen { var metadata: [JSONValue?] = []; func add(_ m: JSONValue?) { metadata.append(m) } }
+        let seen = Seen()
+        w.credentialMetadataReceiver = { _, response, _ in await seen.add(response.credentialMetadata) }
+        _ = try await w.decryptCredentialResponse(flowId: "pp", jwe: try encrypt(#"{"credentials":[{"credential":"a"}],"credential_metadata":{"k":"v"}}"#, to: key), deferred: false)
+        _ = try await w.decryptCredentialResponse(flowId: "pp", jwe: try encrypt(#"{"credentials":[{"credential":"b"}]}"#, to: key), deferred: false)
+        let metadata = await seen.metadata
+        XCTAssertEqual(metadata.count, 2)
+        XCTAssertNotNil(metadata[0])
+        XCTAssertNil(metadata[1] as JSONValue?, "the second response has no metadata of its own, and none from the first")
+    }
+
+    // MARK: - A plain completion after the wallet offered a key
+
+    /// The wallet offered a response-encryption key, but the completion does not say the response was encrypted: the
+    /// engine held the credentials. Refused on both transports, nothing stored, the issuer told per notification id.
+    func testAPlainCompletionAfterAnOfferedKeyIsRefused() async throws {
+        for transport in ["engine", "wmp"] {
+            let w = wallet()
+            let notifier = RecordingNotifier()
+            w.credentialNotifier = notifier
+            let listener = Listener()
+            w.eventListener = listener
+            try installKey(w, flowId: "pk")
+            if transport == "engine" {
+                let object: [String: Any] = ["type": "flow_complete", "flow_id": "pk", "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-1"]]]
+                await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+            } else {
+                await w.handleWmpFlowComplete(flowId: "pk", result: .object_(["credentials": .array([.object_(["format": .string("dc+sd-jwt"), "credential": .string("a.b.c"), "notification_id": .string("n-1")])])]))
+            }
+            XCTAssertEqual(listener.errors.count, 1, transport)
+            XCTAssertTrue(listener.completed.isEmpty, transport)
+            XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-1"], transport)
+            XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure, transport)
+            let stored = await w.credentialStore.getAll()
+            XCTAssertTrue(stored.isEmpty, "\(transport): nothing is stored")
+        }
+    }
+
     // MARK: - flow_complete pairing
 
     func testFlowCompletePairsEntriesWithDecryptedCredentialsAndTakesTheNotificationIdFromTheBody() async throws {

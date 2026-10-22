@@ -208,6 +208,12 @@ final class CredentialResponseJweTests: XCTestCase {
         XCTAssertEqual(odd.credentialMetadata, .array([.int(1)]))
     }
 
+    /// The inner `credential` value is what is stored, not the entry that wraps it.
+    func testTheInnerCredentialValueIsStored() throws {
+        let response = try DecryptedCredentialResponse.parse(Data(#"{"credentials":[{"credential":"one","extra":"x"},{"credential":"two"}]}"#.utf8))
+        XCTAssertEqual(response.credentials, ["one", "two"])
+    }
+
     /// Numbers inside an object-valued credential are written as the validated token, not rounded or re-typed.
     func testObjectCredentialsKeepNumbersExactly() throws {
         let plaintext = #"{"credentials":[{"credential":{"big":1e200,"precise":0.1234567890123456789012345678901234567890,"n":-0,"s":"a/b\n\u00e9","l":[1,2.50]}}]}"#
@@ -224,6 +230,8 @@ final class CredentialResponseJweTests: XCTestCase {
 
     func testParseRefusesWhatIsNotACredentialResponse() {
         for bad in [
+            // Each credentials[] entry must be an object with a `credential` member, never a bare value.
+            #"{"credentials":["c"]}"#, #"{"credentials":[null]}"#, #"{"credentials":[["c"]]}"#, #"{"credentials":[{"cred":"c"}]}"#,
             "[]", "not json", "{}", #"{"credentials":[]}"#, #"{"credentials":"x"}"#, #"{"credentials":[{}]}"#,
             #"{"credentials":[{"credential":""}]}"#, #"{"credentials":[{"credential":1}]}"#,
             #"{"credentials":[{"credential":[]}],"notification_id":"n"}"#, #"{"credential":[1]}"#, #"{"transaction_id":1}"#,
