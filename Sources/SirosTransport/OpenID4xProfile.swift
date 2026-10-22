@@ -529,6 +529,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     /// Answers that could not be sent (the connection was down), kept until the session resumes. The handler is
     /// not run again for them.
     private var unsentAnswers: [String: (method: String, params: [String: AnyCodable], parent: String)] = [:]
+    /// Children whose queued answer a replay has claimed and is sending: not queued, not running, and not to be
+    /// started again by a redelivered start.
+    private var replaying: [String: String] = [:]
+    /// Bumped at each resume, so an answer queued by a send that began before the resume is retried at once.
+    private var resumeGeneration = 0
     private var cancelledChildren: Set<String> = []
     // Set by `shutdown()`: no child may be registered or started afterwards, so a start still buffered in the
     // peer's dispatch loop cannot launch a handler during teardown.
@@ -559,7 +564,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             childLock.lock()
             // Not after shutdown, not for a parent that already ended, and never a second handler for a child that is
             // already running (a redelivered start must not replace the first task's tracking).
-            if !stopped, !endedParents.contains(parent), childTasks[params.flowId] == nil, unsentAnswers[params.flowId] == nil {
+            if !stopped, !endedParents.contains(parent), childTasks[params.flowId] == nil, unsentAnswers[params.flowId] == nil, replaying[params.flowId] == nil {
                 let token = UUID()
                 childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params, token: token) }, parent, token)
             }
@@ -611,10 +616,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         // `CancellationError` or returned normally. The child stays tracked until its answer is out, so a
         // redelivered start cannot run a second handler beside it, and only this execution forgets it.
         guard mayAnswer(childId) else { forgetChild(childId, token); peer?.releaseFlow(flowId: childId); return }
+        childLock.lock(); let sendGeneration = resumeGeneration; childLock.unlock()
         do {
             try await peer?.notify(method: method, params: answer)
         } catch {
-            keepUnsent(childId, method: method, params: answer, parent: parentId, token: token)
+            keepUnsent(childId, method: method, params: answer, parent: parentId, token: token, sendStartedAt: sendGeneration)
             return
         }
         forgetChild(childId, token)
@@ -623,33 +629,47 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
 
     /// The session came back after a loss: the answers that could not be sent go out now.
     public func sessionResumed() {
+        childLock.lock(); resumeGeneration += 1; childLock.unlock()
+        drainUnsent()
+    }
+
+    /// Sends the queued answers. Each is CLAIMED under the lock before its send is awaited, so a second drain (another
+    /// resume while this send is suspended) cannot send it again; a failed send puts it back unless its flow has ended.
+    private func drainUnsent() {
         childLock.lock()
         let pending = Array(unsentAnswers.keys)
         childLock.unlock()
         guard !pending.isEmpty else { return }
         Task { [self] in
             for childId in pending {
-                // Revalidated at each step: a parent that ended or a shutdown while an earlier send was suspended
-                // has already dropped the entry (or stopped the profile), and its answer must not go out now.
                 childLock.lock()
-                let answer = stopped ? nil : unsentAnswers[childId]
+                // Revalidated at each step: a parent that ended or a shutdown while an earlier send was suspended has
+                // already dropped the entry (or stopped the profile), and its answer must not go out now.
+                guard !stopped, let answer = unsentAnswers.removeValue(forKey: childId) else { childLock.unlock(); continue }
+                replaying[childId] = answer.parent
                 childLock.unlock()
-                guard let answer else { continue }
-                guard (try? await peer?.notify(method: answer.method, params: answer.params)) != nil else { continue }
-                childLock.lock(); unsentAnswers.removeValue(forKey: childId); childLock.unlock()
-                peer?.releaseFlow(flowId: childId)
+                let sent = (try? await peer?.notify(method: answer.method, params: answer.params)) != nil
+                childLock.lock()
+                replaying.removeValue(forKey: childId)
+                let ended = stopped || endedParents.contains(answer.parent) || cancelledChildren.contains(childId)
+                if !sent, !ended { unsentAnswers[childId] = answer }
+                childLock.unlock()
+                if sent || ended { peer?.releaseFlow(flowId: childId) }
             }
         }
     }
 
     /// The answer could not be sent: keep it for the resume (unless the flow ended or the profile stopped meanwhile).
-    private func keepUnsent(_ childId: String, method: String, params: [String: AnyCodable], parent: String, token: UUID) {
+    private func keepUnsent(_ childId: String, method: String, params: [String: AnyCodable], parent: String, token: UUID, sendStartedAt generation: Int) {
         childLock.lock()
         let ended = stopped || cancelledChildren.contains(childId)
         if !ended { unsentAnswers[childId] = (method, params, parent) }
+        // A resume that happened while this send was suspended has already drained an empty queue: retry now.
+        let resumedMeanwhile = !ended && resumeGeneration != generation
         childLock.unlock()
         forgetChild(childId, token)
         if ended { peer?.releaseFlow(flowId: childId) }
+        if resumedMeanwhile { drainUnsent() }
     }
 
     /// Whether this child was cancelled, or the profile shut down, before its handler was entered. Forgets it if so.
@@ -733,9 +753,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         // callback must not run again after a replacement session has begun.
         guard !stopped else { childLock.unlock(); return }
         stopped = true
-        unsentAnswers.removeAll()
+        // Children whose answers were queued have no task left to find: their routing entries are released too.
         var running: [Task<Void, Never>] = []
-        var ids: [String] = []
+        var ids: [String] = Array(unsentAnswers.keys) + Array(replaying.keys)
+        unsentAnswers.removeAll()
         for (childId, child) in childTasks {
             cancelledChildren.insert(childId)
             running.append(child.task)

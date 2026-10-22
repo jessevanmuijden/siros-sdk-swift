@@ -138,6 +138,28 @@ final class WmpSessionTests: XCTestCase {
         XCTAssertEqual(session.currentState, .failed)
     }
 
+    /// A permanent disconnect and a later `close()` of the same session notify once, not twice.
+    func testTerminalIsNotifiedOnceForFailureFollowedByClose() async throws {
+        actor Count { var n = 0; func bump() { n += 1 }; var value: Int { n } }
+        let counter = Count()
+        let transport = FakeTransport()
+        let session = WmpSession(transport: transport, config: WmpSessionConfig(requestTimeoutMs: 2_000))
+        session.onTerminal = { Task { await counter.bump() } }
+        let createTask = Task { try await session.create(authToken: "t", sender: "s") }
+        try await waitForSentCount(transport, expected: 1)
+        let req = try codec.decodeRequest(transport.sentMessages.last!)
+        transport.receiveFromServer(
+            #"{"jsonrpc":"2.0","id":"\#(req.id!)","result":{"wmp":{"version":"0.1","session_id":"session-123"}}}"#.data(using: .utf8)!
+        )
+        try await createTask.value
+        await transport.disconnect()
+        for _ in 0..<100 { if await counter.value > 0 { break }; try await Task.sleep(nanoseconds: 20_000_000) }
+        try await session.close()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let fired = await counter.value
+        XCTAssertEqual(fired, 1)
+    }
+
     private func waitForSentCount(_ transport: FakeTransport, expected: Int) async throws {
         let deadline = Date().addingTimeInterval(2)
         while transport.sentMessages.count < expected {
