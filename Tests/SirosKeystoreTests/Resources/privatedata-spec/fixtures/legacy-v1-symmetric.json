@@ -1,0 +1,10 @@
+{
+  "id": "legacy-v1-symmetric-001",
+  "description": "Legacy symmetric mainKey format accepted for read compatibility",
+  "version": "1",
+  "mode": "read-only",
+  "requirements": [
+    "reader MAY accept legacy format",
+    "writer SHOULD emit v3 asymmetric container"
+  ]
+}
