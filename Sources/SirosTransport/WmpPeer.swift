@@ -144,6 +144,12 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
 
     /// Send a flow cancel notification.
     public func cancelFlow(flowId: String, reason: String? = nil) async throws {
+        // A cancel made here stops this side's work for the flow at once and forgets the flow, without waiting
+        // for the peer to echo it: only an INCOMING cancel used to reach the handler.
+        if let handler = registry.flowHandler(for: lookupFlowType(flowId)) {
+            await handler.handleCancel(params: FlowCancelParams(flowId: flowId, reason: reason))
+        }
+        removeFlowType(flowId: flowId)
         let params = try codec.encodeParams(
             FlowCancelParams(wmp: WmpMeta(), flowId: flowId, reason: reason)
         )

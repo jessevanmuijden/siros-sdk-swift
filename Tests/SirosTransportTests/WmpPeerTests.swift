@@ -86,6 +86,23 @@ private extension WmpPeerTests {
 
 final class WmpPeerTests: XCTestCase {
 
+    /// A cancel made locally reaches the handler and forgets the flow before it is sent, without waiting for an echo.
+    func testALocalCancelStopsTheFlowHereAtOnce() async throws {
+        let (peer, transport, profile) = makePeer()
+        try await connectPeer(peer, transport: transport)
+        let codec = WmpCodec()
+        transport.receiveFromServer(
+            """
+            {"jsonrpc":"2.0","method":"wmp.flow.start","params":{"wmp":{"version":"0.1","session_id":"ses-1"},"flow_type":"stub.flow","flow_id":"lc-1"}}
+            """.data(using: .utf8)!
+        )
+        for _ in 0..<100 where profile.startedFlows.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(profile.startedFlows.count, 1)
+        try await peer.cancelFlow(flowId: "lc-1", reason: "user")
+        XCTAssertEqual(profile.cancels.map(\.flowId), ["lc-1"], "the handler is told by the local cancel itself")
+        _ = codec
+    }
+
     func testProfileInitializeCalledOnUse() {
         let (peer, _, profile) = makePeer()
         XCTAssertNotNil(profile.ctx, "initialize(ctx:) should be called by use(_:)")
