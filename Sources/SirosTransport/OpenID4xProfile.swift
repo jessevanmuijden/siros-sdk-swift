@@ -641,6 +641,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         let childId = params.flowId
         let payload = params.params
         let parentId = payload?.objectValue?["parent_flow_id"]?.stringValue ?? childId
+        // Cancelled or shut down before it got going: no handler runs (Swift cancellation does not stop a task
+        // that has not started, and a handler must not begin signing for a flow that has ended).
+        guard !endedBeforeStart(childId) else { peer?.releaseFlow(flowId: childId); return }
         do {
             let members: [String: AnyCodable]
             if params.flowType == WmpSubFlowTypes.sign {
@@ -660,13 +663,23 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             // A flow that was cancelled gets no reply, whether its handler ignored the cancellation, threw
             // `CancellationError` or returned normally.
             guard finishChild(childId) else { peer?.releaseFlow(flowId: childId); return }
-            let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? "SIGN_ERROR"
+            let fallback = params.flowType == WmpSubFlowTypes.match ? "MATCH_ERROR" : "SIGN_ERROR"
+            let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? fallback
             try? await peer?.notify(method: WmpMethods.flowError, params: [
                 "flow_id": .string(childId), "code": .int(FlowErrorParams.flowErrorCode), "message": .string(code),
                 "data": .object_(["reason": .string("rejected"), "error_code": .string(code)]),
             ])
             peer?.releaseFlow(flowId: childId)
         }
+    }
+
+    /// Whether this child was cancelled, or the profile shut down, before its handler was entered. Forgets it if so.
+    private func endedBeforeStart(_ childId: String) -> Bool {
+        childLock.lock(); defer { childLock.unlock() }
+        guard stopped || cancelledChildren.contains(childId) else { return false }
+        childTasks.removeValue(forKey: childId)
+        cancelledChildren.remove(childId)
+        return true
     }
 
     /// Whether this child may still answer; forgets it either way.

@@ -405,6 +405,36 @@ final class OpenID4xProfileTests: XCTestCase {
     }
 
     /// After `shutdown()` a child start that was still buffered runs no handler.
+    /// A child that is already run directly (as a queued task is) after shutdown never enters its handler.
+    func testAShutDownProfileNeverEntersTheHandlerOfAQueuedChild() async throws {
+        let ctx = MockPeerContext()
+        var entered = false
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            entered = true
+            return SignSubFlowResult(vpToken: "x")
+        }, onMatchRequest: { _, _ in
+            entered = true
+            return MatchResult(matches: [])
+        }))
+        profile.initialize(ctx: ctx)
+        profile.shutdown()
+        await profile.runChildFlow(params: childStart(flowType: "sign", params: ["action": .string("sign_presentation")]))
+        await profile.runChildFlow(params: childStart(flowType: "match", flowId: "m", params: ["dcql_query": .object_([:])]))
+        XCTAssertFalse(entered)
+        XCTAssertTrue(ctx.notifications.isEmpty)
+    }
+
+    /// An ordinary failure of a match handler is a MATCH_ERROR, as on the progress-step route.
+    func testAMatchChildFailureIsReportedAsMatchError() async throws {
+        struct Boom: Error {}
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onMatchRequest: { _, _ in throw Boom() }))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "match", flowId: "m", params: ["dcql_query": .object_([:])]))
+        XCTAssertEqual(ctx.notifications.first?.params?["message"], .string("MATCH_ERROR"))
+        XCTAssertEqual(ctx.notifications.first?.params?["data"]?.objectValue?["error_code"], .string("MATCH_ERROR"))
+    }
+
     func testNoChildStartsAfterShutdown() async throws {
         let ctx = MockPeerContext()
         var ran = false
