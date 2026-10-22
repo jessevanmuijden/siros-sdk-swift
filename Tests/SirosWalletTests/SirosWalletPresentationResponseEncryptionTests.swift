@@ -138,6 +138,10 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
             sender.sent.allSatisfy { $0.responseJwe == nil && $0.vpToken == nil },
             "neither a response_jwe nor a vp_token for the engine to post in clear"
         )
+        // And the engine is told, with the original message id, instead of waiting out its sign timeout.
+        XCTAssertEqual(sender.sent.count, 1)
+        XCTAssertEqual(sender.sent.first?.errorCode, "RESPONSE_ENCRYPTION_FAILED")
+        XCTAssertEqual(sender.sent.first?.messageId, "m1")
         XCTAssertEqual(listener.errors.count, 1)
     }
 
@@ -164,6 +168,21 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
             await w.handleSignRequest(engine: sender, msg: try signRequest(responseMode: mode))
             XCTAssertTrue(sender.sent.allSatisfy { $0.responseJwe == nil && $0.vpToken == nil }, mode)
         }
+    }
+
+    /// A selected credential that vanished from the store is a refusal, not a shorter presentation.
+    func testASelectedCredentialThatIsGoneIsARefusalNotAPartialPresentation() async throws {
+        let store = InMemoryCredentialStore()
+        await store.save(StoredCredential(id: 1, format: "dc+sd-jwt", raw: "cred-1", kid: nil, batchId: 1, instanceId: 0))
+        let w = wallet(store: store)
+        let sender = RecordingSender()
+        let refs: [[String: Any]] = [
+            ["credential_id": "1", "credential_query_id": "pid"], ["credential_id": "2", "credential_query_id": "mdl"],
+        ]
+        await w.handleSignRequest(engine: sender, msg: try signRequest(credentials: refs))
+        XCTAssertTrue(sender.sent.allSatisfy { $0.responseJwe == nil && $0.vpToken == nil }, "no partial presentation")
+        XCTAssertEqual(sender.sent.first?.errorCode, "SIGN_ERROR")
+        XCTAssertEqual(sender.sent.first?.messageId, "m1")
     }
 
     func testDcqlTokensAreBuiltByTheWalletPerQuery() async throws {

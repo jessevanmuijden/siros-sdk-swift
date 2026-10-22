@@ -759,7 +759,11 @@ extension SirosWallet {
                         // ref.credentialId is the WMP wire-protocol identifier
                         // (String) - parse it back to the numeric
                         // StoredCredential.id it refers to.
-                        guard let cred = allCreds.first(where: { $0.id == Int64(ref.credentialId) }) else { continue }
+                        // A selected credential that is gone from the store is a refusal, not a silently shorter
+                        // presentation: exactly one token per selected reference, or none.
+                        guard let cred = allCreds.first(where: { $0.id == Int64(ref.credentialId) }) else {
+                            throw SirosError.wallet(message: "A selected credential is no longer available")
+                        }
                         let matchResult = storedMatchResults?.first(where: { result in
                             result.queryId == ref.credentialQueryId || result.candidates.contains(where: { $0.id == cred.id })
                         })
@@ -856,6 +860,10 @@ extension SirosWallet {
                 engine.sendSignResponse(flowId: msg.flowId, messageId: msg.messageId)
                 reportSignFailure(flowId: msg.flowId, message: refusal.verifierErrorCode, notifyError: refusal.reason != .declined)
             } else {
+                // The engine waits for an answer to this request: say that it failed (with the original
+                // `message_id`) instead of leaving it to its sign timeout. Nothing of the failure's detail is sent.
+                let code = (error as? PresentationResponseError)?.code ?? "SIGN_ERROR"
+                engine.sendSignResponse(flowId: msg.flowId, error: "the request could not be answered", errorCode: code, messageId: msg.messageId)
                 reportSignFailure(flowId: msg.flowId, message: error.localizedDescription)
             }
         }

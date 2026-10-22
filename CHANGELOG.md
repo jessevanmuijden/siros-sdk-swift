@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plain `vp_token`); a response that cannot be encrypted finalizes a transaction consent as failed; and a
   WMP `sign_presentation` (which has no credential selection or consent step, so it signs a
   credential-less token) refuses an encrypted response for a request that names credentials, instead of
-  building a JWE around a wrong `vp_token`; `response_encryption: null` or an unreadable one is refused on the
+  building a JWE around a wrong `vp_token`; a response that cannot be built (no validated `client_id`, a bad key, an unsupported pair, too large) and any other sign failure is ANSWERED with an error `sign_response` (the original `message_id`, a code and no detail) instead of left to the engine's sign timeout; a selected credential that is gone from the store is a refusal, not a shorter presentation; `response_encryption: null` or an unreadable one is refused on the
   WebSocket too (`ResponseEncryptionMember`). Cross-checked against go-jose
   v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and

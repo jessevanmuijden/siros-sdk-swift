@@ -7,6 +7,12 @@ import SirosTransport
 /// The wallet's half of engine-blind presentation: for `direct_post.jwt` the engine sends the verifier
 /// key (`response_encryption`) and the wallet answers with `response_jwe`, a JWE it built itself around
 /// the `vp_token`, so the engine posts ciphertext and never holds a presentation.
+/// Why the wallet could not build the response to a `direct_post.jwt` presentation. Carries no token and no key.
+struct PresentationResponseError: Error, WmpErrorCodeProviding {
+    let code = "RESPONSE_ENCRYPTION_FAILED"
+    var wmpErrorCode: String? { code }
+}
+
 extension SirosWallet {
 
     /// One token of a presentation, with the DCQL credential query it answers (nil outside DCQL).
@@ -19,7 +25,7 @@ extension SirosWallet {
     ) throws -> String {
         // Only for a request the engine verified as `direct_post.jwt`: any other mode wants the vp_token.
         guard verifiedRequest?.responseMode == "direct_post.jwt" else {
-            throw SirosError.wallet(message: "The presentation response could not be encrypted")
+            throw PresentationResponseError()
         }
         do {
             return try JarmResponse.encrypt(
@@ -28,7 +34,7 @@ extension SirosWallet {
             )
         } catch {
             // Whatever failed, the wallet answers nothing rather than a vp_token the engine would post in clear.
-            throw SirosError.wallet(message: "The presentation response could not be encrypted")
+            throw PresentationResponseError()
         }
     }
 
@@ -43,7 +49,7 @@ extension SirosWallet {
     func presentationAnswer(msg: SignRequestMessage, parts: [PresentationPart]) throws -> SignResponseMessage {
         // `response_encryption: null` (or an unreadable one) is not "absent": it must never become a plain vp_token.
         if msg.params.responseEncryptionMember.isExplicitNull || msg.params.responseEncryptionMember.isMalformed {
-            throw SirosError.wallet(message: "The presentation response could not be encrypted")
+            throw PresentationResponseError()
         }
         if let encryption = msg.params.responseEncryption {
             let jwe = try encryptedPresentationResponse(
