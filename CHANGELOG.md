@@ -256,6 +256,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **Presentation encryption: handover, header and strict request decoding.** The mdoc `OpenID4VPHandover` thumbprint
+  for a request with `response_encryption` is the RFC 7638 thumbprint of that key (`JwkThumbprint.ec`), never the
+  engine's `verifier_jwk_thumbprint` (both transports, both mdoc builders go through `SignPresentationContext`).
+  The JARM JWE header no longer sets `cty: JWT` (the plaintext is a JSON claims set). A malformed `verified_request`
+  or `state` on a sign request is `INVALID_PARAMS` instead of being read as absent, which with `response_encryption`
+  omitted would have answered a `direct_post.jwt` request with a plaintext `vp_token`.
 - **Blind issuance: a plain completion after an offered key is an error.** When the wallet offered a
   response-encryption key for a flow and its `flow_complete` / `wmp.flow.complete` does not say the response was
   encrypted to the wallet (`credential_response_encrypted: true`), the engine held the credentials: the completion is

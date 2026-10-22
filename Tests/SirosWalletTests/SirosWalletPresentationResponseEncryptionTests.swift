@@ -147,6 +147,33 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         } catch { XCTAssertEqual((error as? WmpErrorCodeProviding)?.wmpErrorCode, "RESPONSE_ENCRYPTION_FAILED") }
     }
 
+    /// The mdoc handover binds the thumbprint of the key the response is ENCRYPTED to, never the engine's
+    /// `verifier_jwk_thumbprint`, on both transports; without encryption the engine's value is untouched.
+    func testTheHandoverThumbprintIsThatOfTheResponseEncryptionKey() throws {
+        let jwk = ["kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"]
+        let expected = "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U"
+        let subflow = SignSubFlowParams(
+            action: "sign_presentation", nonce: "n", audience: "a",
+            responseEncryption: ResponseEncryptionRequest(jwk: jwk.mapValues { .string($0) }, alg: "ECDH-ES", enc: "A128GCM"),
+            verifierJwkThumbprint: "ENGINE-VALUE"
+        )
+        XCTAssertEqual(SignPresentationContext(subflow).verifierJwkThumbprint, expected)
+        let ws = try JSONDecoder().decode(SignRequestParams.self, from: Data(#"""
+        {"audience":"a","nonce":"n","verifier_jwk_thumbprint":"ENGINE-VALUE",
+         "response_encryption":{"jwk":{"kty":"EC","crv":"P-256","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"},"alg":"ECDH-ES","enc":"A128GCM"}}
+        """#.utf8))
+        XCTAssertEqual(SignPresentationContext(ws).verifierJwkThumbprint, expected)
+        let plain = SignSubFlowParams(action: "sign_presentation", nonce: "n", audience: "a", verifierJwkThumbprint: "ENGINE-VALUE")
+        XCTAssertEqual(SignPresentationContext(plain).verifierJwkThumbprint, "ENGINE-VALUE")
+        // An encryption key with no thumbprint never falls back to the engine's.
+        let broken = SignSubFlowParams(
+            action: "sign_presentation", nonce: "n", audience: "a",
+            responseEncryption: ResponseEncryptionRequest(jwk: ["kty": .string("EC")], alg: "ECDH-ES", enc: "A128GCM"),
+            verifierJwkThumbprint: "ENGINE-VALUE"
+        )
+        XCTAssertNil(SignPresentationContext(broken).verifierJwkThumbprint)
+    }
+
     func testWithoutAValidatedClientIdNothingIsAnsweredAndTheFlowFails() async throws {
         let w = wallet()
         let listener = Listener()

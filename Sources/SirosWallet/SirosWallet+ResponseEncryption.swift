@@ -93,12 +93,20 @@ struct SignPresentationContext {
     init(_ params: SignRequestParams) {
         verifierSessionId = params.verifierSessionId
         responseUri = params.responseUri
-        verifierJwkThumbprint = params.verifierJwkThumbprint
+        verifierJwkThumbprint = Self.handoverThumbprint(encryption: params.responseEncryption, engine: params.verifierJwkThumbprint)
     }
 
     init(_ params: SignSubFlowParams) {
         verifierSessionId = params.verifierSessionId
         responseUri = params.responseUri
-        verifierJwkThumbprint = params.verifierJwkThumbprint
+        verifierJwkThumbprint = Self.handoverThumbprint(encryption: params.responseEncryption, engine: params.verifierJwkThumbprint)
+    }
+
+    /// The thumbprint the mdoc `OpenID4VPHandover` binds. For a `direct_post.jwt` request it is the thumbprint of the
+    /// key the response is encrypted to (`response_encryption.jwk`), which is what the verifier computes; the engine's
+    /// `verifier_jwk_thumbprint` is never used for it (nil, not a fallback, when that key has no thumbprint).
+    static func handoverThumbprint(encryption: ResponseEncryptionRequest?, engine: String?) -> String? {
+        guard let encryption else { return engine }
+        return JwkThumbprint.ec(encryption.jwkStrings)
     }
 }

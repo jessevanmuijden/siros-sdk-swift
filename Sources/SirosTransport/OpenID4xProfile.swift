@@ -423,8 +423,10 @@ public struct SignSubFlowParams: Codable, Sendable {
         }
         responseUri = try c.decodeIfPresent(String.self, forKey: .responseUri)
         verifierJwkThumbprint = try c.decodeIfPresent(String.self, forKey: .verifierJwkThumbprint)
-        state = try? c.decodeIfPresent(String.self, forKey: .state)
-        verifiedRequest = try? c.decodeIfPresent(VerifiedRequest.self, forKey: .verifiedRequest)
+        // Strict: a malformed `state` or `verified_request` must fail the request (INVALID_PARAMS), never be read as
+        // absent: with `response_encryption` omitted that would send a plaintext vp_token for a direct_post.jwt request.
+        state = try c.decodeIfPresent(String.self, forKey: .state)
+        verifiedRequest = try c.decodeIfPresent(VerifiedRequest.self, forKey: .verifiedRequest)
     }
 }
 

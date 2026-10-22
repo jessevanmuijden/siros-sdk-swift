@@ -50,7 +50,7 @@ final class JarmResponseTests: XCTestCase {
             XCTAssertEqual(h["alg"] as? String, "ECDH-ES")
             XCTAssertEqual(h["enc"] as? String, enc)
             XCTAssertEqual(h["kid"] as? String, "verifier-key-1")
-            XCTAssertEqual(h["cty"] as? String, "JWT")
+            XCTAssertNil(h["cty"], "the claims are plain JSON: no content type is set")
             XCTAssertEqual((h["epk"] as? [String: Any])?["crv"] as? String, "P-256")
             XCTAssertNil((h["epk"] as? [String: Any])?["d"])
             XCTAssertEqual(try claims(jwe, enc: enc)["vp_token"] as? String, "tok")
@@ -139,5 +139,14 @@ final class JarmResponseTests: XCTestCase {
     func testAnotherKeyCannotOpenIt() throws {
         let jwe = try JarmResponse.encrypt(vpToken: .string("secret"), state: nil, audience: "a", recipientJwk: jwk(), alg: "ECDH-ES", enc: "A128GCM")
         XCTAssertThrowsError(try CredentialResponseJwe.decrypt(jwe, recipient: P256.KeyAgreement.PrivateKey()))
+    }
+
+    /// RFC 7638: SHA-256 over {"crv","kty","x","y"}; the expected value was computed independently (Python hashlib).
+    func testAnEcJwkThumbprintMatchesAnIndependentComputation() {
+        let jwk = ["kty": "EC", "crv": "P-256", "kid": "ignored",
+                   "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"]
+        XCTAssertEqual(JwkThumbprint.ec(jwk), "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U")
+        XCTAssertNil(JwkThumbprint.ec(["kty": "EC", "crv": "P-256", "x": "x"]), "an incomplete key has no thumbprint")
+        XCTAssertNil(JwkThumbprint.ec(["kty": "RSA", "crv": "P-256", "x": "x", "y": "y"]))
     }
 }

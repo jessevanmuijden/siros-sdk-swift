@@ -68,7 +68,7 @@ public enum VpTokenValue: Sendable, Equatable {
 ///
 /// ECDH-ES (direct key agreement, RFC 7518 4.6) to a P-256 key with A128GCM or A256GCM. The protected
 /// header carries exactly the requested `alg` and `enc`, the verifier JWK's `kid` when it has one (a
-/// verifier finds its ephemeral decryption key by it), the ephemeral `epk` and `cty: JWT`. The engine
+/// verifier finds its ephemeral decryption key by it), and the ephemeral `epk` (no `cty`: the plaintext is a JSON claims set, which JWE does not mark). The engine
 /// refuses a JWE whose header differs, so none of these is optional.
 public enum JarmResponse {
 
@@ -105,7 +105,7 @@ public enum JarmResponse {
         let ephemeral = P256.KeyAgreement.PrivateKey()
         let point = ephemeral.publicKey.x963Representation
         var header: [String: Any] = [
-            "alg": alg, "enc": enc, "cty": "JWT",
+            "alg": alg, "enc": enc,
             "epk": [
                 "kty": "EC", "crv": "P-256",
                 "x": CredentialResponseJwe.encode(point.subdata(in: 1..<33)),
@@ -157,5 +157,22 @@ public enum JarmResponse {
             throw JarmResponseError.unusableKey("not a point on P-256")
         }
         return key
+    }
+}
+
+/// RFC 7638 thumbprints of the public keys this SDK handles.
+public enum JwkThumbprint {
+    /// The thumbprint (base64url of the SHA-256 over `{"crv","kty","x","y"}` in that member order) of an EC public
+    /// JWK; nil unless it is a complete EC key with string members.
+    public static func ec(_ jwk: [String: String]) -> String? {
+        guard jwk["kty"] == "EC", let crv = jwk["crv"], let x = jwk["x"], let y = jwk["y"] else { return nil }
+        let canonical = "{\"crv\":\(quote(crv)),\"kty\":\"EC\",\"x\":\(quote(x)),\"y\":\(quote(y))}"
+        return CredentialResponseJwe.encode(Data(SHA256.hash(data: Data(canonical.utf8))))
+    }
+
+    private static func quote(_ text: String) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return String(decoding: (try? encoder.encode(text)) ?? Data(), as: UTF8.self)
     }
 }

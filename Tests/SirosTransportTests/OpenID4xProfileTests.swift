@@ -539,6 +539,29 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.released.contains("later"), "and so is a start after shutdown")
     }
 
+    /// A malformed `verified_request` (or `state`) fails the sign request as INVALID_PARAMS instead of being read as
+    /// absent, which with `response_encryption` omitted would have answered a direct_post.jwt request in plaintext.
+    func testAMalformedVerifiedRequestIsInvalidParamsAndSignsNothing() async throws {
+        let ctx = MockPeerContext()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+            XCTFail("a malformed request is never signed"); return SignSubFlowResult(vpToken: "plaintext")
+        }))
+        profile.initialize(ctx: ctx)
+        for bad in [
+            ["verified_request": AnyCodable.object_(["client_id": .string("c"), "response_mode": .string("direct_post.jwt"), "signed": .string("yes")])],
+            ["state": AnyCodable.int(7)],
+        ] {
+            var members: [String: AnyCodable] = ["action": .string("sign_presentation"), "nonce": .string("n"), "audience": .string("a"), "parent_flow_id": .string("p")]
+            for (k, v) in bad { members[k] = v }
+            await profile.runChildFlow(params: FlowStartParams(wmp: WmpMeta(), flowId: "c1", flowType: "sign", params: .object_(members)))
+        }
+        XCTAssertEqual(ctx.notifications.count, 2)
+        for message in ctx.notifications {
+            XCTAssertEqual(message.method, WmpMethods.flowError)
+            XCTAssertEqual(message.params?["data"]?.objectValue?["error_code"], .string("INVALID_PARAMS"))
+        }
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
