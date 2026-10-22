@@ -72,10 +72,34 @@ extension SirosWallet {
             throw SirosError.wallet(message: "Not connected")
         }
         let token = try await tokens.ensureBackendToken()
-        // Stop a superseded attempt before it replaces the socket a newer one owns.
-        try advanceIssuanceStart(epoch, WalletState.FlowActive.stepEstablishingSession)
-        engine.forceReconnect(appToken: token.raw)
+        // The socket replacement is part of the epoch-checked commit: a
+        // superseded attempt must not close the socket a newer one owns.
+        try replaceEngineSocketForIssuance(epoch: epoch) {
+            engine.forceReconnect(appToken: token.raw)
+        }
         try await engine.awaitConnected()
+    }
+
+    /// Replace the engine socket (`reconnect`) as the epoch-checked commit of the
+    /// `establishing_session` step: validation and replacement are one critical
+    /// section with cancellation and admission, so a stale attempt can never
+    /// close a newer attempt's socket. The caller waits for the new connection
+    /// (`awaitConnected`) outside the lock.
+    func replaceEngineSocketForIssuance(epoch: Int, reconnect: () -> Void) throws {
+        try withoutActuallyEscaping(reconnect) {
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepEstablishingSession, commit: $0)
+        }
+    }
+
+    /// Send `flow_start` (`send`) as the epoch-checked commit of the
+    /// `starting_flow` step: a start cancelled before this point never reaches
+    /// the engine. Whatever `send` needs that takes `lock` (e.g.
+    /// `authorizationDetailsForActiveOffer()`) must be computed by the caller
+    /// beforehand; `send` itself must not take the wallet lock.
+    func dispatchIssuanceStart(epoch: Int, send: () -> Void) throws {
+        try withoutActuallyEscaping(send) {
+            try advanceIssuanceStart(epoch, WalletState.FlowActive.stepStartingFlow, commit: $0)
+        }
     }
 
     /// Failure path of a start. A current attempt clears the in-flight guards,

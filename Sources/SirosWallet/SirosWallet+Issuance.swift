@@ -743,11 +743,14 @@ extension SirosWallet {
             // Wallet attestation is engine-requested (`request_attestation`
             // sign request, answered in `handleSignRequest`) - nothing to
             // resolve or attach up front.
-            engine.startIssuance(
-                offer: Self.credentialOfferJson(for: offer),
-                redirectUri: config.redirectUri.isEmpty ? nil : config.redirectUri,
-                authorizationDetails: authorizationDetailsForActiveOffer()
-            )
+            let offerJson = Self.credentialOfferJson(for: offer)
+            let redirectUri = config.redirectUri.isEmpty ? nil : config.redirectUri
+            let details = authorizationDetailsForActiveOffer()
+            // The send is the epoch-checked commit: a cancel after the last
+            // check can no longer be followed by `flow_start`.
+            try dispatchIssuanceStart(epoch: epoch) {
+                engine.startIssuance(offer: offerJson, redirectUri: redirectUri, authorizationDetails: details)
+            }
         } catch {
             // A start failure here means the flow was never registered
             // server-side, so nothing will ever clear the guard via the
@@ -850,17 +853,16 @@ extension SirosWallet {
             // resolves the offer and the issuer's authorization server itself
             // and tells us the exact PoP audience/client_id, so there is no
             // second client-side fetch of the offer or metadata for it here.
+            let details = authorizationDetailsForActiveOffer()
             switch IssuanceStart.resolve(offerUri: offerUri) {
             case .offer(let offer):
-                engine.startIssuance(
-                    offer: offer,
-                    authorizationDetails: authorizationDetailsForActiveOffer()
-                )
+                try dispatchIssuanceStart(epoch: epoch) {
+                    engine.startIssuance(offer: offer, authorizationDetails: details)
+                }
             case .credentialOfferUri(let uri):
-                engine.startIssuance(
-                    credentialOfferUri: uri,
-                    authorizationDetails: authorizationDetailsForActiveOffer()
-                )
+                try dispatchIssuanceStart(epoch: epoch) {
+                    engine.startIssuance(credentialOfferUri: uri, authorizationDetails: details)
+                }
             }
         } catch {
             // See `startIssuanceByOffer`'s matching catch block.

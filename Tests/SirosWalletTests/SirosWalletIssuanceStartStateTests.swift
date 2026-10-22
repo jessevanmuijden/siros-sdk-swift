@@ -248,6 +248,52 @@ final class SirosWalletIssuanceStartStateTests: XCTestCase {
         _ = try wallet.admitIssuanceStart()
         XCTAssertThrowsError(try wallet.admitIssuanceStart())
     }
+
+    /// Order of effects as seen by a log: the parked thread's engine action and
+    /// the racer's cancel. With one critical section the action (inside it)
+    /// always completes before the racer's cancel can run.
+    private func engineActionVersusCancel(
+        _ action: @escaping (SirosWallet, Int, @escaping () -> Void) throws -> Void, window: String = "advance.afterCheck"
+    ) throws -> [String] {
+        let wallet = makeWallet()
+        let epoch = try wallet.admitIssuanceStart()
+        let log = NSLock(); var events: [String] = []
+        func record(_ e: String) { log.lock(); events.append(e); log.unlock() }
+        interleave(wallet, window: window, parked: {
+            try? action(wallet, epoch) { record("engine") }
+        }, racer: {
+            wallet.cancelCurrentFlow()
+            record("cancel")
+        })
+        return events
+    }
+
+    /// A cancel after the final epoch check must not be followed by `flow_start`.
+    func testFlowStartIsSentInsideTheEpochCheckedCommit() throws {
+        let events = try engineActionVersusCancel { wallet, epoch, send in
+            try wallet.dispatchIssuanceStart(epoch: epoch, send: send)
+        }
+        XCTAssertEqual(events, ["engine", "cancel"], "flow_start was sent after the cancel")
+    }
+
+    /// A stale attempt must not replace (close) the engine socket after a cancel.
+    func testTheSocketIsReplacedInsideTheEpochCheckedCommit() throws {
+        let events = try engineActionVersusCancel { wallet, epoch, reconnect in
+            try wallet.replaceEngineSocketForIssuance(epoch: epoch, reconnect: reconnect)
+        }
+        XCTAssertEqual(events, ["engine", "cancel"], "the socket was replaced after the cancel")
+    }
+
+    func testAStaleAttemptNeitherSendsNorReplacesTheSocket() throws {
+        let wallet = makeWallet()
+        let a = try wallet.admitIssuanceStart()
+        wallet.cancelCurrentFlow()
+        _ = try wallet.admitIssuanceStart()
+        var ran = 0
+        XCTAssertThrowsError(try wallet.dispatchIssuanceStart(epoch: a) { ran += 1 })
+        XCTAssertThrowsError(try wallet.replaceEngineSocketForIssuance(epoch: a) { ran += 1 })
+        XCTAssertEqual(ran, 0)
+    }
 }
 
 #endif
