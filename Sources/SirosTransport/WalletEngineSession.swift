@@ -89,7 +89,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// every automatic reconnect and when reconnecting gives up, before any new connection is made.
     public var onSocketReplaced: (() -> Void)?
     /// How many sockets this session has opened. A replacement is a socket opened while an earlier one existed.
-    private(set) var socketGeneration = 0
+    public private(set) var socketGeneration = 0
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 5
     private let baseReconnectDelayMs: UInt64 = 1000
@@ -479,7 +479,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
                 flowErrorContinuation.yield(msg)
             }
         case MessageTypes.signRequest:
-            if let msg = try? decoder.decode(SignRequestMessage.self, from: data) {
+            if var msg = try? decoder.decode(SignRequestMessage.self, from: data) {
+                msg.socketGeneration = socketGeneration
                 signRequestContinuation.yield(msg)
             }
         case MessageTypes.matchRequest:

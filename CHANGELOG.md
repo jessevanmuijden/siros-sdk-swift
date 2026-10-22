@@ -262,6 +262,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The JARM JWE header no longer sets `cty: JWT` (the plaintext is a JSON claims set). A malformed `verified_request`
   or `state` on a sign request is `INVALID_PARAMS` instead of being read as absent, which with `response_encryption`
   omitted would have answered a `direct_post.jwt` request with a plaintext `vp_token`.
+- **Blind issuance: buffered requests and replaying children.** Each WebSocket sign request carries the socket
+  generation it was received on (`SignRequestMessage.socketGeneration`, stamped by the session, not on the wire); a
+  `generate_proof` / `decrypt_credential_response` buffered across a same-object reconnect is dropped before it
+  allocates a key or replies. A request for a flow that already ended (its terminal cleanup ran first) is rejected too.
+  Cancelling a child whose answer is being replayed, or one that already completed, is a child cancel: the wallet's
+  parent-flow callback is not invoked.
 - **Blind issuance: a plain completion after an offered key is an error.** When the wallet offered a
   response-encryption key for a flow and its `flow_complete` / `wmp.flow.complete` does not say the response was
   encrypted to the wallet (`credential_response_encrypted: true`), the engine held the credentials: the completion is
@@ -287,6 +293,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
   kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
   only after a replacement was stored; tests now pin that.
+- **WMP child flows: completed children are remembered, and a replaying child is cancelled like any other.** A start
+  redelivered after the child's answer was sent (original send or replay) runs nothing. A parent ending while a replay
+  send is suspended releases the claimed child's route at once, and the child's cancellation marker lives until that
+  send finishes (not in the bounded ended-flow list), so a failing send is never requeued for a cancelled child.
 - **WMP child flows, further review follow-ups.** A child cancelled while its replay send is suspended is not requeued
   when that send fails; a second resume during a suspended replay that then fails triggers another drain; a redelivered
   start for a cancelled child does not run its handler again; a child start refused for good (its flow ended, or the
