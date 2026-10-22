@@ -65,6 +65,15 @@ extension SirosWallet {
         // sentinel on either client.
         let batchId = Int64(Date().timeIntervalSince1970 * 1000)
 
+        // A plain (not wallet-encrypted) completion carries each credential's value. One that lacks it is unreadable
+        // as a whole: refused before anything is stored or superseded, so a renewal never costs the user the
+        // credential it was replacing (and the issuer's other entries are not half-applied).
+        if msg.credentialResponseEncrypted != true,
+           let entries = msg.credentials, entries.contains(where: { ($0.credential ?? "").isEmpty }) {
+            await failIssuanceLocally(flowId: msg.flowId, message: "The issuer's credential did not arrive")
+            return
+        }
+
         let (oldBatchId, oldRenewedClaims) = await snapshotRenewalSourceBatch()
         let wasRenewal = oldBatchId != nil
 
@@ -109,7 +118,8 @@ extension SirosWallet {
             await deleteRenewalSourceBatch(oldBatchId)
         }
 
-        await captureRefreshTokenIfPresent(msg: msg, offer: offer, batchId: batchId)
+        // A refresh token belongs to a batch that exists: with nothing stored there is no batch to attach it to.
+        if storedCount > 0 { await captureRefreshTokenIfPresent(msg: msg, offer: offer, batchId: batchId) }
         await notifyRenewalAttributeDiffIfNeeded(wasRenewal: wasRenewal, oldClaims: oldRenewedClaims, batchId: batchId)
 
         // Terminal path for this issuance - see `resetIssuanceGuards()`.
