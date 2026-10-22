@@ -48,7 +48,14 @@ final class EngineSingleFlightTests: XCTestCase {
         var onResume: (@Sendable (FakeSocket) -> Void)?
         func resume() { onResume?(self) }
 
+        /// Widens the window between "decided to cancel" and "cancelled" for race tests.
+        var cancelDelayMs = 0
+        /// Called as cancel() begins, before the delay.
+        var onCancelStart: (@Sendable () -> Void)?
+
         func cancel(closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+            onCancelStart?()
+            if cancelDelayMs > 0 { Thread.sleep(forTimeInterval: Double(cancelDelayMs) / 1000) }
             lock.lock(); _running = false; _cancelled = true; let deferred = deferFailureOnCancel; lock.unlock()
             if !deferred { continuation.finish(throwing: Closed()) }
         }
@@ -81,11 +88,13 @@ final class EngineSingleFlightTests: XCTestCase {
         private let lock = NSLock()
         private var _all: [FakeSocket] = []
         var all: [FakeSocket] { lock.lock(); defer { lock.unlock() }; return _all }
+        var cancelDelayMs = 0
         private var _violations = 0
         /// Times a socket was started while another one was still open.
         var violations: Int { lock.lock(); defer { lock.unlock() }; return _violations }
         func make() -> FakeSocket {
             let s = FakeSocket()
+            s.cancelDelayMs = cancelDelayMs
             s.onResume = { [unowned self] started in
                 lock.lock(); defer { lock.unlock() }
                 _violations += _all.filter { $0 !== started && !$0.wasCancelled && $0.isRunning }.count
@@ -352,5 +361,72 @@ final class EngineSingleFlightTests: XCTestCase {
         await waitUntil("callback reconnected") { self.sockets.all.count == 2 }
         await settle()
         XCTAssertEqual(session.currentState, .connecting, "the callback's reconnect is the newer transition")
+    }
+
+    // MARK: - Copilot round 2: serialised teardown, no re-entrant interleaving
+
+    /// A parked token refresh whose cancellation handler runs `onCancel` on the session.
+    private func parkedRefreshSession(onCancel: @escaping @Sendable (WalletEngineSession) -> Void) async -> WalletEngineSession {
+        final class Box: @unchecked Sendable { var session: WalletEngineSession! }
+        let box = Box()
+        let session = makeSession()
+        box.session = session
+        let entered = expectation(description: "attempt parked in the token refresh")
+        session.connect(
+            appToken: "tok",
+            tokenProvider: {
+                await withTaskCancellationHandler {
+                    entered.fulfill()
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                } onCancel: {
+                    onCancel(box.session)
+                }
+                return "late"
+            }
+        )
+        await waitReceiving()
+        sockets.all[0].fail() // the backoff attempt parks in tokenProvider
+        await fulfillment(of: [entered], timeout: 5)
+        return session
+    }
+
+    func testAHandlerThatDisconnectsDuringAForcedReconnectLeavesNothingOpen() async {
+        let session = await parkedRefreshSession { $0.disconnect() }
+        let done = expectation(description: "forceReconnect returned")
+        DispatchQueue.global().async { session.forceReconnect(appToken: "tok2"); done.fulfill() }
+        await fulfillment(of: [done], timeout: 5)
+        await settle()
+        // The handler's disconnect ran as the NEXT operation: it cancelled the socket the
+        // forced reconnect installed, instead of nesting inside it and being undone by it.
+        XCTAssertTrue(sockets.all.allSatisfy { $0.wasCancelled }, "no socket is left open after the disconnect")
+        XCTAssertEqual(session.currentState, .disconnected)
+    }
+
+    func testAHandlerThatReconnectsDuringADisconnectIsTheNextOperation() async {
+        let session = await parkedRefreshSession { $0.forceReconnect(appToken: "again") }
+        let done = expectation(description: "disconnect returned")
+        DispatchQueue.global().async { session.disconnect(); done.fulfill() }
+        await fulfillment(of: [done], timeout: 5)
+        await settle()
+        XCTAssertEqual(sockets.all.filter { !$0.wasCancelled }.count, 1, "exactly the handler's socket is live")
+        XCTAssertEqual(session.currentState, .connecting)
+    }
+
+    func testAFailedSocketIsCancelledBeforeAConcurrentReplacementStarts() async {
+        let session = makeSession()
+        session.connect(appToken: "tok")
+        await waitReceiving()
+        let failed = sockets.all[0]
+        failed.failSends = true
+        failed.cancelDelayMs = 300 // the failed socket takes a while to actually close
+        let insideCancel = DispatchSemaphore(value: 0)
+        failed.onCancelStart = { insideCancel.signal() }
+        // A send fails on a thread of its own: socketEnded is now inside failed.cancel().
+        DispatchQueue.global().async { session.sendTrustResult(flowId: "f", trusted: true) }
+        XCTAssertEqual(insideCancel.wait(timeout: .now() + 5), .success)
+        // A replacement requested at that moment must wait for the teardown to finish.
+        session.forceReconnect(appToken: "t2")
+        XCTAssertEqual(sockets.violations, 0, "the replacement started while the failed socket was still open")
+        XCTAssertEqual(sockets.all.count, 2)
     }
 }

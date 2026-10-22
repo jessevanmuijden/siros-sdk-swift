@@ -73,11 +73,17 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// `disconnect`): predecessor teardown AND replacement startup of one call
     /// finish before the next call starts, so a concurrent connect can never
     /// resume its socket while a predecessor it superseded is still live.
-    /// Recursive because a cancellation handler or callback fired from inside
-    /// an operation may call back into the session on the same thread. Always
-    /// taken BEFORE `connLock`; `connLock` itself is never held across a
+    /// NOT recursive, on purpose: user code (a token provider's cancellation
+    /// handler, `onTokenRejected`, a send completion) must never run inside it,
+    /// because a re-entrant `forceReconnect`/`disconnect` interleaving with the
+    /// outer operation would leave a socket open after a disconnect, or a
+    /// disconnect that never cancels the socket installed under it. So inside it
+    /// only socket swaps and `EngineSocket.cancel`/`resume` happen; every Task
+    /// cancel (which can run a handler synchronously) and every send happens
+    /// AFTER it is released, where a re-entrant call is simply the next
+    /// operation. Taken BEFORE `connLock`; `connLock` is never held across a
     /// cancel() or a callback.
-    private let lifecycleLock = NSRecursiveLock()
+    private let lifecycleLock = NSLock()
     private var epoch = 0
     /// The one pending backoff-then-connect attempt; any connect replaces it.
     private var pendingReconnect: Task<Void, Never>?
@@ -321,6 +327,18 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         doConnect(appToken: appToken)
     }
 
+    private func urlRequest() -> URLRequest? {
+        let wsUrl = baseUrl
+            .replacingOccurrences(of: "https://", with: "wss://")
+            .replacingOccurrences(of: "http://", with: "ws://")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            + "/api/v2/wallet?tenant_id=\(tenantId)"
+        guard let url = URL(string: wsUrl) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("wmp.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        return request
+    }
+
     /// Opens THE live socket (see `epoch`): the previous socket and any pending
     /// backoff attempt are superseded, then cancelled, so at most one socket
     /// is ever open.
@@ -328,26 +346,29 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     ///   epoch it was scheduled for is still current; one that was superseded
     ///   meanwhile (by `forceReconnect`, `disconnect`, another connect) does nothing.
     private func doConnect(appToken: String, onlyIfEpoch: Int? = nil) {
-        let wsUrl = baseUrl
-            .replacingOccurrences(of: "https://", with: "wss://")
-            .replacingOccurrences(of: "http://", with: "ws://")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            + "/api/v2/wallet?tenant_id=\(tenantId)"
-
-        guard let url = URL(string: wsUrl) else {
+        guard let request = urlRequest() else {
             setState(.failed)
             return
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("wmp.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        lifecycleLock.lock()
+        let after = installSocketLocked(request: request, appToken: appToken, onlyIfEpoch: onlyIfEpoch)
+        lifecycleLock.unlock()
+        after?()
+    }
 
-        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
+    /// The locked half of `doConnect`; `lifecycleLock` must be held. Supersedes
+    /// the previous socket and the pending attempt, swaps in the new socket,
+    /// cancels the predecessor and resumes the replacement.
+    /// - Returns: what must run AFTER `lifecycleLock` is released (cancelling the
+    ///   pending attempt, which can run a handler; the handshake and the loops),
+    ///   or nil when a superseded attempt did nothing.
+    private func installSocketLocked(request: URLRequest, appToken: String, onlyIfEpoch: Int?) -> (() -> Void)? {
         connLock.lock()
         if let onlyIfEpoch, onlyIfEpoch != epoch {
             connLock.unlock()
             logWarning("a superseded reconnect attempt did nothing")
-            return
+            return nil
         }
         epoch += 1
         let myEpoch = epoch
@@ -358,26 +379,30 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         webSocketTask = socket
         connLock.unlock()
 
-        // Outside connLock: a cancellation handler may call back into the session.
         // The epoch was bumped above, so the failure the previous socket's cancel
-        // raises is recognised as stale.
-        pending?.cancel()
+        // raises is recognised as stale. Predecessor teardown and replacement start
+        // are one step under lifecycleLock: the next operation sees both done.
         previous?.cancel(closeCode: .goingAway, reason: nil)
         socket.resume()
 
-        // Send handshake
-        let handshake = HandshakeMessage(appToken: appToken)
-        if let data = try? encoder.encode(handshake),
-           let text = String(data: data, encoding: .utf8) {
-            socket.sendText(text) { [weak self] error in
-                if error != nil {
-                    self?.socketEnded(epoch: myEpoch)
+        return { [self] in
+            // Outside every lock: a cancellation handler may call back into the session.
+            pending?.cancel()
+
+            // Send handshake
+            let handshake = HandshakeMessage(appToken: appToken)
+            if let data = try? encoder.encode(handshake),
+               let text = String(data: data, encoding: .utf8) {
+                socket.sendText(text) { [weak self] error in
+                    if error != nil {
+                        self?.socketEnded(epoch: myEpoch)
+                    }
                 }
             }
-        }
 
-        startReceiveLoop(socket, epoch: myEpoch)
-        startPingLoop(socket, epoch: myEpoch)
+            startReceiveLoop(socket, epoch: myEpoch)
+            startPingLoop(socket, epoch: myEpoch)
+        }
     }
 
     /// Whether `e` is still the epoch allowed to act.
@@ -460,9 +485,14 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// replaced socket raises from its own `cancel()`, or a second callback
     /// for a socket that already ended, finds a newer epoch and does nothing.
     private func socketEnded(epoch e: Int) {
+        // Through lifecycleLock like every other teardown: the failed socket is
+        // cancelled before a concurrent connect()/forceReconnect() can start its
+        // replacement.
+        lifecycleLock.lock()
         connLock.lock()
         guard epoch == e else {
             connLock.unlock()
+            lifecycleLock.unlock()
             return
         }
         // Not a usable socket any more: isConnected/send() must not claim it during the backoff.
@@ -473,9 +503,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         connLock.unlock()
         // A send or handshake error can arrive while its receive is still pending:
         // cancel it so neither it nor its receive loop outlives the replacement.
-        // Outside connLock; its callbacks are stale (the epoch moved on).
-        replaced?.cancel()
+        // Its callbacks are stale (the epoch moved on).
         failed?.cancel(closeCode: .goingAway, reason: nil)
+        lifecycleLock.unlock()
+        replaced?.cancel()
     }
 
     /// Schedules the one backoff attempt. Called with `connLock` held, by
@@ -917,7 +948,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         // Supersede first (epoch), then cancel: the failure the old socket's
         // cancel raises is then stale, and a pending backoff attempt is replaced
         // rather than added to.
-        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
+        lifecycleLock.lock()
         connLock.lock()
         epoch += 1
         let pending = pendingReconnect
@@ -925,13 +956,24 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         let old = webSocketTask
         webSocketTask = nil
         connLock.unlock()
-        pending?.cancel()
         old?.cancel(closeCode: .goingAway, reason: nil)
         sessionId = nil
         lastAppToken = appToken
         reconnectAttempts = 0
         setState(.connecting)
-        doConnect(appToken: appToken)
+        // Teardown and the replacement are ONE operation: nothing can run between them.
+        var after: (() -> Void)?
+        if let request = urlRequest() {
+            after = installSocketLocked(request: request, appToken: appToken, onlyIfEpoch: nil)
+        } else {
+            setState(.failed)
+        }
+        lifecycleLock.unlock()
+        // After the lock: a cancellation handler that disconnects or reconnects
+        // is the NEXT operation, not a nested one. (The epoch already makes the
+        // cancelled attempt inert.)
+        pending?.cancel()
+        after?()
     }
 
     /// Resume an OID4VCI credential issuance flow after an OAuth authorization
@@ -991,7 +1033,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         lastAppToken = nil
         tokenProvider = nil
         onTokenRejected = nil
-        lifecycleLock.lock(); defer { lifecycleLock.unlock() }
+        lifecycleLock.lock()
         connLock.lock()
         epoch += 1
         let pending = pendingReconnect
@@ -999,10 +1041,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         let old = webSocketTask
         webSocketTask = nil
         connLock.unlock()
-        pending?.cancel()
         old?.cancel(closeCode: .normalClosure, reason: "client disconnect".data(using: .utf8))
         sessionId = nil
         setState(.disconnected)
+        lifecycleLock.unlock()
         messagesContinuation.finish()
         flowProgressContinuation.finish()
         flowCompleteContinuation.finish()
@@ -1011,6 +1053,9 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         matchRequestContinuation.finish()
         pushContinuation.finish()
         notificationAckContinuation.finish()
+        // Last, and after the lock (see lifecycleLock): a handler that reconnects
+        // from here is the next operation, not one nested inside this disconnect.
+        pending?.cancel()
     }
 
     private func send<T: Encodable>(_ message: T) {
