@@ -137,6 +137,30 @@ final class TrustDecisionCacheTests: XCTestCase {
         XCTAssertEqual(cache.size, 1, "the leader's decision was still cached")
     }
 
+    func testALeaderWhoseEvaluatorIgnoresCancellationStoresNothingAndFollowersAskAgain() async throws {
+        let (cache, _) = makeCache()
+        let entered = expectation(description: "leader started")
+        let gate = AsyncStream<Void>.makeStream()
+        let calls = Counter()
+        let leader = Task {
+            try await cache.getOrEvaluate(key: "k") {
+                calls.bump()
+                entered.fulfill()
+                for await _ in gate.stream { break } // returns normally even though the task was cancelled
+                return self.allow()
+            }
+        }
+        await fulfillment(of: [entered], timeout: 5)
+        let follower = Task { try await cache.getOrEvaluate(key: "k") { calls.bump(); return self.allow() } }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        leader.cancel()
+        gate.continuation.yield()
+        do { _ = try await leader.value; XCTFail("a cancelled leader must not return a decision") } catch { XCTAssertTrue(error is CancellationError) }
+        let result = try await follower.value
+        XCTAssertEqual(result["decision"] as? Bool, true)
+        XCTAssertEqual(calls.n, 2, "the follower evaluated for itself instead of inheriting the cancelled leader's answer")
+    }
+
     func testACancelledCallerDoesNotReceiveACachedDecisionEither() async throws {
         let (cache, _) = makeCache()
         _ = try await cache.getOrEvaluate(key: "k") { self.allow() }

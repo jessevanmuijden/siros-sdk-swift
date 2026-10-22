@@ -190,6 +190,9 @@ final class TrustDecisionCache: @unchecked Sendable {
     ) async throws -> [String: Any] {
         do {
             let body = try await evaluate()
+            // Cancellation is cooperative: an evaluator may return normally after its task
+            // was cancelled. That answer is not stored and not handed to followers.
+            try Task.checkCancellation()
             let response = Response(body)
             locked {
                 if inFlight[key] === flight { inFlight[key] = nil }
