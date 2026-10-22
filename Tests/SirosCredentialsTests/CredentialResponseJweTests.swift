@@ -22,7 +22,7 @@ final class CredentialResponseJweTests: XCTestCase {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "credential-response-jwe-vectors", withExtension: "json"))
         let raw = try Data(contentsOf: url)
         // Pinned: the file is generated, never edited (see its PROVENANCE).
-        XCTAssertEqual(sha256Hex(raw), "824c1ca1dcf53405daaebbeab3da864298a3bdba6d05ceb3f72b5bec3f4e8b09")
+        XCTAssertEqual(sha256Hex(raw), "51da911d44f3644e5f3b96dd81042c35eae0aa7f0fbb31ccece94c2cba61c104")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
         let d = try XCTUnwrap((json["recipient_d"] as? String).flatMap(CredentialResponseJwe.decode))
         return Vectors(
@@ -40,13 +40,25 @@ final class CredentialResponseJweTests: XCTestCase {
 
     func testEveryAlgAndEncCombinationOpensToThePlaintext() throws {
         let v = try vectors()
-        XCTAssertEqual(v.cases.count, 12)
+        XCTAssertEqual(v.cases.count, 16)
         for (name, jwe) in v.cases {
             let parts = name.split(separator: "|").map(String.init)
             let plaintext = try CredentialResponseJwe.decrypt(
                 jwe, recipient: v.recipient, expected: CredentialResponseEncryptionParams(alg: parts[0], enc: parts[1])
             )
             XCTAssertEqual(String(decoding: plaintext, as: UTF8.self), v.plaintext, name)
+        }
+    }
+
+    /// ECDH-ES+A192KW: a 24-byte key-encryption key from the Concat KDF, then RFC 3394 unwrap; go-jose vectors.
+    func testEcdhEsA192KwOpensWithEveryContentEncryption() throws {
+        let v = try vectors()
+        for enc in CredentialResponseEncryptionParams.supportedEncs {
+            let jwe = try XCTUnwrap(v.cases["ECDH-ES+A192KW|\(enc)"], enc)
+            let plaintext = try CredentialResponseJwe.decrypt(
+                jwe, recipient: v.recipient, expected: CredentialResponseEncryptionParams(alg: "ECDH-ES+A192KW", enc: enc)
+            )
+            XCTAssertEqual(String(decoding: plaintext, as: UTF8.self), v.plaintext, enc)
         }
     }
 

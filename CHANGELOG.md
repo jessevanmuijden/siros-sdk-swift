@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
+  Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1
