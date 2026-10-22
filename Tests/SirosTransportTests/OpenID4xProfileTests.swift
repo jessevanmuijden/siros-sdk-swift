@@ -148,23 +148,25 @@ final class OpenID4xProfileTests: XCTestCase {
         ))
         profile.initialize(ctx: ctx)
 
-        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "sign_request", payload: .object_([
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c1", params: [
+            "parent_flow_id": .string("f"),
             "action": .string("generate_proof"), "nonce": .string("n"), "audience": .string("https://i.example"),
             "credential_response_encryption": .object_([
                 "alg": .string("ECDH-ES+A256KW"), "enc": .string("A256GCM"), "required": .bool(true),
             ]),
-        ])))
+        ]))
         XCTAssertEqual(seen[0].credentialResponseEncryption, CredentialResponseEncryptionRequest(alg: "ECDH-ES+A256KW", enc: "A256GCM", required: true))
-        let proofReply = ctx.notifications[0].params
+        let proofReply = ctx.notifications[0].params?["result"]?.objectValue
         XCTAssertEqual(proofReply?["credential_response_encryption_jwk"]?.objectValue?["alg"], .string("ECDH-ES+A256KW"))
         XCTAssertEqual(proofReply?["credential_response_encryption_jwk"]?.objectValue?["use"], .string("enc"))
 
-        await profile.handleProgress(params: FlowProgressParams(flowId: "f", step: "sign_request", payload: .object_([
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c2", params: [
+            "parent_flow_id": .string("f"),
             "action": .string("decrypt_credential_response"), "jwe": .string("a.b.c.d.e"), "deferred": .bool(true),
-        ])))
+        ]))
         XCTAssertEqual(seen[1].jwe, "a.b.c.d.e")
         XCTAssertEqual(seen[1].deferred, true)
-        let decryptReply = ctx.notifications[1].params
+        let decryptReply = ctx.notifications[1].params?["result"]?.objectValue
         XCTAssertEqual(decryptReply?["transaction_id"], .string("tx-1"))
         XCTAssertEqual(decryptReply?["interval"], .int(5))
         XCTAssertNil(decryptReply?["credentials"])
