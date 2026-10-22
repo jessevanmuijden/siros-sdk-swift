@@ -5,15 +5,17 @@ import SirosCredentials
 #if canImport(CryptoKit)
 import CryptoKit
 
-/// Transaction data item for TS12 payment SCA.
+/// Transaction data item of the pre-TS12 API.
 ///
-/// Each item represents one entry from the `transaction_data` array in an
-/// OID4VP authorization request. The `rawJson` is the canonical JSON
-/// serialization used for hashing into `transaction_data_hashes`.
+/// Kept only so existing callers still compile. The signing overload that took
+/// it did not implement EC TS12 (it hashed a re-serialised form), so it now
+/// refuses a non-empty list; the wallet presents transactions through
+/// ``SirosWallet`` once ``SirosWallet/transactionDataEnabled`` is on.
+@available(*, deprecated, message: "Use SirosWallet's transaction_data handling (SirosWallet.transactionDataEnabled and transactionConsentHandler).")
 public struct TransactionDataItem: Sendable {
-    /// Transaction type (e.g. "payment", "login_risk", "account_access", "e_mandate").
+    /// Transaction type.
     public let type: String
-    /// Canonical JSON serialization of this transaction data item.
+    /// Serialization of this transaction data item.
     public let rawJson: String
 
     public init(type: String, rawJson: String) {
@@ -151,6 +153,26 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         )
     }
 
+    /// See `KeystoreManager.unlock(prfOutput:encryptedContainer:hkdfSalt:hkdfInfo:prfSalt:)`.
+    /// Forwarded straight to `credentialsKeystore`, same as the four-parameter
+    /// overload above - `prfSalt` only matters to the `JweKeystore` that
+    /// actually owns the PRF-protected container.
+    public func unlock(
+        prfOutput: Data,
+        encryptedContainer: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        prfSalt: Data
+    ) async throws {
+        try await credentialsKeystore.unlock(
+            prfOutput: prfOutput,
+            encryptedContainer: encryptedContainer,
+            hkdfSalt: hkdfSalt,
+            hkdfInfo: hkdfInfo,
+            prfSalt: prfSalt
+        )
+    }
+
     public func lock() {
         credentialsKeystore.lock()
     }
@@ -182,6 +204,16 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// See `JweKeystore.setCredentialRefreshToken`.
     public func setCredentialRefreshToken(batchId: Int64, entry: CredentialRefreshTokenEntry) async {
         await credentialsKeystore.setCredentialRefreshToken(batchId: batchId, entry: entry)
+    }
+
+    /// See `JweKeystore.credentialMetadata(id:)`.
+    public func credentialMetadata(id: Int64) async -> [[String: Any]]? {
+        await credentialsKeystore.credentialMetadata(id: id)
+    }
+
+    /// See `JweKeystore.setCredentialMetadata(id:_:)`.
+    public func setCredentialMetadata(id: Int64, _ entries: [[String: Any]]?) async throws {
+        try await credentialsKeystore.setCredentialMetadata(id: id, entries)
     }
 
     /// See `JweKeystore.removeCredentialRefreshToken`.
@@ -400,7 +432,10 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         )
     }
 
-    /// Extended VP token signing with transaction data (Phase I: TS12 payment SCA).
+    /// The pre-TS12 overload. A list of items is refused (it never produced
+    /// TS12-conformant claims); `nil` or an empty list signs as a plain presentation.
+    @available(*, deprecated, message: "Use the overload taking a TransactionDataBinding, built by the SDK.")
+    @_disfavoredOverload
     public func signVpToken(
         credential: String,
         disclosedClaims: [String]?,
@@ -408,6 +443,25 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         audience: String,
         transactionData: [TransactionDataItem]?,
         kid: String? = nil
+    ) async throws -> String {
+        guard transactionData?.isEmpty ?? true else {
+            throw KeystoreError.invalidParameter("transaction data items are no longer supported by this API; the wallet handles transaction_data itself")
+        }
+        return try await signVpToken(
+            credential: credential, disclosedClaims: disclosedClaims, nonce: nonce, audience: audience,
+            transactionData: nil as TransactionDataBinding?, kid: kid
+        )
+    }
+
+    /// VP token signing with EC TS12 payment-SCA claims (see
+    /// ``KeystoreManager/signVpToken(credential:disclosedClaims:nonce:audience:transactionData:kid:)``).
+    public func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
+        kid: String?
     ) async throws -> String {
         try checkUnlocked()
         let keys = try await signer.listKeys()
@@ -435,6 +489,12 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
             throw KeystoreError.keyNotFound("Credential's cnf does not resolve to a usable holder-key binding")
         }
         let key = try await resolveSigningKey(keys, kid: effectiveKid)
+        // The factors in the binding were established for the key the CALLER named. The credential's
+        // `cnf` decides which key signs, so if they differ the claim would describe a different key
+        // than the one that signs: refuse rather than assert possession of the wrong one.
+        if transactionData != nil, key.keyId != kid {
+            throw KeystoreError.invalidParameter("the key the credential is bound to is not the key the authentication factors were established for")
+        }
 
         // Split SD-JWT: IssuerJWT~disclosure1~disclosure2~...~
         let parts = credential.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
@@ -496,24 +556,29 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
             "sd_hash": sdHash,
         ]
 
-        // Include amr from WSCD security properties (E7: TS12 compliance)
+        let baseClaims = kbClaimsDict
+        if let binding = transactionData {
+            // EC TS12 (section 3.6): hashes over the verifier's raw strings, a string algorithm,
+            // a fresh jti, the request's response_mode and the two-category amr. The factors are
+            // those the signing operation itself reports (see `Signer.signForSca`): the claim
+            // set is built from them inside the sign and the token is refused unless the sign
+            // applied exactly what it claims. This replaces the RFC 8176 `amr` of a plain
+            // presentation: TS12 requires the object form.
+            let header = kbHeader
+            let outcome = try await signer.signForSca(keyId: key.keyId) { factors in
+                var claims = baseClaims
+                for (name, value) in try binding.kbJwtClaims(factors: factors) { claims[name] = value }
+                return Data("\(header).\(JwtHelpers.jsonBase64Url(claims))".utf8)
+            }
+            guard let signingInput = String(data: outcome.signedData, encoding: .utf8) else {
+                throw KeystoreError.cryptoError("the signed KB-JWT input is not text")
+            }
+            return sdJwtPresentation + "\(signingInput).\(EncryptedContainer.base64UrlEncode(outcome.signature))"
+        }
         if let props = try? await signer.securityProperties(keyId: key.keyId),
            !props.amr.isEmpty {
+            // Include amr from WSCD security properties (E7)
             kbClaimsDict["amr"] = props.amr
-        }
-
-        // Phase I: Transaction data hashes (TS12 payment SCA)
-        if let txData = transactionData, !txData.isEmpty {
-            let hashes = try txData.map { item -> String in
-                guard let jsonData = item.rawJson.data(using: .utf8) else {
-                    throw KeystoreError.cryptoError("Failed to encode transaction data as UTF-8")
-                }
-                let digest = SHA256.hash(data: jsonData)
-                return EncryptedContainer.base64UrlEncode(Data(digest))
-            }
-            kbClaimsDict["transaction_data_hashes"] = hashes
-            kbClaimsDict["transaction_data_hashes_alg"] = "sha-256"
-            kbClaimsDict["jti"] = UUID().uuidString.lowercased()
         }
 
         let kbClaims = JwtHelpers.jsonBase64Url(kbClaimsDict)
@@ -602,6 +667,8 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         )
     }
 
+    public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { credentialsKeystore.unsupportedSchemaVersion }
+
     public func exportEncryptedContainer() async throws -> Data {
         // WSCD signing keys themselves are not exportable as a JWE container
         // - they live in the hardware/remote HSM - but this adapter's
@@ -618,7 +685,7 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         Task.detached { [signer, box] in
             let signerKeys = (try? await signer.listKeys()) ?? []
             box.pointee = signerKeys.map {
-                KeyInfo(keyId: $0.keyId, algorithm: $0.algorithm)
+                KeyInfo(keyId: $0.keyId, algorithm: $0.algorithm, pluginId: $0.pluginId)
             }
             semaphore.signal()
         }
@@ -657,6 +724,28 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// Return the security properties for a key, or nil if unavailable.
     public func securityProperties(keyId: String) async -> SignerSecurityProperties? {
         return try? await signer.securityProperties(keyId: keyId)
+    }
+
+    /// Asked by the wallet before the user is shown a transaction. A failure to
+    /// obtain the answer is "cannot" (fail closed).
+    public func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability {
+        do {
+            // The manager's probe can answer positively for a key it does not hold (it may route an unknown id to
+            // the default plugin), which would fail only after consent: the key must exist, under this exact id,
+            // which is also what the SCA sign requires.
+            guard try await signer.listKeys().contains(where: { $0.keyId == keyId }) else {
+                return .cannot("the signing key is not held by this keystore")
+            }
+            let capability = try await signer.authenticationCapability(keyId: keyId)
+            // A factor only the host could supply is not usable: an SCA sign requires a fresh
+            // authentication, which the manager refuses for the plugins that need one.
+            guard capability.canReachTwoCategories, !capability.requiresHostVerifiedFactor else {
+                return .cannot(capability.reason ?? "the key cannot reach two authentication categories")
+            }
+            return capability
+        } catch {
+            return .cannot("the key's authentication capability could not be determined")
+        }
     }
 
     // MARK: - Credential storage (PRF-protected via credentialsKeystore)

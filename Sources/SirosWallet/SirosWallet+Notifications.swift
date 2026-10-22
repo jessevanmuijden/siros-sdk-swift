@@ -35,6 +35,8 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        cancelTransactionTasks(flowId: msg.flowId)
+        lock.lock(); legacyFlowSnapshots.removeValue(forKey: msg.flowId); lock.unlock()
         lock.lock()
         let offer = activeOffer
         let vctm = activeVctm
@@ -287,6 +289,7 @@ extension SirosWallet {
         let existing = await credentialStore.getAll()
         for cred in existing where cred.batchId == oldBatchId {
             await credentialStore.delete(cred.id)
+            await removeBbsHolderStateIfAny(credentialId: cred.id)
         }
         await removeCredentialRefreshToken(batchId: oldBatchId)
     }
@@ -304,6 +307,12 @@ extension SirosWallet {
         attestedKeyIds: [String]?,
         batchId: Int64
     ) async -> (stored: Bool, failureReason: String?) {
+        // A container this build must not rewrite is read-only. Storing would be
+        // silently discarded (`CredentialStore.save` does not throw), and the
+        // issuer would then be told the credential was accepted.
+        if let refusal = keystore.unsupportedSchemaVersion {
+            return (false, refusal.localizedDescription)
+        }
         if cred.format == "mso_mdoc" {
             // mso_mdoc credentials are base64url-encoded CBOR (a
             // DeviceResponse-shaped envelope, per wallet-frontend#191), never

@@ -40,6 +40,9 @@ public struct TransactionDataError: Error, Sendable, Equatable, CustomStringConv
     /// Developer-facing detail; never shown verbatim to the user and never
     /// carries payload contents.
     public let detail: String
+    /// Set by the service for a refusal it already wrote to the transaction
+    /// log, so a caller does not log it a second time.
+    public var alreadyLogged = false
 
     public init(_ reason: Reason, detail: String = "") {
         self.reason = reason

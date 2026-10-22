@@ -1,0 +1,137 @@
+{
+  "id": "multi-passkey-v3-001",
+  "description": "Multiple passkeys with correct PRF entry selection by credentialId",
+  "version": "3",
+  "sections": [
+    "4.3",
+    "5",
+    "6"
+  ],
+  "tags": [
+    "multi-passkey",
+    "prf-selection"
+  ],
+  "purpose": "Tests that unlock() selects correct PRF entry by credentialId match, not external state",
+  "inputs": {
+    "credentialIds": [
+      "first-credential-id-for-testing",
+      "second-credential-id-for-testing",
+      "third-credential-id-for-testing"
+    ],
+    "prfOutputs": [
+      "Kg5FgVqSCrFaYnIHjUZMkqMKXpXMVPfmBhqvAJGNxIk",
+      "Vj9KhWrTDsGbZoJIkVaNlrNLYqYNWQgnCirwBKHOyJl",
+      "Xk0LiXsUEtHcApKJlWbOmsMZrZOXRhhoFjsxCLIPzKm"
+    ],
+    "hkdfSalts": [
+      "c2FsdC1mb3ItZmlyc3QtY3JlZGVudGlhbC1pZC10ZXN0",
+      "c2FsdC1mb3Itc2Vjb25kLWNyZWRlbnRpYWwtaWQtdGVz",
+      "c2FsdC1mb3ItdGhpcmQtY3JlZGVudGlhbC1pZC10ZXN0"
+    ],
+    "hkdfInfo": "eDiplomas PRF",
+    "plaintextState": {
+      "lastEventHash": "sha256:multi-passkey-event-hash",
+      "events": [
+        {
+          "type": "alter_settings",
+          "schemaVersion": 3,
+          "eventId": 1,
+          "parentHash": "sha256:multi-passkey-event-hash",
+          "timestampSeconds": 1750000000,
+          "settings": {
+            "openidRefreshTokenMaxAgeInSeconds": "0"
+          }
+        }
+      ],
+      "S": {
+        "schemaVersion": 3,
+        "credentials": [
+          {
+            "credentialId": 1,
+            "format": "msomdoc",
+            "data": "<test-vector-placeholder-credential-payload-1>",
+            "kid": "key-001",
+            "instanceId": 0,
+            "batchId": 1,
+            "credentialIssuerIdentifier": "https://issuer1.example.com",
+            "credentialConfigurationId": "eu.europa.ec.eudi.pid.1"
+          },
+          {
+            "credentialId": 2,
+            "format": "msomdoc",
+            "data": "<test-vector-placeholder-credential-payload-2>",
+            "kid": "key-002",
+            "instanceId": 0,
+            "batchId": 2,
+            "credentialIssuerIdentifier": "https://issuer2.example.com",
+            "credentialConfigurationId": "eu.europa.ec.eudi.pid.1"
+          },
+          {
+            "credentialId": 3,
+            "format": "msomdoc",
+            "data": "<test-vector-placeholder-credential-payload-3>",
+            "kid": "key-003",
+            "instanceId": 0,
+            "batchId": 3,
+            "credentialIssuerIdentifier": "https://issuer3.example.com",
+            "credentialConfigurationId": "eu.europa.ec.eudi.pid.1"
+          }
+        ],
+        "keypairs": [
+          {
+            "id": "kp-001",
+            "did": "did:key:...001"
+          },
+          {
+            "id": "kp-002",
+            "did": "did:key:...002"
+          },
+          {
+            "id": "kp-003",
+            "did": "did:key:...003"
+          }
+        ],
+        "presentations": [],
+        "settings": {
+          "openidRefreshTokenMaxAgeInSeconds": "0"
+        },
+        "credentialIssuanceSessions": []
+      }
+    }
+  },
+  "testScenarios": {
+    "scenario-1": {
+      "description": "Unlock with second credential",
+      "useCredentialId": "second-credential-id-for-testing",
+      "expectedPrfEntry": 1,
+      "expectedDerivedKey": "from-second-prf-output-and-salt"
+    },
+    "scenario-2": {
+      "description": "Unlock with third credential",
+      "useCredentialId": "third-credential-id-for-testing",
+      "expectedPrfEntry": 2,
+      "expectedDerivedKey": "from-third-prf-output-and-salt"
+    },
+    "scenario-3": {
+      "description": "Re-encrypt with modified state",
+      "modifyCredential": "cred-002",
+      "field": "credentialIssuerIdentifier",
+      "newValue": "https://issuer2-updated.example.com",
+      "expectRoundTrip": "all-three-credentials-preserved"
+    }
+  },
+  "validations": {
+    "prfSelection": [
+      "unlock() must find PRF entry where credentialId matches provided credential",
+      "must NOT use external credential index or order assumption",
+      "must read hkdfSalt and hkdfInfo from selected entry"
+    ],
+    "statePreservation": [
+      "all three credentials preserved",
+      "all three keypairs preserved",
+      "events preserved as authored (one alter_settings event, schemaVersion 3)",
+      "lastEventHash unchanged"
+    ],
+    "roundTrip": "decrypt -> migrate -> re-encrypt: a version 4 writer changes only S.schemaVersion 3 to 4 and nothing else (see expected.roundTripState of the vector with the same state)"
+  }
+}

@@ -23,6 +23,43 @@ final class JweKeystoreTests: XCTestCase {
         XCTAssertEqual(keystore.listKeys().count, 0)
     }
 
+    /// Regression test for the PRF recovery fix: on first-time setup, the
+    /// container's own `PrfKeyInfo.prfSalt` must be the REAL WebAuthn PRF
+    /// extension salt that produced `prfOutput` - not a disconnected random
+    /// value generated here - or a later cache-miss login (local account
+    /// cache wiped, passkey itself still fine) has nothing to recover from
+    /// `privateData`. See `SirosWallet.recoverPrfFromPrivateData`.
+    func testUnlockWithEmptyContainerThreadsRealPrfSaltIntoNewContainer() async throws {
+        let keystore = JweKeystore()
+        let realPrfSalt = Data((0..<32).map { UInt8($0 + 0x40) })
+
+        try await keystore.unlock(
+            prfOutput: fakePrfOutput,
+            encryptedContainer: Data(),
+            hkdfSalt: hkdfSalt,
+            hkdfInfo: hkdfInfo,
+            prfSalt: realPrfSalt
+        )
+        keystore.setCredentialId(Data("cred-1".utf8))
+
+        let exported = try await keystore.exportEncryptedContainer()
+        let container = try EncryptedContainer.parse(exported)
+        XCTAssertEqual(container.prfKeys.first?.prfSalt, realPrfSalt, "must round-trip the real salt, not a random one")
+        XCTAssertEqual(container.prfKeys.first?.credentialId, Data("cred-1".utf8))
+    }
+
+    /// The four-parameter overload (no caller-supplied salt) must keep
+    /// generating its own random one - unchanged behavior for callers with no
+    /// real salt to offer (e.g. an unlock-after-resume).
+    func testUnlockWithEmptyContainerWithoutPrfSaltStillGeneratesOne() async throws {
+        let keystore = JweKeystore()
+        try await keystore.unlock(prfOutput: fakePrfOutput, encryptedContainer: Data(), hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)
+
+        let exported = try await keystore.exportEncryptedContainer()
+        let container = try EncryptedContainer.parse(exported)
+        XCTAssertEqual(container.prfKeys.first?.prfSalt.count, 32)
+    }
+
     func testLockClearsKeys() async throws {
         let keystore = JweKeystore()
         try await keystore.unlock(prfOutput: fakePrfOutput, encryptedContainer: Data(), hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)

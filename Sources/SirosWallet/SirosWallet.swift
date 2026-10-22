@@ -60,10 +60,25 @@ public final class SirosWallet: @unchecked Sendable {
     var _state: WalletState = .disconnected()
     var stateContinuations: [String: AsyncStream<WalletState>.Continuation] = [:]
 
-    // EC TS12 payment SCA (`transaction_data`): state here, behaviour in
-    // `SirosWallet+TransactionDataFlag.swift`.
+    // EC TS12 payment SCA (`transaction_data`): state here, behaviour in `SirosWallet+TransactionData*.swift`.
     var transactionDataEnabledValue: Bool
-    var transactionConsentHandlerRegistered: Bool = false
+    var transactionConsentHandlerStorage: (any TransactionConsentHandler)?
+    var transactionLogStoreStorage: (any TransactionLogStore)?
+    // Enablement records per flow / WMP session, consent flows in progress, log-store bookkeeping.
+    var legacyFlowSnapshotQueue: [(effective: Bool, at: Date)] = []
+    var legacyFlowSnapshots: [String: Bool] = [:]
+    var wmpSessionSnapshot = false
+    var transactionTasks: [UUID: (flowId: String, cancel: @Sendable () -> Void)] = [:]
+    var transactionLogStoreIsDefault = false
+    var transactionLogGeneration = 0
+    var transactionTaskEpoch = 0
+    var flowEndSeq: [String: Int] = [:]
+    let keystorePersistMutex = AsyncMutex()
+    var transactionDataLocaleStorage: String = Locale.preferredLanguages.first ?? "en"
+    var transactionDataConsentTimeout: TimeInterval = TransactionDataService.defaultConsentTimeout
+    // Test hooks: how referenced documents and type metadata are fetched.
+    var transactionResourceGet: @Sendable (URL, Int) async -> Data? = SirosWallet.secureResourceGet
+    lazy var transactionMetadataFetch: @Sendable (String, String?, Int) async -> String? = { [weak self] v, p, l in await self?.fetchTypeMetadata(vct: v, expectedIntegrity: p, maxBytes: l) }
 
     /// Current wallet state (thread-safe read).
     public var state: WalletState {
@@ -400,6 +415,10 @@ public final class SirosWallet: @unchecked Sendable {
 
     let credentialStore: CredentialStore
 
+    /// A BBS credential's holder state vault - `nil` unless `keystore`
+    /// conforms to `ExtensionStore`. See `removeBbsHolderStateIfAny`.
+    let bbsHolderStateVault: BbsHolderStateVault?
+
     /// Resolves the DID methods the active `config.diipProfile` requires, for
     /// Issuer and Verifier identities. `did:jwk` resolves offline; `did:web`
     /// goes over HTTPS with no wallet credentials attached, since it targets
@@ -423,6 +442,11 @@ public final class SirosWallet: @unchecked Sendable {
     // `vct#integrity` can be driven without the network. Assigned only in
     // `init` otherwise.
     var vctmFetcher: VctmFetcher
+    /// The shared, authenticated type-metadata HTTP GET (see
+    /// `makeTypeMetadataHttpGet`). NOT used for anything an SCA attestation's
+    /// metadata references: those documents go through `transactionResourceGet`,
+    /// which carries no credentials.
+    let typeMetadataHttpGet: @Sendable (String) async -> String?
     let mddlSchemaFetcher: MddlSchemaFetcher
     // Not `private`: `SirosWallet+Passkey.swift` reads it for the login PRF
     // candidates - same cross-file-extension-access reason as `keystore`.
@@ -649,6 +673,23 @@ public final class SirosWallet: @unchecked Sendable {
         from instances: [StoredCredential],
         isZkPresentation: ((StoredCredential) -> Bool)? = nil
     ) -> [StoredCredential] {
+        let eligible = policyEligibleInstances(from: instances, isZkPresentation: isZkPresentation)
+        // A container this build must not rewrite is read-only: a consumption would
+        // be recorded in memory only, and reopening would make the used instance
+        // eligible again (a one-time-use credential presented twice). So an
+        // instance whose presentation would be consumed is not offered.
+        guard keystore.unsupportedSchemaVersion != nil else { return eligible }
+        switch credentialConsumptionPolicy {
+        case .neverConsume: return eligible
+        case .consumeAll: return []
+        case .consumeNonZkp: return eligible.filter { isZkPresentation?($0) ?? false }
+        }
+    }
+
+    private func policyEligibleInstances(
+        from instances: [StoredCredential],
+        isZkPresentation: ((StoredCredential) -> Bool)?
+    ) -> [StoredCredential] {
         let keyIds = availableKeyIds
         if let isZkPresentation {
             return CredentialUtils.eligibleInstances(
@@ -769,6 +810,7 @@ public final class SirosWallet: @unchecked Sendable {
         #endif
 
         self.credentialStore = config.credentialStore ?? KeystoreBackedCredentialStore(keystore: self.keystore)
+        self.bbsHolderStateVault = (self.keystore as? ExtensionStore).map { BbsHolderStateVault(keystore: $0) }
 
         // Set up new AS-based auth. Moved ahead of the DID resolver below
         // (it used to follow it) so `tokens` already exists to authenticate
@@ -844,24 +886,25 @@ public final class SirosWallet: @unchecked Sendable {
             sessionStore: sessionStore
         )
         self.vctmFetcher = VctmFetcher(httpGet: typeMetadataGet)
+        self.typeMetadataHttpGet = typeMetadataGet
         self.mddlSchemaFetcher = MddlSchemaFetcher(httpGet: typeMetadataGet)
         self.zkCircuitClient = ZkCircuitClient(sources: config.zkCircuitUrls)
+
         #if os(iOS)
-        // One residency shared by every mdoc ZK proof system constructed
-        // here - see `ZkProverResidency`'s own doc comment for why.
-        //
-        // BbsProofSystem (SirosCredentials) is NOT registered here - unlike
-        // VegaProofSystem, it needs a holder-state store (BbsHolderStateVault)
-        // and a WalletConfig field naming its VCTs, neither of which exists
-        // yet. A real, pre-existing gap (predates Vega), not a side effect
-        // of adding it.
-        let zkProverResidency = ZkProverResidency()
+        // See `makeIOSZkProofSystemRegistry`'s own doc comment for how the
+        // registry and residency are assembled.
+        let (zkProofSystemRegistry, zkProverResidency) = Self.makeIOSZkProofSystemRegistry(
+            config: config,
+            credentialStore: self.credentialStore,
+            zkCircuitClient: self.zkCircuitClient,
+            bbsHolderStateVault: self.bbsHolderStateVault
+        )
         self.zkProverResidency = zkProverResidency
-        self.zkProofSystemRegistry = ZkProofSystemRegistry(systems: [
-            LongfellowZkProofSystem(zkCircuitClient: self.zkCircuitClient, residency: zkProverResidency),
-            VegaProofSystem(zkCircuitClient: self.zkCircuitClient, residency: zkProverResidency),
-        ])
+        self.zkProofSystemRegistry = zkProofSystemRegistry
         #else
+        // Longfellow/Vega/BBS are all iOS-only (each one's native
+        // XCFramework ships no macOS/Linux slice - see Package.swift), so
+        // there is nothing to register on this platform.
         self.zkProofSystemRegistry = ZkProofSystemRegistry(systems: [])
         #endif
 
@@ -1019,11 +1062,13 @@ public final class SirosWallet: @unchecked Sendable {
                 displayName: displayName
             )
 
+            // prfSalt must land in the new PrfKeyInfo, not a random value.
             try await keystore.unlock(
                 prfOutput: prfOutput.first,
                 encryptedContainer: Data(),
                 hkdfSalt: hkdfSalt,
-                hkdfInfo: hkdfInfo
+                hkdfInfo: hkdfInfo,
+                prfSalt: prfSalt
             )
 
             let encryptedContainer = try await keystore.exportEncryptedContainer()
@@ -1121,10 +1166,9 @@ public final class SirosWallet: @unchecked Sendable {
         // See `handleLifecycleRefusal(_:forAccount:)`.
         var loginAccountId = refusalAccountId
         do {
-            // Steps 1-2: challenge, passkey assertion, PRF (fails closed)
+            // Steps 1-2: challenge, passkey assertion, PRF (handled below).
             let assertion = try await performPasskeyAssertion(asClient: asClient)
             loginAccountId = accountId(owningInScope: assertion.credentialId)
-            let prfOutput = assertion.prfOutput
 
             // Step 3: Complete login with AS
             let session = try await asClient.loginFinish(
@@ -1147,42 +1191,25 @@ public final class SirosWallet: @unchecked Sendable {
             setupApiClientWithTokens(tokens)
             let privateData = try await fetchPrivateData()
 
-            // HKDF parameters: this account's session store first (unlock
-            // after resume), then its registry entry (login after logout, when
-            // the account-scoped store has been cleared), then fresh values for
-            // a first login on this install. The registry entry counts only if
-            // it is the account the server just confirmed.
+            // PRF/HKDF parameters, normal or recovered - see `resolveLoginPrf`.
             let cached = assertion.cachedAccount.flatMap { $0.accountId == accountId ? $0 : nil }
-            let hkdfSalt = sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
-                ?? cached.flatMap { Self.b64Decode($0.hkdfSalt) }
-                ?? Self.randomBytes(32)
-            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) }
-                ?? cached.flatMap { Self.b64Decode($0.hkdfInfo) }
-                ?? Data(Self.hkdfInfo.utf8)
-            let prfSaltBytes = assertion.prfSalt
+            let resolved = try await resolveLoginPrf(assertion: assertion, privateData: privateData, cachedAccount: cached)
 
             try await keystore.unlock(
-                prfOutput: prfOutput.first,
+                prfOutput: resolved.prfOutput.first,
                 encryptedContainer: privateData,
-                hkdfSalt: hkdfSalt,
-                hkdfInfo: hkdfInfo
+                hkdfSalt: resolved.hkdfSalt,
+                hkdfInfo: resolved.hkdfInfo,
+                prfSalt: resolved.prfSalt
             )
 
-            accountRegistry.activeAccountId = accountId
-            sessionStore.userId = session.uuid
-            sessionStore.displayName = session.displayName
-            sessionStore.tenantId = config.tenantId
-            // See register()'s identical assignment: this is the only thing
-            // that records which passkey this installation logs in with, and
-            // `generateWIA` needs it to bind the instance to that passkey
-            // (SID-AUTH-06). It is the credential the ceremony actually
-            // resolved to, not a stored guess.
-            if let credentialId = assertion.credential["id"] as? String {
-                sessionStore.credentialId = credentialId
-            }
-            sessionStore.prfSalt = Self.b64Encode(prfSaltBytes)
-            sessionStore.hkdfSalt = Self.b64Encode(hkdfSalt)
-            sessionStore.hkdfInfo = Self.b64Encode(hkdfInfo)
+            // Records credentialId/salts and heals the account cache on
+            // recovery - see `recordSuccessfulLogin`.
+            recordSuccessfulLogin(
+                accountId: accountId, session: session, assertion: assertion,
+                prfSaltBytes: resolved.prfSalt, hkdfSalt: resolved.hkdfSalt, hkdfInfo: resolved.hkdfInfo,
+                recoveredSalt: resolved.recoveredSalt
+            )
 
             try await connectEngineWithToken(tokens)
 
@@ -1300,6 +1327,7 @@ public final class SirosWallet: @unchecked Sendable {
         cancelEngineTasks()
         releaseZkProvers()
         keystore.lock()
+        resetDefaultTransactionLogStore()
         sessionStore.clear()  // clears active account's session only
         accountRegistry.activeAccountId = nil
         authTokens?.clear()
@@ -1378,7 +1406,6 @@ public final class SirosWallet: @unchecked Sendable {
             let assertion = try await performPasskeyAssertion(
                 asClient: asClient, accountId: sessionStore.activeAccountId
             )
-            let prfOutput = assertion.prfOutput
             _ = try await asClient.loginFinish(
                 challengeId: assertion.challengeId,
                 credential: assertion.credential
@@ -1395,17 +1422,23 @@ public final class SirosWallet: @unchecked Sendable {
             guard let storedJwe = sessionStore.privateDataJwe else {
                 throw SirosError.keystore(message: "Missing private data")
             }
-            guard let hkdfSalt = sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
-                throw SirosError.keystore(message: "Missing HKDF salt")
-            }
-            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) } ?? Data(Self.hkdfInfo.utf8)
+            let storedContainer = Data(storedJwe.utf8)
+            let resolved = try await resolveUnlockKeystorePrf(assertion: assertion, storedContainer: storedContainer)
 
             try await keystore.unlock(
-                prfOutput: prfOutput.first,
-                encryptedContainer: Data(storedJwe.utf8),
-                hkdfSalt: hkdfSalt,
-                hkdfInfo: hkdfInfo
+                prfOutput: resolved.prfOutput.first,
+                encryptedContainer: storedContainer,
+                hkdfSalt: resolved.hkdfSalt,
+                hkdfInfo: resolved.hkdfInfo
             )
+
+            if let recoveredSalt = resolved.recoveredSalt, let accountId = sessionStore.activeAccountId {
+                healAccountCache(
+                    accountId: accountId, userId: userId, displayName: displayName,
+                    credentialId: assertion.credentialId, prfSalt: recoveredSalt,
+                    hkdfSalt: resolved.hkdfSalt, hkdfInfo: resolved.hkdfInfo
+                )
+            }
 
             let creds = await credentialStore.getAll()
             setState(.ready(userId: userId, displayName: displayName, credentials: creds))
@@ -1417,82 +1450,9 @@ public final class SirosWallet: @unchecked Sendable {
     }
 
     // MARK: - Credentials
-
-    /// Get credentials, optionally including expired.
-    public func getCredentials(includeExpired: Bool = false) async -> [StoredCredential] {
-        let all = await credentialStore.getAll()
-        if includeExpired { return all }
-        let now = Int64(Date().timeIntervalSince1970)
-        return all.filter { $0.expiresAt == nil || $0.expiresAt! > now }
-    }
-
-    /// Delete a credential by ID and sync to backend.
-    public func deleteCredential(_ credentialId: Int64) async {
-        let deletedBatchId = await credentialStore.getAll().first { $0.id == credentialId }?.batchId
-        await credentialStore.delete(credentialId)
-        // A deleted id can be reused (review finding) - an unrelated
-        // credential later assigned this same id must not read back the
-        // deleted one's cached status.
-        credentialStatusCache.remove(credentialId)
-        // If that was the last instance of its batch, its refresh_token
-        // entry (if any) is now orphaned - privatedata-spec §6.2 requires
-        // it not linger pointing at a batch that no longer exists.
-        if let batchId = deletedBatchId {
-            let remaining = await credentialStore.getAll()
-            if !remaining.contains(where: { $0.batchId == batchId }) {
-                await removeCredentialRefreshToken(batchId: batchId)
-            }
-        }
-        if case .ready(let userId, let displayName, _, _) = state {
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
-        }
-        await persistAndSyncKeystore()
-    }
-
-    /// Sign an mDoc DeviceResponse for an ISO 18013-5 proximity (BLE)
-    /// presentation - the local, engine-free counterpart to the redirect/
-    /// DC-API presentation paths (`handleSignRequest`/wallet-managed-protocol
-    /// sign handling above), since proximity presentation has no
-    /// wallet-backend/engine round trip at all: the reader IS the
-    /// counterpart, connected directly over BLE.
-    ///
-    /// - Parameters:
-    ///   - credentialId: the `StoredCredential.id` of the mdoc credential to present.
-    ///   - disclosedClaims: element identifiers to disclose (see `DeviceRequestParser.DocRequest.disclosedClaims`).
-    ///   - sessionTranscriptBytes: the proximity `SessionTranscript` bytes, from `ProximitySessionTranscript.build`.
-    /// - Returns: CBOR-encoded DeviceResponse bytes.
-    public func signMdocPresentationForProximity(
-        credentialId: Int64,
-        disclosedClaims: [String]?,
-        sessionTranscriptBytes: Data
-    ) async throws -> Data {
-        guard let credential = await credentialStore.getById(credentialId) else {
-            throw SirosError.wallet(message: "Credential not found: \(credentialId)")
-        }
-        let allInstances = await credentialStore.getAll().filter { $0.batchId == credential.batchId }
-        let eligible = eligibleInstances(from: allInstances)
-        guard eligible.contains(where: { $0.id == credentialId }) else {
-            throw SirosError.wallet(message: "No eligible copies of this credential remain - renew it to get more")
-        }
-        guard let credBytes = CredentialUtils.base64UrlDecode(credential.raw) else {
-            throw SirosError.wallet(message: "Credential \(credentialId) has malformed base64url raw data")
-        }
-        let response = try await keystore.signMdocPresentationForProximity(
-            credentialBytes: credBytes,
-            disclosedClaims: disclosedClaims,
-            sessionTranscriptBytes: sessionTranscriptBytes,
-            kid: credential.kid
-        )
-        await recordPresentation(PresentationRecord(
-            id: randomUint32Id(),
-            flowId: "proximity-\(UUID().uuidString)",
-            credentialIds: [credentialId],
-            credentialNames: [credential.metadata?.name].compactMap { $0 },
-            requestedClaims: disclosedClaims ?? [],
-            timestamp: Int64(Date().timeIntervalSince1970 * 1000)
-        ))
-        return response
-    }
-
+    //
+    // getCredentials/deleteCredential moved to
+    // SirosWallet+CredentialLifecycle.swift (file_length gate - review
+    // finding on PR #194, which also added deleteCredential's BBS-vault
+    // cleanup call; see that file).
 }

@@ -136,7 +136,72 @@ final class VegaProofSystemTests: XCTestCase {
         )
         XCTAssertThrowsError(try VegaProofSystem.buildWitness(document: document, requestedClaims: [])) { error in
             guard case MdocError.malformed(let reason) = error else { return XCTFail("expected .malformed") }
-            XCTAssertTrue(reason.contains("exceeds UInt32 range"), reason)
+            XCTAssertTrue(reason.contains("supported range"), reason)
+        }
+    }
+
+    /// The native crate's own documented contract is `digestId < 2^31`, a
+    /// tighter bound than `UInt32.max` (`2^32 - 1`) - a digest ID in
+    /// `2^31..<2^32` passes a bare `UInt32(exactly:)` check but is still
+    /// outside what the crate supports (Copilot review, PR #182: without
+    /// this test, a regression that reverted to the looser `UInt32.max`
+    /// bound would go unnoticed since `testBuildWitness_digestIdExceedsUInt32_throws`
+    /// only exercises a value above `UInt32.max` itself).
+    func testBuildWitness_digestIdAtOrAbove2Pow31_throws() {
+        var items = fourItemNamespace()
+        items[0] = namespaceItem(digestId: UInt64(1) << 31, elementIdentifier: "claim0")
+        let document = DocumentMdoc(
+            docType: "org.iso.18013.5.1.mDL",
+            issuerSigned: IssuerSignedMdoc(nameSpaces: ["org.iso.18013.5.1": items], issuerAuth: .null)
+        )
+        XCTAssertThrowsError(try VegaProofSystem.buildWitness(document: document, requestedClaims: [])) { error in
+            guard case MdocError.malformed(let reason) = error else { return XCTFail("expected .malformed") }
+            XCTAssertTrue(reason.contains("supported range"), reason)
+        }
+    }
+
+    /// The last digest ID the crate's documented `< 2^31` contract still
+    /// accepts must NOT be rejected - the boundary test above only proves
+    /// the first rejected value is actually rejected; this proves the fix
+    /// didn't overshoot into rejecting legitimate values one below it.
+    ///
+    /// `issuerAuth: .null` (same fixture every other test here uses) is not
+    /// a real COSE_Sign1, so `buildWitness` still fails downstream in
+    /// `buildEcdsaWitness` - that failure is expected and not what this test
+    /// checks. The point is narrower: whatever error comes back must NOT be
+    /// the digestID range rejection, since this value is one below the
+    /// boundary this guard exists to enforce.
+    func testBuildWitness_digestIdJustBelow2Pow31_succeeds() throws {
+        var items = fourItemNamespace()
+        items[0] = namespaceItem(digestId: (UInt64(1) << 31) - 1, elementIdentifier: "claim0")
+        let document = DocumentMdoc(
+            docType: "org.iso.18013.5.1.mDL",
+            issuerSigned: IssuerSignedMdoc(nameSpaces: ["org.iso.18013.5.1": items], issuerAuth: .null)
+        )
+        do {
+            _ = try VegaProofSystem.buildWitness(document: document, requestedClaims: [])
+        } catch MdocError.malformed(let reason) {
+            XCTAssertFalse(reason.contains("supported range"), "digestID one below the 2^31 boundary must not be rejected: \(reason)")
+        }
+    }
+
+    // MARK: - buildWitness: unknown requested claims
+
+    /// A `requestedClaims` entry the credential's namespace does not carry
+    /// must be rejected up front - previously it was silently treated as
+    /// "not disclosed" (every slot's `disclose` stayed `false`, since none
+    /// matched), so `generateProof` would succeed and hand the verifier a
+    /// presentation quietly missing a claim it explicitly asked for
+    /// (Copilot review, PR #182 - the same presentation-correctness failure
+    /// the pseudonym-claim guard in `generateProof` exists to prevent).
+    func testBuildWitness_unknownRequestedClaim_throws() {
+        let document = DocumentMdoc(
+            docType: "org.iso.18013.5.1.mDL",
+            issuerSigned: IssuerSignedMdoc(nameSpaces: ["org.iso.18013.5.1": fourItemNamespace()], issuerAuth: .null)
+        )
+        XCTAssertThrowsError(try VegaProofSystem.buildWitness(document: document, requestedClaims: ["not_a_real_claim"])) { error in
+            guard case MdocError.malformed(let reason) = error else { return XCTFail("expected .malformed") }
+            XCTAssertTrue(reason.contains("not_a_real_claim"), reason)
         }
     }
 

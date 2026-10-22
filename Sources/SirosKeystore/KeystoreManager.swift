@@ -13,6 +13,13 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// Whether the keystore is currently unlocked and usable.
     var isUnlocked: Bool { get }
 
+    /// Why the unlocked container will not be rewritten, or nil when it can be
+    /// (privatedata-spec section 6). While this is non-nil the container is
+    /// read-only: stores that would have to be exported throw
+    /// `KeystoreError.unsupportedSchemaVersion`, and a flow that would store
+    /// something and then report success must check this first. Defaults to nil.
+    var unsupportedSchemaVersion: UnsupportedSchemaVersion? { get }
+
     /// Unlock the keystore using PRF-derived key material.
     ///
     /// - Parameters:
@@ -25,6 +32,37 @@ public protocol KeystoreManager: AnyObject, Sendable {
         encryptedContainer: Data,
         hkdfSalt: Data,
         hkdfInfo: Data
+    ) async throws
+
+    /// `unlock(prfOutput:encryptedContainer:hkdfSalt:hkdfInfo:)` with the real
+    /// WebAuthn PRF extension salt (`prf.eval.first`/evalByCredential input)
+    /// that produced `prfOutput`.
+    ///
+    /// - Parameter prfSalt: consumed only on first-time setup (an empty
+    ///   `encryptedContainer`), where it is persisted into the new
+    ///   container's own `PrfKeyInfo.prfSalt` - matching the wallet-frontend
+    ///   wire format - instead of a disconnected random value, so a later
+    ///   login, even from a device whose local account cache never saw this
+    ///   registration, can recover the exact salt this credential needs from
+    ///   the account's server-synced privateData rather than guessing. See
+    ///   `SirosWallet`'s login recovery path. Ignored once a container
+    ///   already exists: an existing entry's own stored salt is always
+    ///   authoritative over whatever salt a caller happened to use for
+    ///   *this* unlock call.
+    ///
+    /// A genuine protocol REQUIREMENT (default-implemented below to forward
+    /// to the four-parameter overload, for conformers written before this
+    /// existed) rather than merely a defaulted extension method - see
+    /// `generateProof(audience:nonce:freshKey:holderBinding:)`'s doc comment
+    /// for why that distinction matters when called through a
+    /// `KeystoreManager` existential, which is exactly how `SirosWallet`
+    /// holds its `keystore`.
+    func unlock(
+        prfOutput: Data,
+        encryptedContainer: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        prfSalt: Data
     ) async throws
 
     /// Lock the keystore, clearing key material from memory.
@@ -101,6 +139,24 @@ public protocol KeystoreManager: AnyObject, Sendable {
         disclosedClaims: [String]?,
         nonce: String,
         audience: String,
+        kid: String?
+    ) async throws -> String
+
+    /// As above, for an EC TS12 payment-SCA presentation: the KB-JWT also
+    /// carries the claims `transactionData` derives (`transaction_data_hashes`,
+    /// its string `transaction_data_hashes_alg`, `jti`, `response_mode` and the
+    /// two-category `amr`). With `nil` this is exactly the plain overload and
+    /// the KB-JWT is byte-for-byte what it always was.
+    ///
+    /// The default implementation refuses a non-nil `transactionData`: a
+    /// keystore that has not been written to produce these claims must not
+    /// answer an SCA request with a presentation that lacks them.
+    func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
         kid: String?
     ) async throws -> String
 
@@ -216,6 +272,11 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// above. Returns nil if not available.
     func securityProperties(keyId: String) async -> SignerSecurityProperties?
 
+    /// Whether the key can reach two TS12 authentication categories for an SCA
+    /// sign (never prompts). Asked before the user is shown a transaction. The
+    /// default answers "cannot": a keystore must opt in to SCA.
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability
+
     /// Return the attestation certificate chain for a key, if available -
     /// see `Signer.attestationChain`. Returns nil if attestation is not
     /// available; only a WSCD-backed keystore with a hardware-attesting
@@ -299,6 +360,22 @@ public extension KeystoreManager {
         try await generateProof(audience: audience, nonce: nonce, freshKey: false)
     }
 
+    /// Default for a conformer written before the `prfSalt` parameter
+    /// existed: forwards unchanged, so a first-time-setup container it
+    /// creates still gets *some* `PrfKeyInfo.prfSalt` (whatever its own
+    /// four-parameter implementation generates internally) rather than
+    /// failing to compile. Only the keystores in this SDK (`JweKeystore`/
+    /// `WscdKeystoreAdapter`) override this to thread the real salt through.
+    func unlock(
+        prfOutput: Data,
+        encryptedContainer: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        prfSalt: Data
+    ) async throws {
+        try await unlock(prfOutput: prfOutput, encryptedContainer: encryptedContainer, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)
+    }
+
     /// Default for a conformer - including a host's own `KeystoreManager`,
     /// written before this requirement existed - that does not override it.
     /// `nil` and `.embeddedJwk` forward to ``generateProof(audience:nonce:freshKey:)``
@@ -329,6 +406,9 @@ public extension KeystoreManager {
         return try await generateProof(audience: audience, nonce: nonce, freshKey: freshKey)
     }
 
+    func scaAuthenticationCapability(keyId: String) async -> SignerFactorCapability {
+        .cannot("this keystore does not report TS12 authentication factors")
+    }
     func securityProperties() async -> SignerSecurityProperties? { nil }
     func securityProperties(keyId: String) async -> SignerSecurityProperties? { nil }
     func attestationChain(keyId: String) async throws -> AttestationChain? { nil }
@@ -421,11 +501,14 @@ public struct KeyInfo: Sendable, Equatable {
     public let keyId: String
     public let algorithm: String
     public let createdAt: Int64
+    /// The WSCD plugin holding the key, when known.
+    public let pluginId: String?
 
-    public init(keyId: String, algorithm: String, createdAt: Int64 = 0) {
+    public init(keyId: String, algorithm: String, createdAt: Int64 = 0, pluginId: String? = nil) {
         self.keyId = keyId
         self.algorithm = algorithm
         self.createdAt = createdAt
+        self.pluginId = pluginId
     }
 }
 
@@ -437,6 +520,11 @@ public enum KeystoreError: Error, Sendable {
     case cryptoError(String)
     case invalidContainer(String)
     case invalidParameter(String)
+    /// The container carries a schema version, event schema version or event
+    /// type this build does not implement, so it will not rewrite it
+    /// (privatedata-spec section 6). Reading is unaffected. Not a failed merge
+    /// and not a transient error: retrying does not help, updating the app does.
+    case unsupportedSchemaVersion(UnsupportedSchemaVersion)
 }
 
 extension KeystoreError: LocalizedError {
@@ -448,6 +536,30 @@ extension KeystoreError: LocalizedError {
         case .cryptoError(let msg): return "Crypto error: \(msg)"
         case .invalidContainer(let msg): return "Invalid container: \(msg)"
         case .invalidParameter(let msg): return "Invalid parameter: \(msg)"
+        case .unsupportedSchemaVersion(let unsupported): return unsupported.errorDescription
         }
+    }
+}
+
+extension KeystoreManager {
+    public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { nil }
+
+    public func signVpToken(
+        credential: String,
+        disclosedClaims: [String]?,
+        nonce: String,
+        audience: String,
+        transactionData: TransactionDataBinding?,
+        kid: String?
+    ) async throws -> String {
+        guard transactionData == nil else {
+            throw TransactionDataError(
+                .insufficientAuthenticationFactors,
+                detail: "this keystore cannot produce EC TS12 presentations"
+            )
+        }
+        return try await signVpToken(
+            credential: credential, disclosedClaims: disclosedClaims, nonce: nonce, audience: audience, kid: kid
+        )
     }
 }

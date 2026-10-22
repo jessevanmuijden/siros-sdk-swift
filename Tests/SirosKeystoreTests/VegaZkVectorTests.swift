@@ -206,10 +206,20 @@ final class VegaZkVectorTests: XCTestCase {
         return try prove(pk: proverKey, claims: vector.claims, ecdsaWitness: vector.ecdsaWitness, msoBody: vector.msoBody, priorState: prepState).nextState
     }
 
-    /// Confirms fold-and-reuse works: a second `prove` call using the first
-    /// call's own `nextState` (skipping `prepProve`) still produces a
-    /// verifiable proof - exactly the reuse path `ZkProofResult.nextState`/
-    /// `ZkProofSystem.generateProof`'s `priorState` exist for.
+    /// Confirms the native `prepProve`/`prove`/`verify` API itself still
+    /// supports state reuse at this low level: a second `prove` call using
+    /// the first call's own `nextState` (skipping `prepProve`) still
+    /// produces a verifiable proof. This is NOT the path
+    /// `VegaProofSystem.generateProof` actually takes in production -
+    /// unlike Longfellow, Vega's `generateProof` deliberately never passes
+    /// `priorState` through and never returns a reusable `nextState` (see
+    /// its own doc comment): reusing state repeats the same digest-blinding
+    /// nonce, making two presentations correlatable to each other even when
+    /// they disclose different claims. Keeping this test is still useful -
+    /// it is the only coverage that the native binding's reuse mechanism
+    /// itself behaves as documented - but it must not be read as proof that
+    /// wiring `priorState` into `VegaProofSystem` is safe (Copilot review,
+    /// PR #182).
     func testProve_reusingPriorState_stillVerifies() throws {
         let vector = try loadTestVector()
 

@@ -78,12 +78,16 @@ low-level host on iOS does these itself:
 - **No facade-free ZK presentation entry point yet.** Android has
   `ZkMdocPresentation` (registry + `present(request, signer)` +
   `systemIds()`); on iOS the equivalent assembly is still a private helper of
-  `SirosWallet`. A low-level host composes `LongfellowZkProofSystem` and
-  `MdocDeviceResponseBuilder.buildZkDeviceResponse` directly.
-- **No circuit disk cache or prover residency.** `ZkCircuitClient` fetches
-  and verifies per process; there is no single-slot resident prover released
-  on memory pressure.
-- **Vega** is not in the Swift SDK; the native ZK tier on iOS is Longfellow.
+  `SirosWallet`. A low-level host composes `LongfellowZkProofSystem`/
+  `VegaProofSystem` and `MdocDeviceResponseBuilder.buildZkDeviceResponse`
+  directly.
+- **Vega** ships in the Swift SDK (`VegaProofSystem`, iOS-only like
+  Longfellow), sharing a `ZkProverResidency` with `LongfellowZkProofSystem`
+  so the process holds at most one resident prover at a time (ported from
+  Android's `ZkProverResidency` - see that type's doc comment for why this
+  exists). `SirosWallet.init` wires both in automatically; a low-level host
+  constructing either directly must supply the same `ZkProverResidency`
+  instance to both to get that guarantee itself.
 - **Issuer identity for trust evaluation** (`MdocIssuerIdentity`) lives in the
   `SirosWallet` module on both platforms; a low-level host that evaluates
   issuer trust re-derives the issuer URL from the IACA certificate's SAN

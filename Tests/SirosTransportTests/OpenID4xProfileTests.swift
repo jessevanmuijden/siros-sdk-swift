@@ -336,7 +336,10 @@ final class OpenID4xProfileTests: XCTestCase {
 
     /// An error that names its WMP code is reported with it, not as SIGN_ERROR.
     func testSignHandlerErrorWithAWmpCodeIsReportedWithThatCode() async throws {
-        struct Refusal: Error, WmpErrorCodeProviding { var wmpErrorCode: String? { "invalid_transaction_data" } }
+        struct Refusal: Error, LocalizedError, WmpErrorCodeProviding {
+            var wmpErrorCode: String? { "invalid_transaction_data" }
+            var errorDescription: String? { "developer detail: payee Zebra amount 98765" }
+        }
         let ctx = MockPeerContext()
         let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in throw Refusal() }))
         profile.initialize(ctx: ctx)
@@ -346,6 +349,11 @@ final class OpenID4xProfileTests: XCTestCase {
             XCTAssertEqual(code, "invalid_transaction_data")
         } else {
             XCTFail("expected a code")
+        }
+        if case .string(let message) = ctx.notifications[0].params?["message"] {
+            XCTAssertEqual(message, "invalid_transaction_data", "only the code goes to the peer, no developer text")
+        } else {
+            XCTFail("expected a message")
         }
     }
 

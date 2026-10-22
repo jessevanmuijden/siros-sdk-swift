@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+import SirosCredentials
 
 // siros_wscd_managerFFI's XCFramework only ships iOS slices - no macOS
 // slice exists, and this package's CI builds/tests on bare macOS too, so
@@ -182,7 +183,7 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     public func listKeys() async throws -> [SignerKeyInfo] {
         try await onFFIQueue {
             try self.ffi.listKeys().map {
-                SignerKeyInfo(keyId: $0.kid, algorithm: Self.algorithmToString($0.algorithm))
+                SignerKeyInfo(keyId: $0.kid, algorithm: Self.algorithmToString($0.algorithm), pluginId: $0.pluginId)
             }
         }
     }
@@ -255,6 +256,99 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
                 amr: props.amr
             )
         }
+    }
+
+    public func authenticationCapability(keyId: String) async throws -> SignerFactorCapability {
+        // The SCA sign has to ask the user for a secret; without a provider it can only fail.
+        guard authProvider != nil else { return .cannot("no authentication provider is configured to ask the user for a PIN") }
+        return try await onFFIQueue {
+            let c = try self.ffi.authenticationCapability(kid: keyId)
+            return SignerFactorCapability(
+                canReachTwoCategories: c.canReachTwoCategories,
+                requiresHostVerifiedFactor: c.requiresHostVerifiedFactor,
+                reason: c.reason
+            )
+        }
+    }
+
+    public func signForSca(
+        keyId: String,
+        payload: @escaping ([AuthenticationFactor]) throws -> Data
+    ) async throws -> SignerScaOutcome {
+        do {
+            return try await signForScaOnQueue(keyId: keyId, payload: payload)
+        } catch FfiWscdError.AuthCancelled {
+            // The user backed out of the PIN prompt (the first one or a retry): that is declining the
+            // transaction, answered at once like any other decline, not a failure of the wallet.
+            throw TransactionDataError(.declined, detail: "the user cancelled the authentication")
+        }
+    }
+
+    private func signForScaOnQueue(
+        keyId: String,
+        payload: @escaping ([AuthenticationFactor]) throws -> Data
+    ) async throws -> SignerScaOutcome {
+        try await onFFIQueue {
+            let pluginId = try self.ffi.listKeys().first(where: { $0.kid == keyId })?.pluginId
+            let capability = try self.ffi.authenticationCapability(kid: keyId)
+            let provider = self.authProvider
+            return try ScaSignFlow.run(
+                pluginId: pluginId,
+                capability: SignerFactorCapability(
+                    canReachTwoCategories: capability.canReachTwoCategories,
+                    requiresHostVerifiedFactor: capability.requiresHostVerifiedFactor,
+                    reason: capability.reason
+                ),
+                promptPin: {
+                    guard let provider else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
+                    // WscdAuthProvider.requestPin throws only when the user cancels, whatever error type it uses.
+                    // It returns `Data` (a public protocol host apps implement, and the shape the
+                    // generated FFI callback below needs regardless) - wrapped into a `SecureBytes`
+                    // immediately so everything downstream of this point threads the wipeable type;
+                    // the host's own `Data` is not reachable or wipeable by this SDK (see
+                    // `SecureBytes`'s doc comment on residual exposure).
+                    do { return SecureBytes(try provider.requestPin(pluginId: pluginId ?? "")) }
+                    catch { throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt") }
+                },
+                payload: payload,
+                sign: { data, pin in
+                    // A fresh user authentication, never a cached session: the PIN just typed is
+                    // handed to the plugin once; any further request goes to the user again.
+                    //
+                    // `pin.dataCopy()` is the one unavoidable `Data` copy this call needs: UniFFI's
+                    // generated `FfiConverterData` (see `Generated/siros_wscd_manager.swift`) copies
+                    // these bytes again into its own `RustBuffer` before the call crosses to Rust, so
+                    // by the time `signWithFactors` returns, neither copy is needed - `run`'s `defer`
+                    // wipes the authoritative `SecureBytes` right after this closure returns.
+                    let outcome = try self.ffi.signWithFactors(
+                        kid: keyId,
+                        data: data,
+                        algorithm: .es256, // inferred from the key by the manager
+                        options: FfiSignOptions(requireFreshUserAuthentication: true, hostVerifiedFactor: nil),
+                        auth: OneShotPinAuthCallback(pin: pin.dataCopy(), fallback: provider),
+                        progress: NoOpProgressCallback()
+                    )
+                    return ScaSignReport(
+                        signature: outcome.signature.data,
+                        factors: outcome.factors.factors.compactMap { Self.sdkFactor($0) },
+                        satisfiesTwoCategories: outcome.factors.satisfiesTwoCategories
+                            && outcome.factors.factors.allSatisfy { Self.sdkFactor($0) != nil },
+                        shortfall: outcome.factors.shortfall
+                    )
+                }
+            )
+        }
+    }
+
+    private static func sdkFactor(_ f: FfiAuthFactor) -> AuthenticationFactor? {
+        let category: AuthenticationFactor.Category
+        switch f.category {
+        case .knowledge: category = .knowledge
+        case .possession: category = .possession
+        case .inherence: category = .inherence
+        }
+        let factor = AuthenticationFactor(category, f.method)
+        return factor.isDefined ? factor : nil
     }
 
     /// Export the softkey plugin container as JSON bytes for encrypted backup.
@@ -381,6 +475,38 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
             challenge: challenge,
             rpId: rpId,
             allowedCredentials: allowedCredentials
+        )
+    }
+}
+
+/// Hands the PIN the user typed for this sign to the plugin the first time it
+/// asks, then forgets it; any later request (a retry) goes back to the user.
+/// The measured class of that PIN is what the payload claims, and the sign's
+/// own report is checked against it afterwards.
+final class OneShotPinAuthCallback: FfiAuthCallback, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pin: Data?
+    private weak var fallback: WscdAuthProvider?
+
+    init(pin: Data, fallback: WscdAuthProvider?) {
+        self.pin = pin
+        self.fallback = fallback
+    }
+
+    func requestPin(pluginId: String) throws -> Data {
+        lock.lock()
+        let once = pin
+        pin = nil
+        lock.unlock()
+        if let once { return once }
+        guard let fallback else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
+        return try fallback.requestPin(pluginId: pluginId)
+    }
+
+    func requestWebauthnAssertion(pluginId: String, challenge: Data, rpId: String, allowedCredentials: [Data]) throws -> Data {
+        guard let fallback else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
+        return try fallback.requestWebauthnAssertion(
+            pluginId: pluginId, challenge: challenge, rpId: rpId, allowedCredentials: allowedCredentials
         )
     }
 }
