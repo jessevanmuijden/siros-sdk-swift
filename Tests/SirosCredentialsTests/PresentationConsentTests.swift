@@ -150,6 +150,35 @@ final class PresentationConsentTests: XCTestCase {
 
     private func parse(_ text: String) throws -> JSONValue { try StrictJSON.parse(text) }
 
+    /// JSON member names are distinct byte for byte: `caf\u{e9}` and `cafe\u{301}` are two claims, though Swift's
+    /// `String ==` calls them equal. A source check, a bound merge and a label lookup must all keep them apart.
+    func testClaimPathsAreComparedByUtf8BytesNotCanonicalEquivalence() throws {
+        let composed = "caf\u{e9}", decomposed = "cafe\u{301}"
+        XCTAssertEqual(composed, decomposed, "the premise: Swift treats them as equal")
+        // `source` must name the function's own claim, byte for byte.
+        let source: (String) -> JSONValue = { .object(["path": .array([.string($0)])]) }
+        XCTAssertNotNil(numbers["n"]!.parse(n(["ge": .int(1), "claim": .string(composed), "source": source(composed)])))
+        XCTAssertNil(numbers["n"]!.parse(n(["ge": .int(1), "claim": .string(composed), "source": source(decomposed)])),
+                     "a source that spells the claim differently does not name it")
+        // Bounds on different claims are never merged: width 0 on ONE claim is refused, on TWO it is not.
+        func plans(_ a: String, _ b: String) -> [[CircuitZkFunction]] {
+            [[n(["ge": .int(15), "claim": .string(a)])], [n(["le": .int(15), "claim": .string(b)])]]
+        }
+        XCTAssertFalse(numbers.combinedBoundsOk(plans: plans(composed, composed)), "control: the same claim, width 0")
+        XCTAssertTrue(numbers.combinedBoundsOk(plans: plans(composed, decomposed)), "two claims are not one group")
+        // A label is only ever the requested claim's own.
+        let query = CircuitZkConsentQuery(
+            plan: [n(["ge": .int(1), "claim": .string(decomposed)])],
+            credential: PresentationConsentCredential(name: nil, issuer: nil),
+            claims: [PresentationConsentClaimRef(path: [composed], label: "OTHER CLAIM LABEL")])
+        let request = try XCTUnwrap(PresentationConsentBuilder.build(
+            queries: [query], functions: numbers, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+            verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil,
+            requestSigned: true, today: "2026-10-19"))
+        guard case .predicate(let predicate) = request.entries[0].items[0] else { return XCTFail("not a predicate") }
+        XCTAssertNil(predicate.claim.label, "the other spelling's label is not borrowed")
+    }
+
     func testNumericInMembersAreDeduplicatedByValueNotSpelling() throws {
         let fn = numbers["n"]!
         XCTAssertNil(fn.parse(n(["in": try parse("[1, 1.0, 1e0]")])), "the same number three ways is a duplicate")

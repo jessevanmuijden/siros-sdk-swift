@@ -108,7 +108,7 @@ extension PredicateFunction {
         // claim, otherwise the request is refused.
         if let source = params["source"] {
             guard case .object(let object) = source, object.count == 1, case .array(let parts)? = object["path"],
-                  parts.compactMap(\.stringValue) == path, parts.count == path.count else { return nil }
+                  ClaimPathKey(parts.compactMap(\.stringValue)) == ClaimPathKey(path), parts.count == path.count else { return nil }
         }
 
         var conditions: [PredicateCondition] = []
@@ -266,19 +266,19 @@ extension PredicateFunctions {
             var minSpan = 0
             let type: PredicateValueType
         }
-        var groups: [[String]: Group] = [:]
+        var groups: [ClaimPathKey: Group] = [:]
         for plan in plans {
             for function in plan {
                 guard let registered = self[function.id], let minSpan = registered.minSpan else { continue }
                 guard let parsed = registered.parse(function) else { return false }
-                var group = groups[parsed.path] ?? Group(type: registered.valueType)
+                var group = groups[ClaimPathKey(parsed.path)] ?? Group(type: registered.valueType)
                 group.minSpan = max(group.minSpan, minSpan)
                 for condition in parsed.conditions {
                     guard let text = condition.values.first, let value = Self.ordinal(text, group.type) else { return false }
                     if condition.op == .ge, group.lower.map({ value > $0 }) ?? true { group.lower = value; group.lowerText = text }
                     if condition.op == .le, group.upper.map({ value < $0 }) ?? true { group.upper = value; group.upperText = text }
                 }
-                groups[parsed.path] = group
+                groups[ClaimPathKey(parsed.path)] = group
             }
         }
         for group in groups.values {
@@ -407,4 +407,12 @@ enum ExactDecimal {
         result[0] = UInt8(carry)
         return Array(result.drop(while: { $0 == 0 }))
     }
+}
+
+/// A claim path compared by the UTF-8 bytes of its components. JSON member names are distinct byte for byte, while
+/// Swift's `String ==` treats canonically equivalent spellings (`caf\u{e9}` and `cafe\u{301}`) as equal: two different
+/// claims must never be taken for one, whether for a source check, a label lookup or a bound merge.
+struct ClaimPathKey: Hashable {
+    private let components: [[UInt8]]
+    init(_ path: [String]) { components = path.map { Array($0.utf8) } }
 }

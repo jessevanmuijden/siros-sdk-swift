@@ -55,6 +55,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different number of lookups than functions is false; float operands must be finite
   and exact. `requestSigned` is a required argument (the signature result, never
   defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+- **`zkp_req` (nym_auth rulebook v0.4): planner, unsatisfiable rules, strict CBOR response validator,
+  `proof_time`, prefixed `verifier_id`.** `ZkpReqPlanner` reads the v0.4 DCQL names (`zkp_req`, `_req`,
+  `fn_id`, `return`, `meta.source_format`, `vp_formats_supported.zkp_req` with `system_id_values` and
+  `proof_system_values`); `ZkpReqUnsatisfiable` is the rulebook's request-only rules (`pseudonym` with
+  `ver` and `prf`, one `age_check` of at least 365 days, `verifier_context`, holder binding).
+  `ZkpReqResponseValidator` checks the base64url CBOR `ZkpPresentation` `{system_id, proof,
+  issuer_key_set (at most 8 DER certificates of at most 4096 bytes), proof_time, results}` with its own
+  strict CBOR reader (definite lengths only, duplicate keys refused structurally, depth 16) that walks the
+  raw bytes and its own JSON reader that keeps duplicate members. `ZkpReqProofTime` is the exact 20-byte
+  `YYYY-MM-DDThh:mm:ssZ` form (shape first, parsed only to settle that the instant is real) with the verifier
+  tolerance helper (recommended 60 s skew, 600 s age: the verifier's to configure). The time is the PROVER's;
+  nothing reads a clock here. `ZkpReqPresentationBuilder` encodes a presentation and returns a `vp_token` only
+  after the validator accepts it. `ZkpReqVerifierId` forms the PREFIXED `verifier_id`
+  (`x509_san_dns:<dns>`, `semantic_id:<id>`) whose SHA-256 is `verifier_input`. Tested against the 241
+  vectors of siros-dc-matcher 93047bc (digest 9f482d7a...), verbatim. Supersedes the JSON `circuit_zk`
+  response shape. Not wired into the wallet; the prover seam still refuses.
+- **`DeliveredSecretReceipt`: the wallet's side of delivered secrets (privatedata-spec 5A).**
+  `receive` applies the rules to a Credential Response that carries
+  `org.siros.secret_seed`: refused when the response is not JWE-encrypted, is a deferred
+  response, has no `notification_id`, has a malformed member (1 to 8 namespaces of 1 to
+  64 bytes, not `namespaces`, each seed 32 lowercase hex), has a non-object
+  `credential_metadata`, or fails the commitment (`SHA256(seed) == ssc` for the designated
+  namespace, constant time). It returns the `metadata` entries to store in each credential
+  (in the order received), the display members WITHOUT the seed (strip before merge) and
+  the seeds for the secret store only; `mergedDisplayMetadata` merges the stripped response
+  over the issuer metadata and `advertisement` validates the issuer's namespace-names-only
+  advertisement. Pure; the result and errors never print a seed. Tested against the
+  privatedata-spec 1b796d2 delivered-secret vectors, verbatim. Not wired into the wallet yet.
+- **`circuit_zk` response shape: `CircuitZkX5Chain` and `CircuitZkResponseValidator`.** The
+  presentation now carries `x5chain`, the holder-supplied issuer chain: the credential's own
+  Document Signer chain from `issuerAuth`'s unprotected header (COSE label 33), leaf first,
+  padded STANDARD base64 of each DER certificate, at most 8 certificates and 4096 bytes each
+  (a chain that breaks a limit is never built). `CircuitZkResponseValidator` checks the shape of a
+  `circuit_zk` entry in a `vp_token` and its binding to the request (offer, handles, result
+  shapes; a JSON `null` is a type error everywhere, duplicates are judged on the raw text,
+  unknown functions and members are refused) and is run by a wallet on the response it built.
+  Tested against the 80 shared vectors of siros-dc-matcher 932b07a, copied verbatim. The
+  verification time `T` is not part of this change. Not wired into the wallet.
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1
@@ -230,6 +268,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.14.1] - 2026-09-29
 
 ### Fixed
+- **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
+  components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
+  and the label lookup. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
+  and `["SE", "FI"]` no longer read alike.
 - **Presentation consent screen now shows a verified identity when there's
   no declared display name.** The backend no longer trusts/caches an
   unvalidated client-supplied `client_metadata.client_name` for the
