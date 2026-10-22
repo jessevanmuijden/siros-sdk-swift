@@ -327,6 +327,25 @@ final class OpenID4xProfileTests: XCTestCase {
         }
     }
 
+    /// Cancelling a child whose answer is queued for the resume is a child cancel: the wallet's parent-flow
+    /// cancellation callback is not invoked (it would reset the parent's guards).
+    func testCancellingAChildWithAQueuedAnswerDoesNotCancelTheParentInTheWallet() async throws {
+        let ctx = ReplayPeerContext()           // every send fails: the answer is queued
+        var cancelled: [String] = []
+        let profile = OpenID4xProfile(config: OpenID4xConfig(
+            onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") },
+            onCancel: { cancelled.append($0) }
+        ))
+        profile.initialize(ctx: ctx)
+        await profile.runChildFlow(params: childStart(flowType: "sign", flowId: "c1", params: [
+            "action": .string("sign_presentation"), "parent_flow_id": .string("p1"),
+        ]))
+        await profile.handleCancel(params: FlowCancelParams(flowId: "c1"))
+        XCTAssertTrue(cancelled.isEmpty, "only a child operation was cancelled")
+        await profile.handleCancel(params: FlowCancelParams(flowId: "p1"))
+        XCTAssertEqual(cancelled, ["p1"], "a flow of its own still is")
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))

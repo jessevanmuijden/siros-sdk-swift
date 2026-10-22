@@ -750,7 +750,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         childLock.lock()
         var running: [Task<Void, Never>] = []
         var ids: [String] = []
-        let wasChild = childTasks[flowId] != nil
+        // A child whose answer is queued for the resume is still a child, though it no longer has a task.
+        let wasChild = childTasks[flowId] != nil || unsentAnswers[flowId] != nil
         endedParents.append(flowId)
         if endedParents.count > maxEndedParents { endedParents.removeFirst(endedParents.count - maxEndedParents) }
         for (childId, answer) in unsentAnswers where childId == flowId || answer.parent == flowId {

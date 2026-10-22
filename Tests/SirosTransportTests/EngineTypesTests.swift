@@ -595,6 +595,20 @@ final class EngineTypesTests: XCTestCase {
         session.disconnect()
     }
 
+    /// A recovered connection starts a fresh retry budget: after the budget was used up once and the socket
+    /// recovered (`handshake_complete`), the next loss reconnects again instead of failing at once.
+    func testARecoveredConnectionGetsAFreshRetryBudget() async {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.lastAppToken = "app-token"
+        for _ in 0..<5 { session.scheduleReconnect() }
+        XCTAssertEqual(session.currentState, .reconnecting)
+        await session.handleMessage(#"{"type":"handshake_complete","session_id":"s-1"}"#)
+        XCTAssertEqual(session.currentState, .connected)
+        session.scheduleReconnect()
+        XCTAssertEqual(session.currentState, .reconnecting, "the second loss is retried, not failed")
+        session.disconnect()
+    }
+
     func testALateFailureAfterDisconnectDoesNotTellTheOwner() {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
         session.lastAppToken = "app-token"

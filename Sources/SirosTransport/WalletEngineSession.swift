@@ -442,7 +442,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         }
     }
 
-    private func handleMessage(_ text: String) async {
+    func handleMessage(_ text: String) async {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
@@ -453,6 +453,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         case MessageTypes.handshakeComplete:
             if let msg = try? decoder.decode(HandshakeCompleteMessage.self, from: data) {
                 sessionId = msg.sessionId
+                // A recovered connection starts a fresh retry budget: the next loss is not charged for this one's.
+                reconnectAttempts = 0
                 setState(.connected)
                 adoptServerPingInterval(from: msg.config)
             }
