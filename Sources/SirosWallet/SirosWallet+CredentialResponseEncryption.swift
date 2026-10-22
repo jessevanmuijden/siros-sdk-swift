@@ -115,13 +115,13 @@ extension SirosWallet {
             response = try DecryptedCredentialResponse.parse(plaintext)
         } catch {
             // Read but rejected: the issuer is owed a credential_failure for it, and the id is in the body.
-            sendCredentialFailure(flowId: flowId, notificationId: DecryptedCredentialResponse.notificationId(in: plaintext))
+            await sendCredentialFailure(flowId: flowId, notificationId: DecryptedCredentialResponse.notificationId(in: plaintext))
             throw CredentialResponseError.malformedResponse
         }
         // Exactly one of: credentials (1 to 256) or a transaction_id. Both, neither or too many is not a
         // response this wallet accepts.
         guard response.credentials.isEmpty != (response.transactionId == nil), response.credentials.count <= 256 else {
-            sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
+            await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
             throw CredentialResponseError.malformedResponse
         }
         if let receiver = credentialMetadataReceiver {
@@ -130,10 +130,12 @@ extension SirosWallet {
             } catch {
                 // The response was read and rejected: the issuer is owed a credential_failure for it
                 // (the engine registered the notification context before relaying the first JWE).
-                sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
+                await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
                 throw CredentialResponseError.refused
             }
         }
+        // A cancelled sign request (a WMP child flow) must not leave a response behind either.
+        try Task.checkCancellation()
         lock.lock()
         // The flow may have ended, been cancelled, or been given a new key while the receiver was
         // suspended: that response is stale and is neither kept nor reported as taken.
@@ -150,12 +152,19 @@ extension SirosWallet {
     }
 
     /// `credential_failure` for a decrypted response this wallet rejected.
-    private func sendCredentialFailure(flowId: String, notificationId: String?) {
+    ///
+    /// Where the transport can say when the notification was handed over, it is awaited, so it precedes the
+    /// error answer that follows (the engine registered the notification context before relaying the JWE).
+    private func sendCredentialFailure(flowId: String, notificationId: String?) async {
         guard let notificationId, !notificationId.isEmpty else { return }
         lock.lock(); let notifier = credentialNotifier; lock.unlock()
-        notifier?.sendCredentialNotification(
-            flowId: flowId, notificationId: notificationId, event: CredentialNotificationEvent.failure
-        )
+        if let awaitable = notifier as? AwaitableCredentialNotifier {
+            await awaitable.sendCredentialNotificationAndWait(
+                flowId: flowId, notificationId: notificationId, event: CredentialNotificationEvent.failure, eventDescription: nil
+            )
+        } else {
+            notifier?.sendCredentialNotification(flowId: flowId, notificationId: notificationId, event: CredentialNotificationEvent.failure)
+        }
     }
 
     /// The responses decrypted for this flow, removed from the store (a flow completes once).
@@ -196,7 +205,8 @@ extension SirosWallet {
         for response in decrypted {
             for value in response.credentials { credentials.append((value, response.notificationId)) }
         }
-        guard credentials.count == entries.count else { return nil }
+        // An encrypted completion reports at least one credential (the wallet answered `credential_count` 1 to 256).
+        guard !entries.isEmpty, credentials.count == entries.count else { return nil }
         return zip(entries, credentials).map { entry, decrypted in
             CredentialResult(
                 format: entry.format, credential: decrypted.value, vct: entry.vct,
@@ -237,6 +247,8 @@ extension SirosWallet {
                 transactionId: control.transactionId, interval: control.interval, credentialCount: control.credentialCount
             )
         } catch {
+            // A cancelled child answers nothing and ends nothing here: whoever cancelled owns the cleanup.
+            if error is CancellationError || Task.isCancelled { throw error }
             // The profile's flow error goes to the peer only; the wallet's own terminal handling is here.
             let code = (error as? CredentialResponseError) ?? CredentialResponseError.decryptFailed
             failIssuanceLocally(flowId: flowId, message: code.wmpErrorCode ?? "DECRYPT_FAILED")
@@ -276,7 +288,7 @@ extension SirosWallet {
     /// The proofs for one `generate_proof` request, in the shapes both transports send.
     private func proofObjects(
         audience: String, nonce: String, count: Int, proofTypesSupported: [String: AnyCodable]?, proofTypeHint: String?
-    ) async throws -> [ProofObject] {
+    ) async throws -> (proofs: [ProofObject], attestedKeyIds: [String]?) {
         let generated = try await generateProofs(
             audience: audience, nonce: nonce, count: count,
             proofTypesSupported: proofTypesSupported, proofTypeHint: proofTypeHint
@@ -287,8 +299,17 @@ extension SirosWallet {
         // shape into one batch-order list. Taking only the first entry's list would silently drop every
         // index past 0 for a "jwt" batch of more than one credential.
         let flattenedKeyIds = generated.flatMap { $0.attestedKeyIds ?? [] }
-        lock.lock(); activeAttestedKeyIds = flattenedKeyIds.isEmpty ? nil : flattenedKeyIds; lock.unlock()
-        return generated.map { ProofObject(proofType: $0.proofType, jwt: $0.jwt, attestation: $0.attestation) }
+        return (
+            generated.map { ProofObject(proofType: $0.proofType, jwt: $0.jwt, attestation: $0.attestation) },
+            flattenedKeyIds.isEmpty ? nil : flattenedKeyIds
+        )
+    }
+
+    /// Applies what proof generation decided, only if the request was not cancelled meanwhile (a cancelled
+    /// sign child must not write issuance state or install a key for a flow that is being torn down).
+    private func applyProofResult(_ attestedKeyIds: [String]?) throws {
+        try Task.checkCancellation()
+        lock.lock(); activeAttestedKeyIds = attestedKeyIds; lock.unlock()
     }
 
     /// `generate_proof` on the engine WebSocket: the proofs (none when the request is for the key alone)
@@ -297,10 +318,16 @@ extension SirosWallet {
         let generation = credentialResponseGeneration(flowId: msg.flowId)
         let encryption = msg.params.credentialResponseEncryption
         let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: msg.params.proofTypesSupported)
-        let proofs = keyOnly ? [] : try await proofObjects(
-            audience: msg.params.audience ?? "", nonce: msg.params.nonce ?? "", count: msg.params.count ?? 1,
-            proofTypesSupported: msg.params.proofTypesSupported, proofTypeHint: msg.params.proofType
-        )
+        var proofs: [ProofObject] = []
+        if !keyOnly {
+            let generated = try await proofObjects(
+                audience: msg.params.audience ?? "", nonce: msg.params.nonce ?? "", count: msg.params.count ?? 1,
+                proofTypesSupported: msg.params.proofTypesSupported, proofTypeHint: msg.params.proofType
+            )
+            try applyProofResult(generated.attestedKeyIds)
+            proofs = generated.proofs
+        }
+        try Task.checkCancellation()
         let jwk = credentialResponseEncryptionJwk(flowId: msg.flowId, request: encryption, generation: generation)
         engine.sendSignResponse(
             flowId: msg.flowId, proofs: proofs.isEmpty ? nil : proofs, credentialResponseEncryptionJwk: jwk, messageId: msg.messageId
@@ -313,10 +340,16 @@ extension SirosWallet {
         let generation = credentialResponseGeneration(flowId: flowId)
         let encryption = params.credentialResponseEncryption
         let keyOnly = Self.isKeyOnlyProofRequest(request: encryption, proofTypesSupported: params.proofTypesSupported)
-        let proofs = keyOnly ? [] : try await proofObjects(
-            audience: params.audience, nonce: params.nonce, count: params.count ?? 1,
-            proofTypesSupported: params.proofTypesSupported, proofTypeHint: params.proofType
-        )
+        var proofs: [ProofObject] = []
+        if !keyOnly {
+            let generated = try await proofObjects(
+                audience: params.audience, nonce: params.nonce, count: params.count ?? 1,
+                proofTypesSupported: params.proofTypesSupported, proofTypeHint: params.proofType
+            )
+            try applyProofResult(generated.attestedKeyIds)
+            proofs = generated.proofs
+        }
+        try Task.checkCancellation()
         let jwk = credentialResponseEncryptionJwk(flowId: flowId, request: encryption, generation: generation)
         return SignSubFlowResult(proofs: proofs.isEmpty ? nil : proofs, credentialResponseEncryptionJwk: jwk)
     }

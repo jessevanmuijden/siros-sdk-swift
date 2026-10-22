@@ -80,3 +80,10 @@ public protocol WmpResolveHandler: AnyObject {
     /// Process a resolve request for a supported type.
     func handleResolve(params: ResolveParams) async throws -> ResolveResult
 }
+
+/// A profile with work of its own in flight (child flows running application handlers) that the peer must be
+/// able to stop when the session ends.
+public protocol WmpShutdownProfile: AnyObject {
+    /// Cancel everything in flight and answer nothing more.
+    func shutdown()
+}

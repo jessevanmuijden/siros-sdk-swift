@@ -305,6 +305,31 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.notifications.isEmpty)
     }
 
+    /// A parent that completes or fails, or a session that ends, stops the children still suspended for it.
+    func testTerminalParentMessagesAndShutdownStopSuspendedChildren() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        for trigger in ["complete", "error", "shutdown"] {
+            let ctx = MockPeerContext()
+            let gate = Gate()
+            let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in
+                while await !gate.isOpen { try await Task.sleep(nanoseconds: 10_000_000) }
+                return SignSubFlowResult(vpToken: "late")
+            }))
+            profile.initialize(ctx: ctx)
+            _ = try await profile.startFlow(params: childStart(flowType: "sign", flowId: "c-\(trigger)", params: [
+                "action": .string("sign_presentation"), "parent_flow_id": .string("vp-\(trigger)"),
+            ]))
+            switch trigger {
+            case "complete": await profile.handleComplete(params: FlowCompleteParams(flowId: "vp-complete"))
+            case "error": await profile.handleError(params: FlowErrorParams(flowId: "vp-error", code: "x"))
+            default: profile.shutdown()
+            }
+            await gate.release()
+            try await Task.sleep(nanoseconds: 250_000_000)
+            XCTAssertTrue(ctx.notifications.isEmpty, trigger)
+        }
+    }
+
     func testAnIntegerFlowErrorCodeFromThePeerDecodes() throws {
         let params = try JSONDecoder().decode(FlowErrorParams.self, from: Data(#"{"flow_id":"f","code":-31006,"message":"m"}"#.utf8))
         XCTAssertEqual(params.code, "-31006")

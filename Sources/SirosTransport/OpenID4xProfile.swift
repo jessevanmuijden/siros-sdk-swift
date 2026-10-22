@@ -552,7 +552,7 @@ private let stepTrustEvaluation = "trust_evaluation_required"
 /// Handles server-initiated flows: the backend engine starts flows and
 /// the SDK responds to progress events, sign requests, match requests,
 /// and trust evaluations.
-public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Sendable {
+public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfile, @unchecked Sendable {
     public let name: String = "openid4x"
     public let capabilities: [String] = ["oid4vci", "oid4vp"]
     public let flowTypes: [String] = [OID4FlowTypes.oid4vci, OID4FlowTypes.oid4vp, WmpSubFlowTypes.sign, WmpSubFlowTypes.match]
@@ -658,28 +658,48 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         return FlowActionResult(flowId: params.flowId, accepted: true)
     }
 
-    public func handleComplete(params: FlowCompleteParams) async {
-        await config.onComplete?(params.flowId, params.result)
-    }
-
-    public func handleError(params: FlowErrorParams) async {
-        await config.onError?(params.flowId, params.code, params.message)
-    }
-
-    public func handleCancel(params: FlowCancelParams) async {
-        let id = params.flowId
+    /// Cancels the child flows that belong to `flowId` (or are `flowId`): a flow that has ended gets no more
+    /// answers from handlers still suspended for it. True when `flowId` itself is a child flow.
+    @discardableResult
+    private func cancelChildren(of flowId: String) -> Bool {
         childLock.lock()
         var running: [Task<Void, Never>] = []
-        let wasChild = childTasks[id] != nil
-        for (childId, child) in childTasks where childId == id || child.parent == id {
+        let wasChild = childTasks[flowId] != nil
+        for (childId, child) in childTasks where childId == flowId || child.parent == flowId {
             cancelledChildren.insert(childId)
             running.append(child.task)
         }
         childLock.unlock()
-        // A cancelled child answers nothing, even if its handler ignores the cancellation.
         for task in running { task.cancel() }
-        // Cancelling a child stops that operation; only a flow of its own is cleaned up by the wallet.
-        if !wasChild { await config.onCancel?(id) }
+        return wasChild
+    }
+
+    public func shutdown() {
+        childLock.lock()
+        var running: [Task<Void, Never>] = []
+        for (childId, child) in childTasks {
+            cancelledChildren.insert(childId)
+            running.append(child.task)
+        }
+        childLock.unlock()
+        for task in running { task.cancel() }
+    }
+
+    public func handleComplete(params: FlowCompleteParams) async {
+        cancelChildren(of: params.flowId)
+        await config.onComplete?(params.flowId, params.result)
+    }
+
+    public func handleError(params: FlowErrorParams) async {
+        cancelChildren(of: params.flowId)
+        await config.onError?(params.flowId, params.code, params.message)
+    }
+
+    public func handleCancel(params: FlowCancelParams) async {
+        // A cancelled child answers nothing, even if its handler ignores the cancellation. Cancelling a child
+        // stops that operation; only a flow of its own is cleaned up by the wallet.
+        let wasChild = cancelChildren(of: params.flowId)
+        if !wasChild { await config.onCancel?(params.flowId) }
     }
 
     // MARK: - Sub-flow Handlers
