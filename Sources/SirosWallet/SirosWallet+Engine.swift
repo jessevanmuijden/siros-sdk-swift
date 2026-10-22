@@ -347,12 +347,11 @@ extension SirosWallet {
                 let verifier = Self.transactionVerifierLabel(trust: evaluated, fallback: params.audience)
                 return try await trackedTransaction(flowId: flowId) { try await self.wmpTransactionPresentation(flowId: flowId, params: params, verifier: verifier) }
             }
-            // The credentials the request names are presented one by one, each under its query id (the
-            // wallet builds the DCQL vp_token). A request that names none keeps the credential-less path.
-            if let refs = params.credentialsToInclude, !refs.isEmpty {
-                return try wmpPresentationResult(
-                    params: params, parts: try await wmpPresentationParts(flowId: flowId, params: params, refs: refs)
-                )
+            // The WMP path has no credential selection or consent step, so it cannot present the credentials a
+            // request names: an encrypted response for such a request is refused rather than built around a
+            // credential-less token (which would be a wrong vp_token the engine cannot repair inside the JWE).
+            if params.responseEncryption != nil, !(params.credentialsToInclude ?? []).isEmpty {
+                throw SirosError.wallet(message: "WMP sign_presentation cannot present credentials: no selection step")
             }
             let vpToken = try await keystore.signPresentation(
                 nonce: params.nonce,

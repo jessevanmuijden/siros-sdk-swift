@@ -141,6 +141,22 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(listener.errors.count, 1)
     }
 
+    /// `response_encryption: null` on the WebSocket is an error, never a plain vp_token for the engine to post.
+    func testANullOrMalformedResponseEncryptionOnTheWebSocketIsNeverAnsweredInTheClear() async throws {
+        for member in ["null", #"{"alg":"ECDH-ES"}"#, "7"] {
+            let json = """
+            {"type":"sign_request","flow_id":"n1","message_id":"m","action":"sign_presentation",
+             "params":{"audience":"a","nonce":"n","response_encryption":\(member),
+                       "verified_request":{"client_id":"c","response_mode":"direct_post.jwt"}}}
+            """
+            let msg = try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8))
+            let w = wallet()
+            let sender = RecordingSender()
+            await w.handleSignRequest(engine: sender, msg: msg)
+            XCTAssertTrue(sender.sent.allSatisfy { $0.vpToken == nil && $0.responseJwe == nil }, member)
+        }
+    }
+
     func testOnlyAVerifiedDirectPostJwtRequestIsEncrypted() async throws {
         let w = wallet()
         for mode in ["direct_post", "fragment", "query"] {
@@ -187,20 +203,19 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(plain.vpToken, "vp-token")
         XCTAssertNil(plain.responseJwe)
 
-        // Credentials the request names are presented one by one under their query ids (DCQL).
-        let store = InMemoryCredentialStore()
-        await store.save(StoredCredential(id: 1, format: "dc+sd-jwt", raw: "cred-1", kid: nil, batchId: 1, instanceId: 0))
-        let withStore = wallet(store: store)
-        let dcql = try await withStore.handleWmpSignRequest(flowId: "p5", params: SignSubFlowParams(
-            action: "sign_presentation", nonce: "n", audience: "x509_san_dns:verifier.example",
-            credentialsToInclude: [try JSONDecoder().decode(CredentialRef.self, from: Data(#"{"credential_id":"1","credential_query_id":"pid"}"#.utf8))],
-            responseEncryption: ResponseEncryptionRequest(
-                jwk: verifierJwk.mapValues { .string($0 as? String ?? "") }, alg: "ECDH-ES", enc: "A128GCM"
-            ),
-            verifiedRequest: VerifiedRequest(clientId: "client-5", responseMode: "direct_post.jwt")
-        ))
-        let token = try XCTUnwrap(try claims(try XCTUnwrap(dcql.responseJwe))["vp_token"] as? [String: [String]])
-        XCTAssertEqual(token, ["pid": ["vp:cred-1"]])
+        // The WMP path has no selection step: an encrypted response for a request that names credentials is
+        // refused, not built around a credential-less token.
+        do {
+            _ = try await w.handleWmpSignRequest(flowId: "p5", params: SignSubFlowParams(
+                action: "sign_presentation", nonce: "n", audience: "x509_san_dns:verifier.example",
+                credentialsToInclude: [try JSONDecoder().decode(CredentialRef.self, from: Data(#"{"credential_id":"1","credential_query_id":"pid"}"#.utf8))],
+                responseEncryption: ResponseEncryptionRequest(
+                    jwk: verifierJwk.mapValues { .string($0 as? String ?? "") }, alg: "ECDH-ES", enc: "A128GCM"
+                ),
+                verifiedRequest: VerifiedRequest(clientId: "client-5", responseMode: "direct_post.jwt")
+            ))
+            XCTFail("no selection step, no presentation")
+        } catch { /* expected */ }
 
         do {
             _ = try await w.handleWmpSignRequest(flowId: "p4", params: SignSubFlowParams(

@@ -41,6 +41,10 @@ extension SirosWallet {
     /// The `sign_response` itself, built without sending it, so a caller that records a consent can build
     /// it before the consent is recorded and treat a failure to build as a failed signing.
     func presentationAnswer(msg: SignRequestMessage, parts: [PresentationPart]) throws -> SignResponseMessage {
+        // `response_encryption: null` (or an unreadable one) is not "absent": it must never become a plain vp_token.
+        if msg.params.responseEncryptionMember.isExplicitNull || msg.params.responseEncryptionMember.isMalformed {
+            throw SirosError.wallet(message: "The presentation response could not be encrypted")
+        }
         if let encryption = msg.params.responseEncryption {
             let jwe = try encryptedPresentationResponse(
                 parts: parts, encryption: encryption, state: msg.params.state, verifiedRequest: msg.params.verifiedRequest
@@ -60,30 +64,6 @@ extension SirosWallet {
         return SignSubFlowResult(responseJwe: try encryptedPresentationResponse(
             parts: parts, encryption: encryption, state: params.state, verifiedRequest: params.verifiedRequest
         ))
-    }
-
-    /// The presentation of each credential a WMP `sign_presentation` names, with its query id: the same
-    /// per-credential building as the engine WebSocket (mdoc, ZK and SD-JWT with a key-binding JWT).
-    func wmpPresentationParts(flowId: String, params: SignSubFlowParams, refs: [CredentialRef]) async throws -> [PresentationPart] {
-        let allCreds = await credentialStore.getAll()
-        lock.lock()
-        let storedMatchResults = pendingMatchResultsByFlow.removeValue(forKey: flowId)
-        lock.unlock()
-        var parts: [PresentationPart] = []
-        for ref in refs {
-            // A flow that ended (or a logout) while the user decided must not sign.
-            try Task.checkCancellation()
-            guard let cred = allCreds.first(where: { $0.id == Int64(ref.credentialId) }) else { continue }
-            let matchResult = storedMatchResults?.first(where: { result in
-                result.queryId == ref.credentialQueryId || result.candidates.contains(where: { $0.id == cred.id })
-            })
-            parts.append((ref.credentialQueryId, try await buildSignPresentationVpPart(
-                cred: cred, ref: ref, matchResult: matchResult, nonce: params.nonce, audience: params.audience,
-                context: SignPresentationContext(params)
-            )))
-        }
-        try Task.checkCancellation()
-        return parts
     }
 }
 

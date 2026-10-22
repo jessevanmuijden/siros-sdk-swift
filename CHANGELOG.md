@@ -28,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the child flow (https://github.com/sirosfoundation/siros-sdk-swift/pull/220). A `response_encryption`
   that is present but unusable (malformed, `null`) is an error, never read as absent (which would send a
   plain `vp_token`); a response that cannot be encrypted finalizes a transaction consent as failed; and a
-  WMP `sign_presentation` that names credentials now presents each one under its query id (it used to
-  sign a credential-less token), so the encrypted DCQL `vp_token` is real over WMP too. Cross-checked against go-jose
+  WMP `sign_presentation` (which has no credential selection or consent step, so it signs a
+  credential-less token) refuses an encrypted response for a request that names credentials, instead of
+  building a JWE around a wrong `vp_token`; `response_encryption: null` or an unreadable one is refused on the
+  WebSocket too (`ResponseEncryptionMember`). Cross-checked against go-jose
   v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a

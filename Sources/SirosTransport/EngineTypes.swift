@@ -670,6 +670,58 @@ public struct ResponseEncryptionRequest: Codable, Sendable, Equatable {
     public var jwkStrings: [String: String] { jwk.compactMapValues { $0.stringValue } }
 }
 
+/// The `response_encryption` member as it arrived: absent, usable, or PRESENT BUT NOT USABLE (`null` or
+/// malformed). The last is an error, never "absent": absent selects the plain `vp_token` path, which would
+/// hand the engine a presentation the verifier asked to be encrypted.
+public struct ResponseEncryptionMember: Codable, Sendable, Equatable {
+    public var request: ResponseEncryptionRequest?
+    public var isExplicitNull: Bool
+    public var isMalformed: Bool
+
+    public init(request: ResponseEncryptionRequest? = nil, isExplicitNull: Bool = false, isMalformed: Bool = false) {
+        self.request = request
+        self.isExplicitNull = isExplicitNull
+        self.isMalformed = isMalformed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() {
+            self.init(isExplicitNull: true)
+        } else if let request = try? c.decode(ResponseEncryptionRequest.self) {
+            self.init(request: request)
+        } else {
+            self.init(isMalformed: true)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        if let request { try c.encode(request) } else { try c.encodeNil() }
+    }
+
+    /// Whether the member was present at all.
+    public var isPresent: Bool { request != nil || isExplicitNull || isMalformed }
+}
+
+extension KeyedDecodingContainer {
+    func decode(_: ResponseEncryptionMember.Type, forKey key: Key) throws -> ResponseEncryptionMember {
+        guard contains(key) else { return ResponseEncryptionMember() }
+        return try ResponseEncryptionMember(from: try superDecoder(forKey: key))
+    }
+}
+
+extension KeyedEncodingContainer {
+    mutating func encode(_ value: ResponseEncryptionMember, forKey key: Key) throws {
+        guard value.isPresent else { return }
+        try encodeMember(value, forKey: key)
+    }
+
+    private mutating func encodeMember(_ value: ResponseEncryptionMember, forKey key: Key) throws {
+        if let request = value.request { try encode(request, forKey: key) } else { try encodeNil(forKey: key) }
+    }
+}
+
 /// What the engine validated about the verifier's request, relayed with `sign_presentation`. The wallet
 /// takes the JARM `aud` from `clientId` and nothing else from here; the ENGINE posts, and only to the
 /// `responseUri` it validated.
@@ -867,7 +919,11 @@ public struct SignRequestParams: Codable, Sendable {
     public var deferred: Bool?
     /// `sign_presentation` for `direct_post.jwt` only: the verifier key and `alg`/`enc` the engine resolved.
     /// The wallet answers with `response_jwe` and NO `vp_token`.
-    public var responseEncryption: ResponseEncryptionRequest?
+    public var responseEncryptionMember = ResponseEncryptionMember()
+    public var responseEncryption: ResponseEncryptionRequest? {
+        get { responseEncryptionMember.request }
+        set { responseEncryptionMember = ResponseEncryptionMember(request: newValue) }
+    }
     /// The request's `state`, present only when it had one.
     public var state: String?
     /// What the engine validated about the verifier's request (`client_id`, `response_uri`, ...).
@@ -875,7 +931,7 @@ public struct SignRequestParams: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case audience, nonce, issuer, count, htm, htu, ath, jwe, deferred, state
-        case responseEncryption = "response_encryption"
+        case responseEncryptionMember = "response_encryption"
         case verifiedRequest = "verified_request"
         case credentialResponseEncryption = "credential_response_encryption"
         case proofType = "proof_type"
