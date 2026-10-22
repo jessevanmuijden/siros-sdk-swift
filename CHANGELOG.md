@@ -244,6 +244,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **A plain completion with an unreadable credential entry is refused whole, and a renewal never costs the credential
+  it replaces.** A plain (not wallet-encrypted) `flow_complete` / `wmp.flow.complete` whose credential entry has no
+  value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
+  kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
+  only after a replacement was stored; tests now pin that.
 - **WMP child flows and session end, review follow-ups.** Shutdown is one-shot, so a retired session's close
   cannot run the application's cleanup again after a replacement session has begun. A session created without a
   `resumption_token` now ends at once when its connection is lost (terminal hook, pending requests failed)

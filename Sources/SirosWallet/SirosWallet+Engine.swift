@@ -138,21 +138,7 @@ extension SirosWallet {
                 return await self.handleWmpTrustEvaluation(flowId: flowId, payload: payload)
             },
             onComplete: { [weak self] flowId, result in
-                // Encrypted-to-the-wallet issuance: same pairing as the WebSocket's flow_complete.
-                if let self, Self.claimsEncryptedResponse(result) {
-                    guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {
-                        // Encrypted but unreadable: an error, not a plain completion that drops what was decrypted.
-                        await self.failIssuanceLocally(flowId: flowId, message: "The completion could not be read")
-                        return
-                    }
-                    await self.handleFlowComplete(msg: message)
-                    return
-                }
-                // Terminal path for this issuance over the WMP transport too -
-                // see `resetIssuanceGuards()`.
-                self?.resetIssuanceGuards()
-                self?.cancelTransactionTasks(flowId: flowId)
-                self?.eventListener?.onFlowComplete(flowId: flowId, redirectUri: nil)
+                await self?.handleWmpFlowComplete(flowId: flowId, result: result)
             },
             onCancel: { [weak self] flowId in
                 // `wmp.flow.cancel` from the peer: the same terminal cleanup as an error.
@@ -1480,5 +1466,32 @@ extension SirosWallet {
         fclose(f)
         return read == count ? 0 : -1
         #endif
+    }
+}
+
+extension SirosWallet {
+    /// `wmp.flow.complete` for an issuance or presentation. A wallet-encrypted issuance is paired and stored exactly
+    /// like the WebSocket's `flow_complete`; a plain completion that carries a credential entry without its value
+    /// is refused whole, as on the WebSocket, rather than reported as a success.
+    func handleWmpFlowComplete(flowId: String, result: AnyCodable?) async {
+        // Encrypted-to-the-wallet issuance: same pairing as the WebSocket's flow_complete.
+        if Self.claimsEncryptedResponse(result) {
+            guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {
+                // Encrypted but unreadable: an error, not a plain completion that drops what was decrypted.
+                await failIssuanceLocally(flowId: flowId, message: "The completion could not be read")
+                return
+            }
+            await handleFlowComplete(msg: message)
+            return
+        }
+        if let entries = result?.objectValue?["credentials"]?.arrayValue,
+           entries.contains(where: { ($0.objectValue?["credential"]?.stringValue ?? "").isEmpty }) {
+            await failIssuanceLocally(flowId: flowId, message: "The issuer's credential did not arrive")
+            return
+        }
+        // Terminal path for this issuance over the WMP transport too - see `resetIssuanceGuards()`.
+        resetIssuanceGuards()
+        cancelTransactionTasks(flowId: flowId)
+        eventListener?.onFlowComplete(flowId: flowId, redirectUri: nil)
     }
 }
