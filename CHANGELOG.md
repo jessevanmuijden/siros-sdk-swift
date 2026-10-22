@@ -115,6 +115,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the message instead of the raw JSON body. A body without a code is unchanged.
 
 ### Changed
+- **One TTL trust-decision cache for every `/v1/evaluate` call (replaces `TrustCache`).**
+  Every trust evaluation (mdoc issuer/reader, engine-relayed verifier/issuer,
+  DC API) now goes through `TrustDecisionCache`: only successful decisions (allow
+  and deny) are remembered, keyed by a hash of the whole request body plus the
+  backend client that answered it, so a different certificate, doc type or context
+  never reuses an entry; errors, timeouts and 4xx/5xx are never cached; an expired
+  entry is never served, even when the backend is unreachable; identical concurrent
+  requests share one backend call; 256 entries, least recently used evicted; in
+  memory only; cleared whenever the backend connection is dropped or replaced
+  (logout, account deletion, reconnect). New `WalletConfig.trustDecisionCacheTtl`
+  (seconds, default 300, `0` disables). Trade-off: a revocation can take up to the
+  TTL to take effect. **Behaviour change:** the old "degraded mode" is gone: an
+  earlier positive verifier result no longer stands in for a failed evaluation
+  (engine path and DC API path now fail closed), and the engine's informational
+  `trust_evaluated` issuer report is no longer cached. `TrustCache` is removed (it
+  had no public members). Ports Kotlin SDK #276, item 4
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/276).
 - **Keystore: containers are written at `S.schemaVersion` 4 (was 3).** Version 3
   readers (older SDKs, a wallet-frontend before spec 3.0) crash on or drop
   `S.extensions` and `S.credentials[].metadata`, which is why spec 3.0 moves them
