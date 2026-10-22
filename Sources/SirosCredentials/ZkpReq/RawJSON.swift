@@ -221,3 +221,9 @@ extension RawJSON {
         return pairs.first { $0.0 == name }?.1
     }
 }
+
+extension RawJSON {
+    /// The value as a ``JSONValue`` (strict parse of its own serialisation; a duplicate member is not representable
+    /// there, so callers that care check the raw form first).
+    var jsonValue: JSONValue { (try? StrictJSON.parse(serialized())) ?? .null }
+}

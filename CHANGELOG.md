@@ -48,6 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`x509_san_dns:<dns>`, `semantic_id:<id>`) whose SHA-256 is `verifier_input`. Tested against the 241
   vectors of siros-dc-matcher 93047bc (digest 9f482d7a...), verbatim. Supersedes the JSON `circuit_zk`
   response shape. Not wired into the wallet; the prover seam still refuses.
+- **`DeliveredSecretReceipt`: the wallet's side of delivered secrets (privatedata-spec 5A).**
+  `receive` applies the rules to a Credential Response that carries
+  `org.siros.secret_seed`: refused when the response is not JWE-encrypted, is a deferred
+  response, has no `notification_id`, has a malformed member (1 to 8 namespaces of 1 to
+  64 bytes, not `namespaces`, each seed 32 lowercase hex), has a non-object
+  `credential_metadata`, or fails the commitment (`SHA256(seed) == ssc` for the designated
+  namespace, constant time). It returns the `metadata` entries to store in each credential
+  (in the order received), the display members WITHOUT the seed (strip before merge) and
+  the seeds for the secret store only; `mergedDisplayMetadata` merges the stripped response
+  over the issuer metadata and `advertisement` validates the issuer's namespace-names-only
+  advertisement. Pure; the result and errors never print a seed. Tested against the
+  privatedata-spec 1b796d2 delivered-secret vectors, verbatim. Not wired into the wallet yet.
+- **`circuit_zk` response shape: `CircuitZkX5Chain` and `CircuitZkResponseValidator`.** The
+  presentation now carries `x5chain`, the holder-supplied issuer chain: the credential's own
+  Document Signer chain from `issuerAuth`'s unprotected header (COSE label 33), leaf first,
+  padded STANDARD base64 of each DER certificate, at most 8 certificates and 4096 bytes each
+  (a chain that breaks a limit is never built). `CircuitZkResponseValidator` checks the shape of a
+  `circuit_zk` entry in a `vp_token` and its binding to the request (offer, handles, result
+  shapes; a JSON `null` is a type error everywhere, duplicates are judged on the raw text,
+  unknown functions and members are refused) and is run by a wallet on the response it built.
+  Tested against the 80 shared vectors of siros-dc-matcher 932b07a, copied verbatim. The
+  verification time `T` is not part of this change. Not wired into the wallet.
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1
