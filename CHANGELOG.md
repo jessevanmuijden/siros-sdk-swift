@@ -256,6 +256,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **Presentation encryption: the top-level `response_mode` counts too.** A `direct_post.jwt` there, with neither
+  `verified_request` nor `response_encryption`, is refused on both transports instead of answered with a plaintext
+  `vp_token`. The transaction-data end-to-end fixtures now use plain `direct_post` for their KB-JWT contract checks.
 - **Presentation encryption: handover, header and strict request decoding.** The mdoc `OpenID4VPHandover` thumbprint
   for a request with `response_encryption` is the RFC 7638 thumbprint of that key (`JwkThumbprint.ec`), never the
   engine's `verifier_jwk_thumbprint` (both transports, both mdoc builders go through `SignPresentationContext`).

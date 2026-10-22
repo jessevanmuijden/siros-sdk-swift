@@ -174,6 +174,24 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
         XCTAssertNil(SignPresentationContext(broken).verifierJwkThumbprint)
     }
 
+    /// The top-level `response_mode` counts too: `direct_post.jwt` there, with neither `verified_request` nor
+    /// `response_encryption`, is refused on both transports instead of answered with a plaintext vp_token.
+    func testATopLevelDirectPostJwtModeWithoutEncryptionIsRefused() async throws {
+        let w = wallet()
+        let sender = RecordingSender()
+        let json = #"{"type":"sign_request","flow_id":"p1","message_id":"m1","action":"sign_presentation","params":{"audience":"a","nonce":"n","response_mode":"direct_post.jwt"}}"#
+        await w.handleSignRequest(engine: sender, msg: try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8)))
+        XCTAssertEqual(sender.sent.count, 1)
+        XCTAssertNil(sender.sent.first?.vpToken)
+        XCTAssertEqual(sender.sent.first?.errorCode, "RESPONSE_ENCRYPTION_FAILED")
+        do {
+            _ = try await w.handleWmpSignRequest(flowId: "p2", params: SignSubFlowParams(
+                action: "sign_presentation", nonce: "n", audience: "a", responseMode: "direct_post.jwt"
+            ))
+            XCTFail("a plaintext vp_token for a direct_post.jwt request")
+        } catch { XCTAssertEqual((error as? WmpErrorCodeProviding)?.wmpErrorCode, "RESPONSE_ENCRYPTION_FAILED") }
+    }
+
     func testWithoutAValidatedClientIdNothingIsAnsweredAndTheFlowFails() async throws {
         let w = wallet()
         let listener = Listener()

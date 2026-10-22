@@ -65,7 +65,7 @@ extension SirosWallet {
             return SignResponseMessage(flowId: msg.flowId, messageId: msg.messageId, responseJwe: jwe)
         }
         // A verified `direct_post.jwt` request without encryption parameters is not answered with a plain vp_token.
-        if msg.params.verifiedRequest?.responseMode == "direct_post.jwt" { throw PresentationResponseError() }
+        if msg.params.verifiedRequest?.responseMode == "direct_post.jwt" || msg.params.responseMode == "direct_post.jwt" { throw PresentationResponseError() }
         return SignResponseMessage(
             flowId: msg.flowId, messageId: msg.messageId, vpToken: parts.map(\.token).joined(separator: "\n")
         )
@@ -74,7 +74,7 @@ extension SirosWallet {
     /// The same over WMP.
     func wmpPresentationResult(params: SignSubFlowParams, parts: [PresentationPart]) throws -> SignSubFlowResult {
         guard let encryption = params.responseEncryption else {
-            if params.verifiedRequest?.responseMode == "direct_post.jwt" { throw PresentationResponseError() }
+            if params.verifiedRequest?.responseMode == "direct_post.jwt" || params.responseMode == "direct_post.jwt" { throw PresentationResponseError() }
             return SignSubFlowResult(vpToken: parts.map(\.token).joined(separator: "\n"))
         }
         return SignSubFlowResult(responseJwe: try encryptedPresentationResponse(

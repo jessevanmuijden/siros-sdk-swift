@@ -250,7 +250,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
     private func engineMessage(flow: String = "f1", transactionData: String? = nil, refs: String = #"[{"credential_query_id":"pay","credential_id":"1"}]"#, extra: String = "",
                                nonce: String = "n-1", audience audienceOverride: String? = nil) throws -> SignRequestMessage {
         let td = transactionData ?? #"[{"raw":"\#(raw)","type":"urn:eudi:sca:payment:1","credential_ids":["pay"],"payload":\#(payload),"transaction_data_hashes_alg":["sha-256"]}]"#
-        let json = #"{"type":"sign_request","flow_id":"\#(flow)","message_id":"m1","action":"sign_presentation","params":{"audience":"\#(audienceOverride ?? audience)","nonce":"\#(nonce)","response_mode":"direct_post.jwt","credentials_to_include":\#(refs),"transaction_data":\#(td)\#(extra)}}"#
+        let json = #"{"type":"sign_request","flow_id":"\#(flow)","message_id":"m1","action":"sign_presentation","params":{"audience":"\#(audienceOverride ?? audience)","nonce":"\#(nonce)","response_mode":"direct_post","credentials_to_include":\#(refs),"transaction_data":\#(td)\#(extra)}}"#
         return try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8))
     }
 
@@ -259,7 +259,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
         let token = try XCTUnwrap(sender.sent.first?.vpToken)
-        try assertVerifierContract(try kbClaims(token), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        try assertVerifierContract(try kbClaims(token), responseMode: "direct_post", nonce: "n-1", aud: audience)
         let shown = try XCTUnwrap(f.consent.requests.first)
         XCTAssertEqual(shown.entries.first?.fields.first?.label, "Amount")
         XCTAssertEqual(shown.credentialName, "Visa card")
@@ -997,7 +997,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
 
     private func wmpParams(nonce: String = "n-1", audience audienceOverride: String? = nil, transactionData: String? = nil, refs: String = #"[{"credential_query_id":"pay","credential_id":"1"}]"#) throws -> SignSubFlowParams {
         let td = transactionData ?? #"[{"raw":"\#(raw)","type":"urn:eudi:sca:payment:1","credential_ids":["pay"],"payload":\#(payload),"transaction_data_hashes_alg":["sha-256"]}]"#
-        let json = #"{"action":"sign_presentation","nonce":"\#(nonce)","audience":"\#(audienceOverride ?? audience)","response_mode":"direct_post.jwt","credentials_to_include":\#(refs),"transaction_data":\#(td)}"#
+        let json = #"{"action":"sign_presentation","nonce":"\#(nonce)","audience":"\#(audienceOverride ?? audience)","response_mode":"direct_post","credentials_to_include":\#(refs),"transaction_data":\#(td)}"#
         return try JSONDecoder().decode(SignSubFlowParams.self, from: Data(json.utf8))
     }
 
@@ -1035,14 +1035,14 @@ final class TransactionDataEndToEndTests: XCTestCase {
     func testWmpProducesAContractKbJwt() async throws {
         let f = try await fixture()
         let result = try await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams())
-        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post", nonce: "n-1", aud: audience)
     }
 
     /// Through the sub-flow handler the profile calls, not just the helper.
     func testWmpSignSubFlowHandlerRoutesTransactionDataToTheScaPath() async throws {
         let f = try await fixture()
         let result = try await f.wallet.handleWmpSignRequest(flowId: "f1", params: try wmpParams())
-        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post", nonce: "n-1", aud: audience)
         XCTAssertEqual(f.keystore.scaCalls, 1)
     }
 
