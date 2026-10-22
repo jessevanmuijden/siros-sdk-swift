@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
+  `Generated/siros_dc_matcher_ffi.swift` from the v0.11.0 tag (keeping the
+  `#if os(iOS)` gate) and updated the `Package.swift` checksum to the release's
+  published SPM checksum. Nothing in this SDK calls the renamed FFI yet, so this SDK's
+  wiring is unchanged. **The engine's behaviour is not**: it is inherited from upstream
+  0.7.0-0.11.0.
+  - Matching: an absent `zk_required` now means the proof is optional (it was read as
+    required); a verifier's `multiple` is honoured; duplicate DCQL identifiers are
+    rejected; a verifier requiring cryptographic holder binding is honoured; the
+    combination count says whether it is exact.
+  - **BREAKING, nym_auth rulebook v0.4** (0.11.0): the format and its names are renamed,
+    not aliased: `circuit_zk` -> `zkp_req`, `req` -> `_req`, item `id` -> `fn_id`,
+    `circuit_id` -> `system_id`, and the response is the base64url CBOR `ZkpPresentation`
+    `{system_id, proof, issuer_key_set, proof_time, results}` instead of JSON with
+    `circuit_id` / `proof_system` / `x5chain`. FFI: `addCircuitZkSystem` ->
+    `addZkpReqSystem`, `circuitZk` -> `zkpReq`, `circuitZkPlan` -> `zkpReqPlan`,
+    `CircuitZkPlanError` -> `ZkpReqPlanError`. `birth_date`, `ssc`, `psc` and
+    `secret_seed` of a nym_auth attestation are never matched through any other format.
+  - Verified on a Mac mini (iOS simulator): with matcher 0.6.2 a `zk_system_type` request
+    without `zk_required` offered no credential; with 0.10.0 it offers it. A targeted
+    regression for that, and a human review of the inherited behaviour changes, are still
+    needed before release.
+
 ### Added
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
