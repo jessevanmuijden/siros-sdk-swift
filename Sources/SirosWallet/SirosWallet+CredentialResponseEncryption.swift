@@ -127,6 +127,9 @@ extension SirosWallet {
         if let receiver = credentialMetadataReceiver {
             do {
                 try await receiver(flowId, response, deferred)
+            } catch is CancellationError {
+                // A cancelled request is not a rejection: no `credential_failure`, no cleanup here.
+                throw CancellationError()
             } catch {
                 // The response was read and rejected: the issuer is owed a credential_failure for it
                 // (the engine registered the notification context before relaying the first JWE).
@@ -251,19 +254,21 @@ extension SirosWallet {
             if error is CancellationError || Task.isCancelled { throw error }
             // The profile's flow error goes to the peer only; the wallet's own terminal handling is here.
             let code = (error as? CredentialResponseError) ?? CredentialResponseError.decryptFailed
-            failIssuanceLocally(flowId: flowId, message: code.wmpErrorCode ?? "DECRYPT_FAILED")
+            await failIssuanceLocally(flowId: flowId, message: code.wmpErrorCode ?? "DECRYPT_FAILED")
             throw code
         }
     }
 
     /// Local terminal handling of a flow the wallet is failing itself: drop its response state, end the
     /// issuance and tell the listener.
-    func failIssuanceLocally(flowId: String, message: String) {
+    func failIssuanceLocally(flowId: String, message: String) async {
         cancelTransactionTasks(flowId: flowId)
         discardCredentialResponseState(flowId: flowId)
         resetIssuanceGuards()
         lock.lock(); let listener = eventListener; lock.unlock()
         listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil)
+        // A wallet that was flow-active is ready again: the issuance is over.
+        await restoreReadyState()
     }
 
     /// The WMP `flow_complete` result as a `FlowCompleteMessage`, when it says the issuer's response

@@ -140,7 +140,7 @@ extension SirosWallet {
                 if let self, Self.claimsEncryptedResponse(result) {
                     guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {
                         // Encrypted but unreadable: an error, not a plain completion that drops what was decrypted.
-                        self.failIssuanceLocally(flowId: flowId, message: "The completion could not be read")
+                        await self.failIssuanceLocally(flowId: flowId, message: "The completion could not be read")
                         return
                     }
                     await self.handleFlowComplete(msg: message)
