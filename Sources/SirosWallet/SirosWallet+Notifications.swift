@@ -80,10 +80,9 @@ extension SirosWallet {
             // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
             guard let entries = msg.credentials,
                   let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
-                failIssuanceLocally(
+                await failIssuanceLocally(
                     flowId: msg.flowId, message: "The credentials the issuer sent do not match what the engine reported"
                 )
-                await restoreReadyState()
                 return
             }
             credentialsToStore = paired

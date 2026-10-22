@@ -241,6 +241,51 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertTrue(sender.sent.isEmpty)
     }
 
+    /// A cancelled WMP decrypt child is not a failure of its parent issuance: whichever way its receiver ends
+    /// (throwing `CancellationError`, or returning normally) the parent's key, guards and state are untouched,
+    /// no `credential_failure` is sent, nothing is buffered, and a retry does not find a duplicate.
+    func testACancelledWmpDecryptChildDoesNotFailItsParent() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        for throwing in [true, false] {
+            let w = wallet()
+            let notifier = RecordingNotifier()
+            w.credentialNotifier = notifier
+            let listener = Listener()
+            w.eventListener = listener
+            try installKey(w, flowId: "wp")
+            w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+            let gate = Gate()
+            w.credentialMetadataReceiver = { _, _, _ in
+                while await !gate.isOpen { await Task.yield() }
+                if throwing { throw CancellationError() }
+            }
+            let child = Task { try await w.wmpDecryptCredentialResponse(flowId: "wp", params: SignSubFlowParams(action: "decrypt_credential_response", jwe: Self.jwe, deferred: false)) }
+            try await Task.sleep(nanoseconds: 80_000_000)
+            child.cancel()
+            await gate.release()
+            do { _ = try await child.value; XCTFail("a cancelled child reports nothing") } catch { /* the profile stays silent */ }
+            w.lock.lock()
+            let guards = (w.issuanceInFlight, w.credentialResponseKeys["wp"] != nil)
+            w.lock.unlock()
+            XCTAssertTrue(guards.0, "throwing=\(throwing): the parent's in-flight guard is not reset")
+            XCTAssertTrue(guards.1, "throwing=\(throwing): the parent's key is kept")
+            XCTAssertTrue(listener.errors.isEmpty, "throwing=\(throwing): the parent is not failed")
+            XCTAssertTrue(notifier.sent.isEmpty, "throwing=\(throwing): a cancellation is not a rejection")
+            XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "wp").isEmpty, "throwing=\(throwing)")
+        }
+    }
+
+    /// A completion the wallet cannot read ends the issuance and leaves the wallet ready, not flow-active.
+    func testAnUnreadableEncryptedCompletionLeavesTheWalletReady() async throws {
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        w.setState(.flowActive(userId: "u", displayName: "U", flowId: "uf", flowType: "oid4vci", status: "x", credentials: []))
+        await w.failIssuanceLocally(flowId: "uf", message: "The completion could not be read")
+        if case .ready = w.state {} else { XCTFail("\(w.state)") }
+        XCTAssertEqual(listener.errors.count, 1)
+    }
+
     func testAnEncryptedCompletionWithNoEntriesIsNotASuccess() {
         let decrypted = DecryptedCredentialResponse(credentials: [], transactionId: "tx")   // only a deferred answer
         XCTAssertNil(SirosWallet.pairEncryptedCredentials(entries: [], decrypted: [decrypted]))
