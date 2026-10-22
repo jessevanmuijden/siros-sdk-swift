@@ -2,10 +2,12 @@
 
 import XCTest
 @testable import SirosSampleApp
+import SirosCredentials
 
 /// What a card draws for a credential type that publishes no rendering block.
 /// Twin of Kotlin's `CredentialCardTest` in siros-sdk-kotlin PR 211.
 final class CredentialCardStyleTests: XCTestCase {
+    private struct PinnedTint { let type: String; let light: [Double]; let dark: [Double] }
 
     private let realTypes = [
         "uri:eu.ebw.oid.1", "urn:eudi:eucc:1", "uri:eu.eudi.eu-poa.1",
@@ -67,6 +69,63 @@ final class CredentialCardStyleTests: XCTestCase {
         for whole in realTypes { XCTAssertEqual(credentialTypeBadge(whole), whole) }
     }
 
+    func testTypeBadgeNeverShortensANonUrlOrTakesTheQuery() {
+        // Not a URL (no host): left whole even though it contains a slash.
+        XCTAssertEqual(credentialTypeBadge("urn:x:cred/student-id"), "urn:x:cred/student-id")
+        // A slash in the query is not part of the path.
+        XCTAssertEqual(credentialTypeBadge("https://example.com/student-id?ref=other/type"), "student-id")
+        XCTAssertEqual(credentialTypeBadge("https://example.com/a/student-id#frag/ment"), "student-id")
+        XCTAssertEqual(credentialTypeBadge("https://example.com?ref=a/b"), "https://example.com?ref=a/b")
+    }
+
+    /// `buildFallbackMetadata` turns configuration id `diploma` into `Diploma`;
+    /// a type URL ending `/diploma` yields badge `diploma`. Same word twice.
+    func testCardLabelsIgnoreCaseWhenComparingNameToTypeAndBadge() {
+        let byBadge = cardLabels(name: "Diploma", format: "dc+sd-jwt", typeId: "https://example.com/types/diploma")
+        XCTAssertEqual(byBadge, CardLabels(title: "diploma", typeBadge: nil))
+        let byType = cardLabels(name: "URN:EUDI:EUCC:1", format: "dc+sd-jwt", typeId: "urn:eudi:eucc:1")
+        XCTAssertEqual(byType, CardLabels(title: "urn:eudi:eucc:1", typeBadge: nil))
+    }
+
+    // MARK: type resolution
+
+    private func jwt(vct: String) -> String {
+        func b64(_ s: String) -> String {
+            Data(s.utf8).base64EncodedString().replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        }
+        return "\(b64("{\"alg\":\"ES256\"}")).\(b64("{\"vct\":\"\(vct)\"}")).sig"
+    }
+
+    /// Non-nil metadata can still lack the type; the credential declares it.
+    func testCardTypeFallsBackToWhatTheCredentialDeclares() {
+        let cred = StoredCredential(id: 1, format: "dc+sd-jwt", raw: jwt(vct: "urn:eudi:eucc:1"), batchId: 1, instanceId: 0)
+        let noType = CredentialMetadata(name: "Company Certificate", issuer: IssuerInfo(name: "I"))
+        XCTAssertEqual(cardTypeId(metadata: noType, credential: cred), "urn:eudi:eucc:1")
+        XCTAssertEqual(cardTypeId(metadata: nil, credential: cred), "urn:eudi:eucc:1")
+        // Metadata's own type still wins.
+        XCTAssertEqual(cardTypeId(metadata: CredentialMetadata(vct: "urn:meta"), credential: cred), "urn:meta")
+        XCTAssertEqual(cardTypeId(metadata: CredentialMetadata(doctype: "org.iso.18013.5.1.mDL"), credential: cred), "org.iso.18013.5.1.mDL")
+        let bare = StoredCredential(id: 2, format: "dc+sd-jwt", raw: "nope", batchId: 2, instanceId: 0)
+        XCTAssertNil(cardTypeId(metadata: noType, credential: bare))
+    }
+
+    // MARK: badge contrast
+
+    /// Text drawn at an opacity is composited over the card, so the 4.5:1 floor
+    /// has to hold for what is actually rendered, not for the opaque colour.
+    func testTheTypeBadgeIsReadableAsRendered() throws {
+        let types = realTypes + ["urn:probe:1", "urn:probe:2", "urn:probe:3"]
+        for dark in [false, true] {
+            for type in types {
+                let bg = try XCTUnwrap(typeTintColor(typeId: type, dark: dark))
+                let fg = contrastingCardTextColor(on: bg)
+                let rendered = cardComposite(fg, alpha: cardBadgeOpacity, over: bg)
+                XCTAssertGreaterThanOrEqual(cardContrastRatio(rendered, bg), minReadableContrastRatio, "\(type) dark=\(dark)")
+            }
+        }
+    }
+
     // MARK: tint
 
     func testTypeTintIsTheSameEveryTime() {
@@ -84,13 +143,14 @@ final class CredentialCardStyleTests: XCTestCase {
     /// running either implementation.
     func testTypeTintIsPinnedForTheEbwTypes() throws {
         // (type, light RGB, dark RGB)
-        let expected: [(String, [Double], [Double])] = [
-            ("uri:eu.ebw.oid.1", [0.688, 0.8, 0.912], [0.1404, 0.26, 0.3796]),
-            ("urn:eudi:eucc:1", [0.912, 0.688, 0.8], [0.3796, 0.1404, 0.26]),
-            ("uri:eu.eudi.eu-poa.1", [0.8, 0.944, 0.656], [0.26, 0.4212, 0.0988]),
-            ("eu.we-build.iban-ov.1", [0.944, 0.872, 0.656], [0.4212, 0.3406, 0.0988]),
+        let expected: [PinnedTint] = [
+            PinnedTint(type: "uri:eu.ebw.oid.1", light: [0.688, 0.8, 0.912], dark: [0.1404, 0.26, 0.3796]),
+            PinnedTint(type: "urn:eudi:eucc:1", light: [0.912, 0.688, 0.8], dark: [0.3796, 0.1404, 0.26]),
+            PinnedTint(type: "uri:eu.eudi.eu-poa.1", light: [0.8, 0.944, 0.656], dark: [0.26, 0.4212, 0.0988]),
+            PinnedTint(type: "eu.we-build.iban-ov.1", light: [0.944, 0.872, 0.656], dark: [0.4212, 0.3406, 0.0988]),
         ]
-        for (type, light, dark) in expected {
+        for pin in expected {
+            let (type, light, dark) = (pin.type, pin.light, pin.dark)
             for (isDark, rgb) in [(false, light), (true, dark)] {
                 let tint = try XCTUnwrap(typeTintColor(typeId: type, dark: isDark))
                 XCTAssertEqual(tint.red, rgb[0], accuracy: 0.001, "\(type) dark=\(isDark)")

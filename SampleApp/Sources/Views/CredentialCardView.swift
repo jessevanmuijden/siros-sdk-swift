@@ -87,7 +87,7 @@ struct CredentialCardView: View {
         // identifier: stable across devices and launches, different between
         // types (it used to be one accent colour for all of them).
         let bgRGB = meta.backgroundColor.flatMap { CardRGB(hex: $0) }
-            ?? typeTintColor(typeId: meta.vct ?? meta.doctype, dark: colorScheme == .dark)
+            ?? typeTintColor(typeId: cardTypeId(metadata: meta, credential: credential), dark: colorScheme == .dark)
         let bgColor = bgRGB.map { Color(red: $0.red, green: $0.green, blue: $0.blue) } ?? .accentColor
         // Text colour: the issuer's if declared, else whichever of black and
         // white reads better on the actual background.
@@ -182,7 +182,7 @@ struct CredentialCardView: View {
     @ViewBuilder
     private func flatCard(meta: CredentialMetadata?, bgColor: Color, fgColor: Color) -> some View {
         let issuerName = issuerLabel(name: meta?.issuer?.name, url: meta?.issuer?.url)
-        let labels = cardLabels(name: meta?.name, format: credential.format, typeId: meta?.vct ?? meta?.doctype)
+        let labels = cardLabels(name: meta?.name, format: credential.format, typeId: cardTypeId(metadata: meta, credential: credential))
         VStack(alignment: .leading, spacing: 0) {
             // Top: issuer badge (logo or initial), when the credential says who
             // issued it. When it does not, the row is left out rather than
@@ -214,7 +214,7 @@ struct CredentialCardView: View {
             if let typeBadge = labels.typeBadge {
                 Text(typeBadge)
                     .font(.caption2)
-                    .foregroundStyle(fgColor.opacity(0.6))
+                    .foregroundStyle(fgColor.opacity(cardBadgeOpacity))
                     .lineLimit(1)
             }
 

@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+import SirosCredentials
 
 // What a card draws for a credential type that publishes no rendering block of
 // its own - which is every type that comes from someone else's catalog. Pure
@@ -69,14 +70,14 @@ func cardColorFromHSL(hue: Double, saturation: Double, lightness: Double) -> Car
     let c = (1 - abs(2 * lightness - 1)) * saturation
     let hPrime = (hue.truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360) / 60
     let x = c * (1 - abs(hPrime.truncatingRemainder(dividingBy: 2) - 1))
-    let (r1, g1, b1): (Double, Double, Double)
+    var r1 = c, g1 = 0.0, b1 = x
     switch Int(hPrime) {
-    case 0: (r1, g1, b1) = (c, x, 0)
-    case 1: (r1, g1, b1) = (x, c, 0)
-    case 2: (r1, g1, b1) = (0, c, x)
-    case 3: (r1, g1, b1) = (0, x, c)
-    case 4: (r1, g1, b1) = (x, 0, c)
-    default: (r1, g1, b1) = (c, 0, x)
+    case 0: g1 = x; b1 = 0
+    case 1: r1 = x; g1 = c; b1 = 0
+    case 2: r1 = 0; g1 = c; b1 = x
+    case 3: r1 = 0; g1 = x; b1 = c
+    case 4: r1 = x; g1 = 0; b1 = c
+    default: break
     }
     let m = lightness - c / 2
     func clamp(_ v: Double) -> Double { min(max(v, 0), 1) }
@@ -124,23 +125,48 @@ func typeTintColor(typeId: String?, dark: Bool) -> CardRGB? {
     )
 }
 
-/// The short label for a credential type. Only a URL-shaped identifier is
-/// shortened, to its last path segment minus any document extension
+/// The short label for a credential type. Only a URL (a scheme and a host) is
+/// shortened, to the last segment of its path minus any document extension
 /// (`https://example.com/credentials/student-id` reads `student-id`,
-/// `https://registry.siros.org/sunet/mdl.vctm.json` reads `mdl`); everything
-/// else is left whole, because cutting a reverse-DNS or URN identifier at its
-/// last dot gives a wrong fragment (`uri:eu.ebw.oid.1` -> "1").
+/// `https://registry.siros.org/sunet/mdl.vctm.json` reads `mdl`); the query and
+/// fragment are never part of it. Everything else is left whole, because
+/// cutting a reverse-DNS or URN identifier gives a wrong fragment
+/// (`uri:eu.ebw.oid.1` -> "1", `urn:x:cred/student-id` -> "student-id").
 func credentialTypeBadge(_ typeId: String) -> String {
-    let afterScheme = typeId.range(of: "://").map { String(typeId[$0.upperBound...]) } ?? typeId
-    guard let slash = afterScheme.firstIndex(of: "/") else { return typeId }
-    let path = String(afterScheme[afterScheme.index(after: slash)...])
-    if path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return typeId }
-    var trimmed = Substring(path)
-    while trimmed.hasSuffix("/") { trimmed = trimmed.dropLast() }
-    let lastSegment = trimmed.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? ""
-    if lastSegment.isEmpty { return typeId }
+    guard let components = URLComponents(string: typeId),
+          let scheme = components.scheme, !scheme.isEmpty,
+          let host = components.host, !host.isEmpty else { return typeId }
+    var path = Substring(components.path)
+    while path.hasSuffix("/") { path = path.dropLast() }
+    guard let lastSegment = path.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init),
+          !lastSegment.isEmpty else { return typeId }
     let stem = lastSegment.split(separator: ".", omittingEmptySubsequences: false).first.map(String.init) ?? ""
     return stem.isEmpty ? lastSegment : stem
+}
+
+/// The credential type a card shows: the metadata's own, else the one the
+/// credential declares. Non-nil metadata can still lack it (`buildMdocMetadata`
+/// stores no `doctype` when the MDDL schema lookup returned nothing, though the
+/// credential carries one), and the tint and the badge both key off it.
+func cardTypeId(metadata: CredentialMetadata?, credential: StoredCredential) -> String? {
+    let blank: (String?) -> Bool = { ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    if !blank(metadata?.vct) { return metadata?.vct }
+    if !blank(metadata?.doctype) { return metadata?.doctype }
+    return CredentialUtils.declaredType(format: credential.format, raw: credential.raw)
+}
+
+/// Opacity of the type badge. Opaque: the foreground is chosen to reach 4.5:1
+/// at full strength, and compositing it at 60% over the card (as this used to)
+/// measured 3.37:1 on the dark tint of `uri:eu.eudi.eu-poa.1`.
+let cardBadgeOpacity = 1.0
+
+/// `foreground` drawn at `alpha` over `background`.
+func cardComposite(_ foreground: CardRGB, alpha: Double, over background: CardRGB) -> CardRGB {
+    CardRGB(
+        red: foreground.red * alpha + background.red * (1 - alpha),
+        green: foreground.green * alpha + background.green * (1 - alpha),
+        blue: foreground.blue * alpha + background.blue * (1 - alpha)
+    )
 }
 
 /// What a card says on its two text slots, decided together so that neither
@@ -160,10 +186,14 @@ struct CardLabels: Equatable {
 func cardLabels(name: String?, format: String, typeId: String?) -> CardLabels {
     let blank: (String) -> Bool = { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     let badge = typeId.flatMap { blank($0) ? nil : credentialTypeBadge($0) }
-    // A "name" that is only the format or the type repeated is not a name.
+    // A "name" that is only the format or the type repeated is not a name,
+    // whatever its case (`Diploma` from a configuration id beside a `diploma`
+    // badge repeats it).
     let realName = name.flatMap { n -> String? in
-        if blank(n) || n.caseInsensitiveCompare(format) == .orderedSame || n == typeId || n == badge { return nil }
-        return n
+        if blank(n) { return nil }
+        let candidate = n.lowercased()
+        let repeats = [format, typeId, badge].contains { $0?.lowercased() == candidate }
+        return repeats ? nil : n
     }
     if let realName { return CardLabels(title: realName, typeBadge: badge) }
     if let badge { return CardLabels(title: badge, typeBadge: nil) }
