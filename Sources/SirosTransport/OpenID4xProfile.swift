@@ -484,6 +484,9 @@ public struct OpenID4xConfig: @unchecked Sendable {
     public var attestationProvider: ClientAttestationProvider?
     /// The profile was shut down (the session ended, or failed for good): called synchronously on each shutdown.
     public var onShutdown: (() -> Void)?
+    /// Delays before the retries of a terminal answer whose send failed, for failures that bring no resume event (a
+    /// failed POST on a healthy stream). After the last one the answer waits for the next resume.
+    public var sendRetryDelaysMs: [Int]
 
     public init(
         onProgress: ((String, String, AnyCodable?) async -> Void)? = nil,
@@ -493,9 +496,11 @@ public struct OpenID4xConfig: @unchecked Sendable {
         onComplete: ((String, AnyCodable?) async -> Void)? = nil,
         onError: ((String, String?, String?) async -> Void)? = nil,
         attestationProvider: ClientAttestationProvider? = nil,
-        onShutdown: (() -> Void)? = nil
+        onShutdown: (() -> Void)? = nil,
+        sendRetryDelaysMs: [Int] = [1_000, 2_000, 4_000, 8_000]
     ) {
         self.onShutdown = onShutdown
+        self.sendRetryDelaysMs = sendRetryDelaysMs
         self.onProgress = onProgress
         self.onSignRequest = onSignRequest
         self.onMatchRequest = onMatchRequest
@@ -534,6 +539,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     private var replaying: [String: String] = [:]
     /// Bumped at each resume, so an answer queued by a send that began before the resume is retried at once.
     private var resumeGeneration = 0
+    /// How many timed retries the current run of failures has used; reset by a delivered answer or a resume.
+    private var retryAttempts = 0
     private var cancelledChildren: Set<String> = []
     // Set by `shutdown()`: no child may be registered or started afterwards, so a start still buffered in the
     // peer's dispatch loop cannot launch a handler during teardown.
@@ -648,7 +655,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
 
     /// The session came back after a loss: the answers that could not be sent go out now.
     public func sessionResumed() {
-        childLock.lock(); resumeGeneration += 1; childLock.unlock()
+        childLock.lock(); resumeGeneration += 1; retryAttempts = 0; childLock.unlock()
         drainUnsent()
     }
 
@@ -675,13 +682,13 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
                 // bounded ended-flow list (which later events can evict).
                 let ended = stopped || endedParents.contains(answer.parent) || endedParents.contains(childId)
                     || cancelledChildren.remove(childId) != nil
-                if sent { rememberCompletedLocked(childId) }
+                if sent { rememberCompletedLocked(childId); retryAttempts = 0 }
                 if !sent, !ended { unsentAnswers[childId] = answer }
                 // A resume that happened while this send was suspended found the answer claimed and could not send it.
                 let resumedMeanwhile = !sent && !ended && resumeGeneration != claimedAt
                 childLock.unlock()
                 if sent || ended { peer?.releaseFlow(flowId: childId) }
-                if resumedMeanwhile { drainUnsent() }
+                if resumedMeanwhile { drainUnsent() } else if !sent, !ended { scheduleRetry() }
             }
         }
     }
@@ -691,12 +698,34 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         childLock.lock()
         let ended = stopped || endedParents.contains(parent) || endedParents.contains(childId) || cancelledChildren.contains(childId)
         if !ended { unsentAnswers[childId] = (method, params, parent) }
+        // The owning task and its cancellation state go in the SAME critical section that queues the answer: a replay
+        // can claim the answer only after this lock is released, and then finds neither a task nor a stale marker
+        // that this execution would clear after a cancel marked the replay.
+        if let entry = childTasks[childId], entry.token == token {
+            childTasks.removeValue(forKey: childId)
+            cancelledChildren.remove(childId)
+        } else if childTasks[childId] == nil {
+            cancelledChildren.remove(childId)
+        }
         // A resume that happened while this send was suspended has already drained an empty queue: retry now.
         let resumedMeanwhile = !ended && resumeGeneration != generation
         childLock.unlock()
-        forgetChild(childId, token)
         if ended { peer?.releaseFlow(flowId: childId) }
-        if resumedMeanwhile { drainUnsent() }
+        if resumedMeanwhile { drainUnsent() } else if !ended { scheduleRetry() }
+    }
+
+    /// A failed send brings no resume event when the connection itself is healthy (a failed POST on a live stream):
+    /// the queue is drained again after a bounded backoff. Cancellation and duplicate suppression are the queue's own.
+    private func scheduleRetry() {
+        childLock.lock()
+        guard !stopped, !unsentAnswers.isEmpty, retryAttempts < config.sendRetryDelaysMs.count else { childLock.unlock(); return }
+        let delay = config.sendRetryDelaysMs[retryAttempts]
+        retryAttempts += 1
+        childLock.unlock()
+        Task { [self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(delay, 0)) * 1_000_000)
+            drainUnsent()
+        }
     }
 
     /// Whether this child was cancelled, or the profile shut down, before its handler was entered. Forgets it if so.
