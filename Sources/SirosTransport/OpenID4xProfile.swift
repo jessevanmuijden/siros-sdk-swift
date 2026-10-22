@@ -542,6 +542,18 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     // start for one of them is dropped. Bounded: only the most recent are remembered.
     private var endedParents: [String] = []
     private let maxEndedParents = 256
+    /// Children whose terminal answer was sent: a redelivered start for one runs nothing. Bounded, oldest dropped.
+    private var completedChildren: Set<String> = []
+    private var completedOrder: [String] = []
+    private let maxCompletedChildren = 4096
+
+    private func rememberCompletedLocked(_ childId: String) {
+        guard completedChildren.insert(childId).inserted else { return }
+        completedOrder.append(childId)
+        if completedOrder.count > maxCompletedChildren {
+            completedChildren.remove(completedOrder.removeFirst())
+        }
+    }
 
     public init(config: OpenID4xConfig = OpenID4xConfig()) {
         self.config = config
@@ -566,6 +578,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             // already running (a redelivered start must not replace the first task's tracking).
             // A cancelled child's own id is in the ended list too: its redelivered start does not run it again.
             let ended = stopped || endedParents.contains(parent) || endedParents.contains(params.flowId)
+                || completedChildren.contains(params.flowId)
             let tracked = childTasks[params.flowId] != nil || unsentAnswers[params.flowId] != nil || replaying[params.flowId] != nil
             if !ended, !tracked {
                 let token = UUID()
@@ -629,7 +642,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             keepUnsent(childId, method: method, params: answer, parent: parentId, token: token, sendStartedAt: sendGeneration)
             return
         }
-        forgetChild(childId, token)
+        forgetChild(childId, token, completed: true)
         peer?.releaseFlow(flowId: childId)
     }
 
@@ -658,8 +671,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
                 let sent = (try? await peer?.notify(method: answer.method, params: answer.params)) != nil
                 childLock.lock()
                 replaying.removeValue(forKey: childId)
+                // The cancellation marker of a replaying child lives until its send finishes, independently of the
+                // bounded ended-flow list (which later events can evict).
                 let ended = stopped || endedParents.contains(answer.parent) || endedParents.contains(childId)
-                    || cancelledChildren.contains(childId)
+                    || cancelledChildren.remove(childId) != nil
+                if sent { rememberCompletedLocked(childId) }
                 if !sent, !ended { unsentAnswers[childId] = answer }
                 // A resume that happened while this send was suspended found the answer claimed and could not send it.
                 let resumedMeanwhile = !sent && !ended && resumeGeneration != claimedAt
@@ -701,8 +717,12 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     }
 
     /// Forgets the child, but only the execution that owns the tracking entry may (a direct run owns none).
-    private func forgetChild(_ childId: String, _ token: UUID) {
+    ///
+    /// - Parameter completed: the terminal answer went out. That is recorded in the same critical section as the
+    ///   removal, so no redelivered start can slip between the two and run the handler again.
+    private func forgetChild(_ childId: String, _ token: UUID, completed: Bool = false) {
         childLock.lock(); defer { childLock.unlock() }
+        if completed { rememberCompletedLocked(childId) }
         guard let entry = childTasks[childId] else { cancelledChildren.remove(childId); return }
         guard entry.token == token else { return }
         childTasks.removeValue(forKey: childId)
@@ -744,6 +764,12 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         if endedParents.count > maxEndedParents { endedParents.removeFirst(endedParents.count - maxEndedParents) }
         for (childId, answer) in unsentAnswers where childId == flowId || answer.parent == flowId {
             unsentAnswers.removeValue(forKey: childId)
+            ids.append(childId)
+        }
+        // A child whose answer a replay has claimed and is sending: marked, so a failing send is not requeued, and its
+        // route is released with the rest.
+        for (childId, parent) in replaying where childId == flowId || parent == flowId {
+            cancelledChildren.insert(childId)
             ids.append(childId)
         }
         for (childId, child) in childTasks where childId == flowId || child.parent == flowId {

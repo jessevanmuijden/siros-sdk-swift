@@ -171,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **WMP child flows: completed children are remembered, and a replaying child is cancelled like any other.** A start
+  redelivered after the child's answer was sent (original send or replay) runs nothing. A parent ending while a replay
+  send is suspended releases the claimed child's route at once, and the child's cancellation marker lives until that
+  send finishes (not in the bounded ended-flow list), so a failing send is never requeued for a cancelled child.
 - **WMP child flows, further review follow-ups.** A child cancelled while its replay send is suspended is not requeued
   when that send fails; a second resume during a suspended replay that then fails triggers another drain; a redelivered
   start for a cancelled child does not run its handler again; a child start refused for good (its flow ended, or the
