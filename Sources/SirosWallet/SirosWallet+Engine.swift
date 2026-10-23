@@ -562,7 +562,7 @@ extension SirosWallet {
                 "resource": resource,
                 "action": ["name": actionName],
             ]
-            let response = try await client.evaluateTrust(evaluationRequest)
+            let response = try await evaluateTrustCached(client, evaluationRequest)
             let decision = response["decision"] as? Bool ?? false
             let context = response["context"] as? [String: Any]
 
@@ -1203,23 +1203,10 @@ extension SirosWallet {
             }
         }
 
-        // Handle server-side issuer trust result (informational, no response needed).
-        // The engine sends step="trust_evaluated" with payload.issuer_trust_evaluated=true.
-        // This is distinct from the verifier trust flow — it does NOT overwrite
-        // lastTrustResults (which is used for credential selection consent UI).
-        if msg.step == "trust_evaluated",
-           let payloadDict,
-           payloadDict["issuer_trust_evaluated"]?.boolValue == true {
-            let trustResult = TrustResult(
-                trusted: payloadDict["trusted"]?.boolValue ?? false,
-                framework: payloadDict["framework"]?.stringValue,
-                reason: payloadDict["reason"]?.stringValue,
-                identifier: payloadDict["issuer"]?.stringValue
-            )
-            // Only populate the trust cache — do NOT store in lastTrustResults
-            // (that map is for verifier consent UI in handleMatchRequest)
-            trustCache.put(identifier: trustResult.identifier ?? "", result: trustResult)
-        }
+        // The engine's server-side issuer trust result (step="trust_evaluated",
+        // payload.issuer_trust_evaluated=true) needs no response, and is no
+        // longer cached here: nothing may stand in for an evaluation later (see
+        // `TrustDecisionCache`). `WalletEngineSession` keeps it for the flow.
 
         // Handle credential selection — verifier wants credentials, user
         // must consent. This is the actual, live code path exercised by the
