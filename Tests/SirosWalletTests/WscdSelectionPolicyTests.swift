@@ -32,7 +32,7 @@ final class WscdSelectionPolicyTests: XCTestCase {
     }
 
     // Presence: an absent token must fail before anything can prompt.
-    func testAbsentOnlySufficientPluginThrowsNoPluginPresent() async {
+    func testAbsentOnlySufficientPluginThrowsAuthenticatorNotPresent() async {
         let policy = makePolicy()
         do {
             _ = try await policy.resolve(
@@ -51,27 +51,48 @@ final class WscdSelectionPolicyTests: XCTestCase {
         }
     }
 
-    func testAbsentPluginIgnoresTofuDefaultMappingAndOverrides() async {
-        let store = InMemorySessionStore()
-        store.activeAccountId = "test:account"
-        let key = "https://issuer.example.com|pid"
-        let policy = WscdSelectionPolicy(sessionStore: store, defaultMapping: [key: "fido2"])
-        policy.setUserOverride(issuer: "https://issuer.example.com", credentialType: "pid", pluginId: "fido2")
-        policy.setGlobalUserOverride(pluginId: "fido2")
-        // Seed TOFU too.
-        _ = try? await policy.resolve(issuer: "https://issuer.example.com", credentialType: "pid",
-                                      requiredTier: "iso_18045_high", availablePluginIds: ["fido2"])
+    /// Each cached source is exercised on its own (a per-issuer override would
+    /// otherwise return before TOFU/mapping were ever consulted).
+    private func assertAbsentPluginNotResolved(
+        _ policy: WscdSelectionPolicy, file: StaticString = #filePath, line: UInt = #line
+    ) async {
         do {
             _ = try await policy.resolve(
                 issuer: "https://issuer.example.com", credentialType: "pid",
                 requiredTier: "iso_18045_high", availablePluginIds: ["fido2"],
                 isPluginPresent: { _ in false }
             )
-            XCTFail("an absent plugin must not be resolved from overrides/TOFU/mapping")
+            XCTFail("an absent plugin must not be resolved from a cached choice", file: file, line: line)
         } catch WscdSelectionError.authenticatorNotPresent {
         } catch {
-            XCTFail("unexpected error \(error)")
+            XCTFail("unexpected error \(error)", file: file, line: line)
         }
+    }
+
+    func testAbsentPluginIgnoresTofu() async throws {
+        let policy = makePolicy()
+        // Seed TOFU by a normal (present) resolution, and prove it is seeded.
+        _ = try await policy.resolve(issuer: "https://issuer.example.com", credentialType: "pid",
+                                     requiredTier: "iso_18045_high", availablePluginIds: ["fido2"])
+        XCTAssertEqual(policy.currentTofuMapping()["https://issuer.example.com|pid"], "fido2")
+        await assertAbsentPluginNotResolved(policy)
+    }
+
+    func testAbsentPluginIgnoresDefaultMapping() async {
+        let policy = makePolicy(defaultMapping: ["https://issuer.example.com|pid": "fido2"])
+        await assertAbsentPluginNotResolved(policy)
+    }
+
+    func testAbsentPluginIgnoresUserOverride() async {
+        let policy = makePolicy()
+        policy.setUserOverride(issuer: "https://issuer.example.com", credentialType: "pid", pluginId: "fido2")
+        await assertAbsentPluginNotResolved(policy)
+    }
+
+    func testAbsentPluginIgnoresGlobalOverride() async {
+        let policy = makePolicy()
+        policy.setGlobalUserOverride(pluginId: "fido2")
+        await assertAbsentPluginNotResolved(policy)
     }
 
     func testAbsentInsufficientPluginDoesNotMaskNoEligible() async {
