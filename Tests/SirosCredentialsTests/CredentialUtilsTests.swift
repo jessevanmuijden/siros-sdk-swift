@@ -876,4 +876,89 @@ final class CredentialUtilsTests: XCTestCase {
 
         XCTAssertFalse(diff.hasChanges)
     }
+
+    // MARK: - Default display (Kotlin PR 211)
+
+    private func offer(issuerLogoUri: String? = nil, logoUri: String? = nil) -> CredentialOffer {
+        CredentialOffer(
+            credentialConfigurationId: "eu.ebw.oid.1",
+            credentialIssuerIdentifier: "https://issuer.example.com",
+            credentialName: "EBW OID",
+            issuerName: "Test Issuer",
+            logoUri: logoUri,
+            issuerLogoUri: issuerLogoUri
+        )
+    }
+
+    /// A type from someone else's catalog publishes no logo of its own; the
+    /// card draws the logo beside the issuer's name, so the issuer's mark is
+    /// the last fallback (SD-JWT path).
+    func testSdJwtMetadataFallsBackToTheIssuerLogo() {
+        let metadata = CredentialUtils.buildMetadata(offer: offer(issuerLogoUri: "https://issuer.example.com/logo.png"))
+        XCTAssertEqual(metadata.logo?.uri, "https://issuer.example.com/logo.png")
+    }
+
+    func testMdocMetadataFallsBackToTheIssuerLogo() {
+        let metadata = CredentialUtils.buildMdocMetadata(offer: offer(issuerLogoUri: "https://issuer.example.com/logo.png"))
+        XCTAssertEqual(metadata.logo?.uri, "https://issuer.example.com/logo.png")
+    }
+
+    /// The credential's own logo (from the offer's credential display) still
+    /// wins over the issuer's.
+    func testTheCredentialsOwnLogoStillWinsOverTheIssuers() {
+        let o = offer(issuerLogoUri: "https://issuer.example.com/issuer.png", logoUri: "https://issuer.example.com/card.png")
+        XCTAssertEqual(CredentialUtils.buildMetadata(offer: o).logo?.uri, "https://issuer.example.com/card.png")
+        XCTAssertEqual(CredentialUtils.buildMdocMetadata(offer: o).logo?.uri, "https://issuer.example.com/card.png")
+    }
+
+    func testNoLogoAtAllStaysNil() {
+        XCTAssertNil(CredentialUtils.buildMetadata(offer: offer()).logo)
+        XCTAssertNil(CredentialUtils.buildMdocMetadata(offer: offer()).logo)
+    }
+
+    func testFallbackMetadataReadsWhatTheCredentialCarries() {
+        let cred = StoredCredential(
+            id: 1, format: "dc+sd-jwt", raw: sampleJwt,
+            credentialIssuerIdentifier: "https://issuer.example.com/path",
+            credentialConfigurationId: "urn.eudi.eucc_1", batchId: 1, instanceId: 0
+        )
+        let metadata = CredentialUtils.buildFallbackMetadata(cred)
+        XCTAssertEqual(metadata.name, "Eucc 1", "the segment after the last dot, as a label")
+        XCTAssertEqual(metadata.issuer?.name, "issuer.example.com", "the host, not the URL")
+        XCTAssertEqual(metadata.issuer?.url, "https://issuer.example.com/path")
+        XCTAssertEqual(metadata.vct, "urn:example:diploma", "the type the credential itself declares")
+        XCTAssertNil(metadata.doctype)
+        XCTAssertNil(metadata.backgroundColor, "presentation is the issuer's to declare")
+        XCTAssertNil(metadata.logo)
+    }
+
+    func testFallbackMetadataForAnMdocReadsItsDocType() {
+        let cred = StoredCredential(
+            id: 2, format: "mso_mdoc", raw: buildMdocRaw(),
+            credentialIssuerIdentifier: "https://issuer.example.com",
+            credentialConfigurationId: "mdl", batchId: 2, instanceId: 0
+        )
+        let metadata = CredentialUtils.buildFallbackMetadata(cred)
+        XCTAssertEqual(metadata.doctype, mdocDocType)
+        XCTAssertNil(metadata.vct)
+        XCTAssertEqual(metadata.name, "Mdl")
+    }
+
+    /// A credential that says nothing about itself is named by its format - the
+    /// one thing left - and has no issuer to show.
+    func testFallbackMetadataForABareCredential() {
+        let cred = StoredCredential(id: 3, format: "dc+sd-jwt", raw: "not-a-jwt", batchId: 3, instanceId: 0)
+        let metadata = CredentialUtils.buildFallbackMetadata(cred)
+        XCTAssertEqual(metadata.name, "dc+sd-jwt")
+        XCTAssertNil(metadata.issuer?.name)
+        XCTAssertNil(metadata.issuer?.url)
+        XCTAssertNil(metadata.vct)
+        let blank = StoredCredential(
+            id: 4, format: "dc+sd-jwt", raw: "x", credentialIssuerIdentifier: "  ",
+            credentialConfigurationId: "", batchId: 4, instanceId: 0
+        )
+        XCTAssertEqual(CredentialUtils.buildFallbackMetadata(blank).name, "dc+sd-jwt")
+        XCTAssertNil(CredentialUtils.buildFallbackMetadata(blank).issuer?.url)
+    }
+
 }
