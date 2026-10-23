@@ -109,7 +109,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         let registry: AccountRegistry
     }
 
-    private func makeFixture(loggedIn: Bool = true) -> Fixture {
+    private func makeFixture(loggedIn: Bool = true) async -> Fixture {
         let auth = RecordingAuthProvider()
         let keystore = RecordingKeystore()
         let credentials = RecordingCredentialStore()
@@ -140,7 +140,6 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         sessionStore.activeAccountId = "default:user-1"
         wallet.wscdSelectionPolicy.setGlobalUserOverride(pluginId: "fido2")
         wallet.wscdSelectionPolicy.setUserOverride(issuer: "iss", credentialType: "t", pluginId: "fido2")
-        wallet.trustCache.put(identifier: "verifier", result: TrustResult(trusted: true))
 
         let server = Server()
         if loggedIn {
@@ -148,6 +147,8 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             client.setAppToken("t")
             wallet.apiClient = client
         }
+        // After the API client is set: replacing the client clears the cache.
+        _ = try? await wallet.trustDecisionCache.getOrEvaluate(key: "verifier") { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(#"{"decision":true}"#.utf8)) as? [String: Any]) }
         return Fixture(
             wallet: wallet, server: server, auth: auth, keystore: keystore,
             credentials: credentials, sessionStore: sessionStore, registry: registry
@@ -164,7 +165,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertEqual(f.sessionStore.instanceKeyId, "instance-user-1", file: file, line: line)
         XCTAssertNotNil(f.wallet.apiClient, "api client kept", file: file, line: line)
         XCTAssertEqual(f.wallet.wscdGlobalOverride, "fido2", file: file, line: line)
-        XCTAssertNotNil(f.wallet.trustCache.get(identifier: "verifier"), file: file, line: line)
+        XCTAssertEqual(f.wallet.trustDecisionCache.size, 1, "the trust decision is kept", file: file, line: line)
     }
 
     private func assertWiped(_ f: Fixture, file: StaticString = #filePath, line: UInt = #line) {
@@ -177,7 +178,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertNil(f.wallet.apiClient, file: file, line: line)
         XCTAssertNil(f.wallet.wscdGlobalOverride, file: file, line: line)
         XCTAssertTrue(f.wallet.wscdUserOverrides.isEmpty, file: file, line: line)
-        XCTAssertNil(f.wallet.trustCache.get(identifier: "verifier"), file: file, line: line)
+        XCTAssertEqual(f.wallet.trustDecisionCache.size, 0, "the trust decisions are cleared", file: file, line: line)
         // Both accounts, not just the active one, and the Keychain-class
         // material (PRF salt, main key, instance key) with them.
         for user in ["user-1", "user-2"] {
@@ -196,7 +197,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     // MARK: - Sequence
 
     func testBeginThenDeleteWithTheAssertionAndConfirmation() async {
-        let f = makeFixture()
+        let f = await makeFixture()
 
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
 
@@ -222,7 +223,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     }
 
     func testAStepUpClosureReplacesTheAuthProvider() async {
-        let f = makeFixture()
+        let f = await makeFixture()
         let seen = OptionsBox()
 
         let result = await f.wallet.deleteAccount(confirmation: "DELETE") { options in
@@ -244,7 +245,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     // MARK: - Accepted outcomes wipe everything
 
     func testDeletedWipesAllLocalState() async {
-        let f = makeFixture()
+        let f = await makeFixture()
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
         XCTAssertEqual(result, .deleted(localWipe: LocalWipeReport()))
         XCTAssertTrue(result.wipedLocalState)
@@ -252,7 +253,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     }
 
     func testCleanupPendingWipesAllLocalState() async {
-        let f = makeFixture()
+        let f = await makeFixture()
         f.server.delete = .success(#"{"error":"DELETION_CLEANUP_PENDING","result":"DELETED"}"#)
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
         XCTAssertEqual(result, .cleanupPending(localWipe: LocalWipeReport()))
@@ -260,7 +261,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     }
 
     func testOperatorRequiredWipesAllLocalState() async {
-        let f = makeFixture()
+        let f = await makeFixture()
         f.server.delete = .success(#"{"error":"DELETION_OPERATOR_REQUIRED","result":"PENDING"}"#)
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
         XCTAssertEqual(result, .operatorRequired(localWipe: LocalWipeReport()))
@@ -280,7 +281,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             (404, #"{"error":"User not found"}"#, .failed(.accountNotFound)),
         ]
         for (code, body, expected) in cases {
-            let f = makeFixture()
+            let f = await makeFixture()
             f.server.failDelete(code, body)
             let result = await f.wallet.deleteAccount(confirmation: "DELETE")
             XCTAssertEqual(result, expected, "\(code) \(body)")
@@ -290,13 +291,13 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     }
 
     func testTransportAndUnexpectedFailuresAreResultsAndKeepLocalState() async {
-        let f = makeFixture()
+        let f = await makeFixture()
         f.server.failDelete(500, "")
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
         guard case .failed(.requestFailed) = result else { return XCTFail("got \(result)") }
         assertKept(f)
 
-        let g = makeFixture()
+        let g = await makeFixture()
         g.server.begin = .failure(SirosError.network(message: "offline"))
         let beginResult = await g.wallet.deleteAccount(confirmation: "DELETE")
         guard case .failed(.requestFailed) = beginResult else { return XCTFail("got \(beginResult)") }
@@ -312,7 +313,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             (400, #"{"error":"NO_PASSKEY"}"#, .noPasskey),
         ]
         for (code, body, expected) in cases {
-            let f = makeFixture()
+            let f = await makeFixture()
             f.server.begin = .failure(SirosError.backendApi(code: code, message: "x", body: body))
             let result = await f.wallet.deleteAccount(confirmation: "DELETE")
             XCTAssertEqual(result, .failed(expected))
@@ -323,7 +324,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
 
     func testACancelledOrFailedAssertionSendsNoDeleteAndKeepsLocalState() async {
         struct Cancelled: Error, LocalizedError { var errorDescription: String? { "user cancelled" } }
-        let f = makeFixture()
+        let f = await makeFixture()
         f.auth.failure = Cancelled()
 
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
@@ -335,7 +336,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
 
     func testAWrongConfirmationNeverReachesTheBackend() async {
         for typed in ["delete", "Delete", " DELETE", "DELETE ", ""] {
-            let f = makeFixture()
+            let f = await makeFixture()
             let result = await f.wallet.deleteAccount(confirmation: typed)
             XCTAssertEqual(result, .failed(.confirmationRequired), "'\(typed)'")
             XCTAssertTrue(f.server.calls.isEmpty, "the single-use challenge must not be spent on it")
@@ -344,7 +345,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     }
 
     func testNotLoggedInIsAFailure() async {
-        let f = makeFixture(loggedIn: false)
+        let f = await makeFixture(loggedIn: false)
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
         XCTAssertEqual(result, .failed(.notLoggedIn))
         XCTAssertTrue(f.server.calls.isEmpty)
@@ -355,7 +356,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
 
     func testAFailingWipeStepIsReportedAndTheRestStillRuns() async {
         struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
-        let f = makeFixture()
+        let f = await makeFixture()
         f.keystore.clearCredentialsError = Boom()
 
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
@@ -371,7 +372,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     }
 
     func testALockedKeystoreIsSkippedNotReportedAsAFailure() async {
-        let f = makeFixture()
+        let f = await makeFixture()
         f.keystore.isUnlocked = false
 
         let result = await f.wallet.deleteAccount(confirmation: "DELETE")
