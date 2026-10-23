@@ -742,7 +742,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
                 let resumedMeanwhile = !sent && !ended && resumeGeneration != claimedAt
                 childLock.unlock()
                 if sent || ended { peer?.releaseFlow(flowId: childId) }
-                if resumedMeanwhile { drainUnsent() } else if !sent, !ended { scheduleRetry(childId) }
+                if resumedMeanwhile { drainUnsent(only: childId) } else if !sent, !ended { scheduleRetry(childId) }
             }
         }
     }
@@ -765,7 +765,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         let resumedMeanwhile = !ended && resumeGeneration != generation
         childLock.unlock()
         if ended { peer?.releaseFlow(flowId: childId) }
-        if resumedMeanwhile { drainUnsent() } else if !ended { scheduleRetry(childId) }
+        if resumedMeanwhile { drainUnsent(only: childId) } else if !ended { scheduleRetry(childId) }
     }
 
     /// A failed send brings no resume event when the connection itself is healthy (a failed POST on a live stream):

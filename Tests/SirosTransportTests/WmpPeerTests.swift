@@ -225,6 +225,7 @@ final class WmpPeerTests: XCTestCase {
             group.addTask { await events.value }
             group.addTask { try? await Task.sleep(nanoseconds: 2_000_000_000); return false }
             let first = await group.next() ?? false
+            events.cancel()          // the unstructured consumer too, or a stream that never ends would hang the group
             group.cancelAll()
             return first
         }

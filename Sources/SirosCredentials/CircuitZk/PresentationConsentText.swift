@@ -91,7 +91,14 @@ public struct PresentationConsentText: Sendable {
     private func lines(_ item: PresentationConsentItem, verifierName: String) throws -> [String] {
         switch item {
         case .predicate(let predicate):
-            return predicateRenderers[predicate.functionId]?(predicate) ?? predicateLines(predicate)
+            guard let render = predicateRenderers[predicate.functionId] else { return predicateLines(predicate) }
+            // A renderer that says nothing (no sentences, or only blank ones) would remove the predicate from the screen
+            // the user approves: refused, never an approval of something not shown.
+            let sentences = render(predicate)
+            guard !sentences.isEmpty, sentences.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                throw PresentationConsentTextError(reason: "a predicate renderer returned no wording")
+            }
+            return sentences
         case .pseudonym(_, let scope, let remappable, let crossSite, _, let context):
             guard scope == .perVerifier, !crossSite, context == nil else {
                 throw PresentationConsentTextError(reason: "unsupported pseudonym scope")
