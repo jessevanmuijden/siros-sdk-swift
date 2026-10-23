@@ -152,6 +152,14 @@ public struct WalletConfig: Sendable {
     /// than silently no-oping - same convention as `readerTrustRootCertificatesPem`.
     public var issuerTrustRootCertificatesPem: [String]
 
+    /// How long `SirosWallet` remembers a trust decision (`POST /v1/evaluate`,
+    /// allow or deny) for an identical question, in seconds. Default 5 minutes;
+    /// zero disables the cache. Only successful decisions are remembered, never
+    /// an error or an unreachable backend, and an expired decision is never used
+    /// as a stand-in for one. Trade-off: a revocation or registry change can take
+    /// up to this long to be noticed.
+    public var trustDecisionCacheTtl: TimeInterval
+
     /// How `SirosWallet.evaluateIssuerTrust` answers a VICAL question. Same
     /// convention as `readerTrustEvaluationMode`, and independent of it: a
     /// wallet may reasonably insist on remote issuer trust at issuance time
@@ -252,7 +260,8 @@ public struct WalletConfig: Sendable {
         issuerInteropProfiles: [String: InteropProfile] = [:],
         diipProfile: DiipProfile = .latest,
         clockTolerance: TimeInterval = 60,
-        bbsCredentialTypes: Set<String> = []
+        bbsCredentialTypes: Set<String> = [],
+        trustDecisionCacheTtl: TimeInterval = 300
     ) {
         self.backendUrl = backendUrl
         self.tenantId = tenantId
@@ -285,6 +294,7 @@ public struct WalletConfig: Sendable {
         self.diipProfile = diipProfile
         self.clockTolerance = clockTolerance
         self.bbsCredentialTypes = bbsCredentialTypes
+        self.trustDecisionCacheTtl = trustDecisionCacheTtl
     }
 
     /// Discover the engine base URL from the backend's

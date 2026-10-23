@@ -256,6 +256,7 @@
       "presentation": "Kontaktar kontrollant…"
     },
     "steps": {
+      "initializing": "Initierar…",
       "parsingOffer": "Läser in intygserbjudande…",
       "offerParsed": "Intygserbjudande inläst",
       "fetchingMetadata": "Hämtar utfärdarinformation…",

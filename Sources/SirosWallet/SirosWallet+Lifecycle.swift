@@ -44,6 +44,14 @@ extension SirosWallet {
     /// cross-file-extension-access reason as `activeOffer` etc.
     func resetIssuanceGuards() {
         lock.lock()
+        resetIssuanceGuardsLocked()
+        lock.unlock()
+    }
+
+    /// `resetIssuanceGuards()` for a caller that already holds `lock` (the
+    /// start's failure path and `cancelCurrentFlow` reset the guards and the
+    /// state in one critical section).
+    func resetIssuanceGuardsLocked() {
         activeOffer = nil
         activeVctm = nil
         activeVctmDocument = nil
@@ -58,7 +66,6 @@ extension SirosWallet {
         // (success or error) routes through here, same as `activeOffer`
         // etc. above.
         pendingRenewalSourceBatchId = nil
-        lock.unlock()
     }
 
     /// Cancel the current flow.
@@ -77,12 +84,37 @@ extension SirosWallet {
     /// `flowId` exist to send to the server - the local guard reset does
     /// not need one, and is a no-op if no issuance was ever in flight, so
     /// it's always safe to call unconditionally.
+    ///
+    /// A start still suspended in network work (see
+    /// ``WalletState/isPendingFlow``) is invalidated first, so it unwinds at its
+    /// next step with `CancellationError` instead of sending the engine a flow
+    /// that was cancelled. A pending state has no engine flow yet, so nothing
+    /// is sent to the engine for it.
+    ///
+    /// Not covered: a cancel after `flow_start` went out but before the engine
+    /// named a flow. The engine's first event for that flow is not recognised
+    /// as abandoned (the Kotlin SDK tracks this with per-connection
+    /// generations in its engine session, which this SDK does not have yet).
     public func cancelCurrentFlow() {
-        if case .flowActive(let userId, let displayName, let flowId, _, _, let creds) = state {
-            try? engineSession?.cancelFlow(flowId: flowId)
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
+        // One critical section with the start's admission, advances and
+        // failure cleanup (`SirosWallet+IssuanceStart.swift`): invalidating the
+        // epoch, resetting the state and clearing the guards cannot interleave
+        // with any of them.
+        lock.lock()
+        issuanceStartEpoch.invalidate()
+        var reset: WalletState?
+        var cancelFlowId: String?
+        if case .flowActive(let userId, let displayName, let flowId, _, _, let creds) = _state {
+            if !_state.isPendingFlow { cancelFlowId = flowId }
+            reset = .ready(userId: userId, displayName: displayName, credentials: creds)
         }
-        resetIssuanceGuards()
+        if let reset { _state = reset }
+        let conts = reset == nil ? [] : Array(stateContinuations.values)
+        let engine = engineSession
+        resetIssuanceGuardsLocked()
+        lock.unlock()
+        if let cancelFlowId { try? engine?.cancelFlow(flowId: cancelFlowId) }
+        if let reset { for c in conts { c.yield(reset) } }
     }
 
     // MARK: - Identity Verification
