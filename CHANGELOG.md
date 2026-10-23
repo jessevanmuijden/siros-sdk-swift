@@ -38,6 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     needed before release.
 
 ### Added
+- **`PresentationConsentCoordinator`: the ready-made `PresentationConsentHandler` for a host app.** It
+  renders a request into the SDK's approved wording (`PresentationConsentText`) and hands the app one
+  question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
+  answer, declined on timeout (default 120 s), dismissal, supersede and cancellation, and with no UI set. A
+  request the wording does not cover is declined without being shown.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
 - **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
   `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
   `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
@@ -75,6 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different number of lookups than functions is false; float operands must be finite
   and exact. `requestSigned` is a required argument (the signature result, never
   defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
 - **Sensible default display for a credential type that publishes none.** What a
   card draws when the issuer's type metadata has no rendering block, which is
   every type that comes from someone else's catalog.
@@ -404,6 +425,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unchanged.
 
 ### Fixed
+- **Presentation consent: nothing is approved that is not shown.** A host predicate renderer that returns no sentences
+  (or only blank ones) is refused with `PresentationConsentTextError` instead of dropping the predicate from the screen.
+  Age bounds of one credential that meet at a single day (`ge` == `le`, in one predicate or split across two) identify
+  the exact birth date: the "not shared" age wording is dropped for them and every comparison is worded generically.
+- **ConsentPrompt: an expired question is never shown.** A zero-duration timeout (a negative one is normalised to it) is
+  declined before the question is installed, so a host that answers synchronously from `onChange` cannot approve it.
+  The tests wait for the host to be told before they resolve a question, removing a scheduling race.
 - **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
   components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
   and the label lookup. Age bounds that meet at a single day (one predicate, two predicates or two queries) identify the exact

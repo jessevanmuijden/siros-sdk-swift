@@ -2,43 +2,20 @@
 
 import SwiftUI
 import SirosWallet
+import SirosCredentials
 
-/// One in-flight `RequestWscdChoice` prompt plus how to answer it - fired
-/// only when more than one registered WSCD plugin
-/// (`WalletConfig.availableKeystores`) meets a credential type's declared
-/// key-storage requirement and neither TOFU nor `WalletConfig.defaultWscdMapping`
-/// resolved it automatically (see `WscdSelectionPolicy.resolve`'s doc
-/// comment, steps 2-5). `Identifiable` so it can drive a `.sheet(item:)`
-/// presentation directly, mirroring `ProximityEngagementContent`'s
-/// `PendingConsent`.
-struct PendingWscdChoice: Identifiable {
-    let id = UUID()
+/// What a `RequestWscdChoice` prompt asks - fired only when more than one registered WSCD plugin
+/// (`WalletConfig.availableKeystores`) meets a credential type's declared key-storage requirement and neither TOFU
+/// nor `WalletConfig.defaultWscdMapping` resolved it automatically (see `WscdSelectionPolicy.resolve`).
+struct WscdChoiceQuestion: Sendable {
     let issuer: String
     let credentialType: String
     let eligiblePluginIds: [String]
-    /// Call with the chosen plugin ID + how long to remember it to approve,
-    /// or `nil` (scope is irrelevant for a cancel) to cancel.
-    let respond: (String?, WscdRememberScope) -> Void
 }
 
-/// Bridges `RequestWscdChoice`'s async callback to this sheet: suspends the
-/// caller (`WalletViewModel.requestWscdChoice`) until the user taps a plugin
-/// or Cancel. Mirrors `ProximityEngagementContent`'s `ConsentContinuationBox`
-/// - resumes at most once, guarding the race between the user answering and
-/// the sheet being dismissed some other way (e.g. swiping it away).
-final class WscdChoiceContinuationBox {
-    private var continuation: CheckedContinuation<WscdChoiceResult, Never>?
-
-    func set(_ continuation: CheckedContinuation<WscdChoiceResult, Never>) {
-        self.continuation = continuation
-    }
-
-    func resumeOnce(_ result: WscdChoiceResult) {
-        let continuation = self.continuation
-        self.continuation = nil
-        continuation?.resume(returning: result)
-    }
-}
+/// One in-flight prompt: the SDK's `ConsentPrompt` question (`Identifiable`, so it drives `.sheet(item:)`).
+/// `answer(.chosen(...))` approves, `decline()` cancels.
+typealias PendingWscdChoice = ConsentPrompt<WscdChoiceQuestion, WscdChoiceResult>.Pending
 
 /// Sheet shown when `RequestWscdChoice` fires - a plain button-per-eligible-
 /// plugin-ID chooser. Unlike `ProximityConsentSheet`, the SDK only asks
@@ -65,13 +42,13 @@ struct WscdChoiceSheet: View {
                         .font(.title2.bold())
                 }
 
-                Text(L10n.string("wscdChoice.description", choice.credentialType, choice.issuer))
+                Text(L10n.string("wscdChoice.description", choice.request.credentialType, choice.request.issuer))
                     .font(.body)
                     .foregroundColor(SirosTheme.onSurfaceVariant)
 
                 VStack(spacing: 8) {
-                    ForEach(choice.eligiblePluginIds, id: \.self) { pluginId in
-                        Button(action: { choice.respond(pluginId, rememberScope) }) {
+                    ForEach(choice.request.eligiblePluginIds, id: \.self) { pluginId in
+                        Button(action: { choice.answer(.chosen(pluginId: pluginId, rememberScope: rememberScope)) }) {
                             HStack {
                                 Text(pluginId)
                                     .font(.body.weight(.medium))
@@ -106,7 +83,7 @@ struct WscdChoiceSheet: View {
 
                 Spacer()
 
-                Button(action: { choice.respond(nil, rememberScope) }) {
+                Button(action: { choice.decline() }) {
                     Text(L10n.string("common.cancel"))
                         .frame(maxWidth: .infinity)
                         .frame(height: 48)
@@ -118,5 +95,8 @@ struct WscdChoiceSheet: View {
             .navigationTitle(L10n.string("wscdChoice.navTitle"))
             .navigationBarTitleDisplayMode(.inline)
         }
+        // The sheet going away (swiped, or replaced) cancels ITS OWN question only: the handle is a no-op once
+        // answered, so an outgoing sheet can never cancel the question that replaced it.
+        .onDisappear { choice.decline() }
     }
 }
