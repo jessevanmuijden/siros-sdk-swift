@@ -169,12 +169,13 @@ final class ConsentPromptTests: XCTestCase {
     func testANewQuestionDeclinesThePendingOne() async throws {
         let (prompt, host) = makePrompt()
         let first = Task { await prompt.ask("first") }
-        let stale = try await pending(prompt)
+        let stale = try await pending(prompt, host: host)       // the host has been told of the first question
         let second = Task { await prompt.ask("second") }
         let firstAnswer = await value(first)
         XCTAssertFalse(firstAnswer, "superseded")
         let fresh = try await pending(prompt)
         XCTAssertEqual(fresh.request, "second")
+        try await settled(host, count: 2)                       // and of the second, before it is answered
         XCTAssertFalse(stale.answer(true), "an outgoing question can never answer the new one")
         XCTAssertEqual(prompt.current?.request, "second", "and does not clear it")
         XCTAssertTrue(fresh.answer(true))

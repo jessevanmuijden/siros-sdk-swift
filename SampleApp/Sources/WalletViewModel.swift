@@ -909,6 +909,8 @@ final class WalletViewModel: ObservableObject {
             )
             do {
                 try await wallet?.startIssuanceByOffer(offer)
+            } catch is CancellationError {
+                // Cancelled by the user while the start was in flight.
             } catch {
                 setError(error.localizedDescription)
             }
@@ -954,6 +956,10 @@ final class WalletViewModel: ObservableObject {
         Task {
             do {
                 try await body()
+            } catch is CancellationError {
+                // The user cancelled the start (`cancelCurrentFlow()`); the
+                // wallet already reset itself. Not an error.
+                flowStarting = nil
             } catch {
                 flowStarting = nil
                 setError(error.localizedDescription)
