@@ -8,47 +8,14 @@ import SirosCredentials
 /// to a sheet, and the transaction log screen. No TS12 logic lives here.
 extension WalletViewModel {
 
-    /// Bridges the SDK's `TransactionConsentHandler.confirm` to
-    /// `TransactionConsentSheet`: suspends until the user confirms or
-    /// declines. A prompt still pending when another arrives is declined, and
-    /// cancelling the awaiting task (the SDK's deadline passing) withdraws the
-    /// prompt and declines.
+    /// Puts a transaction to the user through the SDK's `ConsentPrompt` (exactly one answer; declined on dismiss,
+    /// supersede and task cancellation) and shows it in `TransactionConsentSheet`.
     nonisolated func requestTransactionConsent(_ request: TransactionConsentRequest) async -> Bool {
-        let box = TransactionConsentContinuationBox()
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                guard box.set(continuation) else { return }   // already cancelled: resumed with false
-                Task { @MainActor in
-                    // Cancelled or answered before this ran: nothing to show.
-                    guard box.isPending else { return }
-                    self.transactionConsentBox?.resumeOnce(false)
-                    self.transactionConsentBox = box
-                    self.pendingTransactionConsent = PendingTransactionConsent(request: request, respond: { answer in
-                        self.finishTransactionConsent(box)
-                        box.resumeOnce(answer)
-                    })
-                }
-            }
-        } onCancel: {
-            box.cancel()
-            Task { @MainActor in self.finishTransactionConsent(box) }
-        }
-    }
-
-    /// Clears the prompt and box, but only if `box` is still the current one: a
-    /// response from an outgoing prompt must not clear a newer one.
-    func finishTransactionConsent(_ box: TransactionConsentContinuationBox) {
-        guard transactionConsentBox === box else { return }
-        pendingTransactionConsent = nil
-        transactionConsentBox = nil
+        await transactionConsent.ask(request)
     }
 
     /// Declines whatever prompt is pending.
-    func dismissTransactionConsent() {
-        pendingTransactionConsent = nil
-        transactionConsentBox?.resumeOnce(false)
-        transactionConsentBox = nil
-    }
+    func dismissTransactionConsent() { transactionConsent.dismiss() }
 
     func openTransactionLog() {
         showTransactionLog = true
