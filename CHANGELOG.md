@@ -332,6 +332,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
   components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
   and the label lookup. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
+- **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
+  components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
+  and the label lookup. Age bounds that meet at a single day (one predicate, two predicates or two queries) identify the exact
+  birth date, so the "not shared" age wording is dropped for them. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
   and `["SE", "FI"]` no longer read alike.
 - **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
   engine keeps one session per (tenant, user) and closes the older socket when a

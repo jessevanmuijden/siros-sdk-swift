@@ -83,13 +83,12 @@ public enum PresentationConsentBuilder {
                 }
             }
         }
-        let revealed = revealedClaimPaths(entries)
-        entries = entries.map { entry in
-            // A claim is also revealed when this credential's age bounds meet at one day (ge == le, in one predicate or
-            // split across two): the proof then identifies the exact birth date, so "not shared" would be untrue.
-            let revealedHere = revealed.union(exactBirthDateClaims(entry.items))
-            return PresentationConsentEntry(credential: entry.credential, items: withoutAgeWordingWhereRevealed(entry.items, revealed: revealedHere))
-        }
+        // A claim is also revealed when the age bounds on it meet at one day (`ge` == `le`, in one predicate, split across
+        // two, or across two queries): the proof then identifies the exact birth date, so "not shared" would be untrue.
+        // The model has no stable credential identity, so the bounds are combined over the WHOLE request, which only ever
+        // errs towards stating every comparison.
+        let revealed = revealedClaimPaths(entries).union(exactBirthDateClaims(entries.flatMap(\.items)))
+        entries = entries.map { PresentationConsentEntry(credential: $0.credential, items: withoutAgeWordingWhereRevealed($0.items, revealed: revealed)) }
         let verifier = PresentationConsentVerifier(
             label: label(trust: trust, clientName: verifiedClientIdDisplayName, origin: attestedOrigin),
             trustFramework: trust.framework,
@@ -152,8 +151,7 @@ public enum PresentationConsentBuilder {
         }
     }
 
-    /// The claims whose age bounds, over the predicates of ONE credential, leave a single day: the greatest `ge` is not
-    /// below the least `le`. Such a proof identifies the exact date, whichever predicates the bounds came from.
+    /// The claims whose age bounds leave a single day: the greatest `ge` is not below the least `le`.
     private static func exactBirthDateClaims(_ items: [PresentationConsentItem]) -> Set<ClaimPathKey> {
         var lower: [ClaimPathKey: Int] = [:], upper: [ClaimPathKey: Int] = [:]
         for case .predicate(let predicate) in items where predicate.ageForm != nil {

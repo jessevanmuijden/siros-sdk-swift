@@ -262,27 +262,30 @@ final class PresentationConsentTests: XCTestCase {
     }
 
     /// Age bounds that meet at one day identify the exact birth date, so the wording must not say it is not shared:
-    /// within one predicate, or split across two predicates on the same credential; a real range keeps the age wording.
+    /// within one predicate, split across two predicates, or split across two queries; a real range keeps the age wording.
     func testAgeBoundsThatMeetAtOneDayLoseTheAgeWording() throws {
         let registry = PredicateFunctions([
             PredicateFunction(id: "age_x", claim: .fixed(["birth_date"]), valueType: .date,
                               comparisons: [.init(param: "ge", op: .ge), .init(param: "le", op: .le)], ageSpecialisation: true),
         ])
-        func predicates(_ plan: [[String: JSONValue]]) throws -> [PresentationConsentPredicate] {
-            let query = CircuitZkConsentQuery(
-                plan: plan.enumerated().map { CircuitZkFunction(id: "age_x", handle: "a\($0.offset)", params: $0.element) },
-                credential: PresentationConsentCredential(name: nil, issuer: nil))
+        func predicates(_ queries: [[[String: JSONValue]]]) throws -> [PresentationConsentPredicate] {
+            let built = queries.map { plan in
+                CircuitZkConsentQuery(
+                    plan: plan.enumerated().map { CircuitZkFunction(id: "age_x", handle: "a\($0.offset)", params: $0.element) },
+                    credential: PresentationConsentCredential(name: nil, issuer: nil))
+            }
             let request = try XCTUnwrap(PresentationConsentBuilder.build(
-                queries: [query], functions: registry, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
+                queries: built, functions: registry, trust: CircuitZkConsentTrust(entityName: "x", framework: nil, identifier: nil),
                 verifiedClientIdDisplayName: nil, attestedOrigin: "https://x", verifierId: nil, verifierIdType: nil,
                 requestSigned: true, today: "2026-10-19"))
-            return request.entries[0].items.compactMap { if case .predicate(let p) = $0 { return p } else { return nil } }
+            return request.entries.flatMap(\.items).compactMap { if case .predicate(let p) = $0 { return p } else { return nil } }
         }
         let day = JSONValue.string("2000-01-01")
-        XCTAssertTrue(try predicates([["ge": day, "le": day]]).allSatisfy { $0.ageForm == nil }, "one predicate, equal bounds")
-        XCTAssertTrue(try predicates([["ge": day], ["le": day]]).allSatisfy { $0.ageForm == nil }, "split across two predicates")
-        XCTAssertTrue(try predicates([["ge": .string("1999-12-31")], ["le": day], ["ge": day]]).allSatisfy { $0.ageForm == nil }, "the intersection is one day")
-        XCTAssertTrue(try predicates([["ge": .string("1990-01-01")], ["le": .string("2010-01-01")]]).allSatisfy { $0.ageForm != nil }, "a real range keeps the age wording")
+        XCTAssertTrue(try predicates([[["ge": day, "le": day]]]).allSatisfy { $0.ageForm == nil }, "one predicate, equal bounds")
+        XCTAssertTrue(try predicates([[["ge": day], ["le": day]]]).allSatisfy { $0.ageForm == nil }, "split across two predicates")
+        XCTAssertTrue(try predicates([[["ge": day]], [["le": day]]]).allSatisfy { $0.ageForm == nil }, "split across two queries")
+        XCTAssertTrue(try predicates([[["ge": .string("1999-12-31")], ["le": day], ["ge": day]]]).allSatisfy { $0.ageForm == nil }, "the intersection is one day")
+        XCTAssertTrue(try predicates([[["ge": .string("1990-01-01")], ["le": .string("2010-01-01")]]]).allSatisfy { $0.ageForm != nil }, "a real range keeps the age wording")
     }
 
     func testAnAgeFunctionWithAnyOtherComparisonFallsBackToTheGenericWording() throws {
