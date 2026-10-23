@@ -508,6 +508,25 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.sent.contains("c1"))
     }
 
+    /// A retry timer scheduled before a resume is stale after it: the resume reset the budgets and replayed the queue,
+    /// so the old timer must not send the answer again.
+    func testARetryTimerScheduledBeforeAResumeDoesNothingAfterIt() async throws {
+        // original fails (timer T1 at 150 ms); a resume at ~30 ms replays and fails (timer T2 at ~180 ms); T1 firing at
+        // 150 ms must find the generation changed and send nothing.
+        let ctx = ScriptedPeerContext([.fail, .fail, .fail, .fail, .fail])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [150]))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: signStart())
+        try await Task.sleep(nanoseconds: 30_000_000)
+        profile.sessionResumed()
+        try await Task.sleep(nanoseconds: 100_000_000)                      // T1 not yet due
+        XCTAssertEqual(ctx.attempts, 2, "original + the resume's replay so far")
+        try await Task.sleep(nanoseconds: 40_000_000)                       // ~170 ms: T1 (150 ms) fired and was stale
+        XCTAssertEqual(ctx.attempts, 2, "the pre-resume timer sent nothing")
+        try await Task.sleep(nanoseconds: 120_000_000)                      // ~290 ms: T2 (the post-resume timer, ~180 ms) fired
+        XCTAssertEqual(ctx.attempts, 3, "exactly one timed retry after the reset")
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))
@@ -1146,12 +1165,14 @@ private final class ScriptedPeerContext: WmpPeerContext, @unchecked Sendable {
     init(_ script: [Step]) { self.script = script }
     var blockedNow: Bool { lock.lock(); defer { lock.unlock() }; return _blockedNow }
     var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
+    private var _attempts = 0
+    var attempts: Int { lock.lock(); defer { lock.unlock() }; return _attempts }
     func releaseBlocked() { lock.lock(); released = true; let c = blocked; blocked = nil; lock.unlock(); c?.resume() }
     private var _routes: [String] = []
     var releasedRoutes: [String] { lock.lock(); defer { lock.unlock() }; return _routes }
     func releaseFlow(flowId: String) { lock.lock(); _routes.append(flowId); lock.unlock() }
     func notify(method: String, params: [String: AnyCodable]?) async throws {
-        lock.lock(); let step = script.isEmpty ? Step.succeed : script.removeFirst(); lock.unlock()
+        lock.lock(); _attempts += 1; let step = script.isEmpty ? Step.succeed : script.removeFirst(); lock.unlock()
         switch step {
         case .fail: throw WmpSessionError.connectionFailed
         case .blockThenFail:

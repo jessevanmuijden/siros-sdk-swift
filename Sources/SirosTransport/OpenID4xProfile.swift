@@ -664,7 +664,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     ///
     /// - Parameter only: a timed retry drains just its OWNING child (revalidated: still queued, budget not spent by
     ///   anyone else); only a resume drains the whole queue.
-    private func drainUnsent(only childId: String? = nil) {
+    /// - Parameter onlyIfGeneration: a timer's resume generation: a timer scheduled before a resume (which reset the
+    ///   budgets and replayed the queue) is stale, and is validated under the same lock that claims the answer.
+    private func drainUnsent(only childId: String? = nil, onlyIfGeneration timerGeneration: Int? = nil) {
         childLock.lock()
         let pending = childId.map { unsentAnswers[$0] != nil ? [$0] : [] } ?? Array(unsentAnswers.keys)
         childLock.unlock()
@@ -674,7 +676,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
                 childLock.lock()
                 // Revalidated at each step: a parent that ended or a shutdown while an earlier send was suspended has
                 // already dropped the entry (or stopped the profile), and its answer must not go out now.
-                guard !stopped, let answer = unsentAnswers.removeValue(forKey: childId) else { childLock.unlock(); continue }
+                guard !stopped, timerGeneration == nil || timerGeneration == resumeGeneration,
+                      let answer = unsentAnswers.removeValue(forKey: childId) else { childLock.unlock(); continue }
                 replaying[childId] = answer.parent
                 let claimedAt = resumeGeneration
                 childLock.unlock()
@@ -730,10 +733,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         guard !stopped, unsentAnswers[childId] != nil, used < config.sendRetryDelaysMs.count else { childLock.unlock(); return }
         let delay = config.sendRetryDelaysMs[used]
         retryAttempts[childId] = used + 1
+        let scheduledAt = resumeGeneration
         childLock.unlock()
         Task { [self] in
             try? await Task.sleep(nanoseconds: UInt64(max(delay, 0)) * 1_000_000)
-            drainUnsent(only: childId)
+            drainUnsent(only: childId, onlyIfGeneration: scheduledAt)
         }
     }
 
