@@ -4,59 +4,9 @@ import SwiftUI
 import SirosWallet
 import SirosCredentials
 
-/// One in-flight transaction-consent prompt (EC TS12) plus how to answer it.
-/// `Identifiable` so it drives a `.sheet(item:)`, like `PendingWscdChoice`.
-struct PendingTransactionConsent: Identifiable {
-    let id = UUID()
-    let request: TransactionConsentRequest
-    /// `true` confirms, `false` declines.
-    let respond: (Bool) -> Void
-}
-
-/// Bridges the SDK's `TransactionConsentHandler.confirm` to the sheet:
-/// suspends until the user answers, resuming at most once. All TS12 logic
-/// lives in the SDK; this only shows what the SDK built.
-final class TransactionConsentContinuationBox {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Bool, Never>?
-    private var cancelled = false
-
-    /// Installs the continuation. Returns `false` (having resumed it with
-    /// `false`) when the box was cancelled before it was installed.
-    func set(_ continuation: CheckedContinuation<Bool, Never>) -> Bool {
-        lock.lock()
-        if cancelled { lock.unlock(); continuation.resume(returning: false); return false }
-        self.continuation = continuation
-        lock.unlock()
-        return true
-    }
-
-    /// Whether the box still awaits an answer: installed, not answered, not cancelled.
-    var isPending: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return continuation != nil && !cancelled
-    }
-
-    func resumeOnce(_ answer: Bool) {
-        lock.lock()
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(returning: answer)
-    }
-
-    /// Declines, whether or not the continuation has been installed yet.
-    func cancel() {
-        // Mark and take the continuation under ONE lock, so a simultaneous confirm
-        // cannot slip in between and return consent after the deadline already won.
-        lock.lock()
-        cancelled = true
-        let continuation = self.continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(returning: false)
-    }
-}
+/// One in-flight transaction-consent prompt (EC TS12): the SDK's `ConsentPrompt` question, `Identifiable` so it
+/// drives a `.sheet(item:)`. `answer(true)` confirms, `decline()` declines.
+typealias PendingTransactionConsent = ConsentPrompt<TransactionConsentRequest, Bool>.Pending
 
 /// The handler registered on `SirosWallet.transactionConsentHandler`.
 final class TransactionConsentBridge: TransactionConsentHandler, @unchecked Sendable {
@@ -111,7 +61,7 @@ struct TransactionConsentSheet: View {
             // dismissal, so the view model's current prompt cannot be consulted. Answer
             // through THIS sheet's own response instead: it is bound to its own box, a
             // second answer is a no-op, and a stale callback cannot touch a newer prompt.
-            .onDisappear { pending.respond(false) }
+            .onDisappear { pending.decline() }
         }
     }
 
@@ -182,14 +132,14 @@ struct TransactionConsentSheet: View {
         // One button answers for every entry, so a label is used only when the
         // SDK says all entries share it; otherwise the app's own wording.
         return VStack(spacing: 10) {
-            Button(action: { pending.respond(true) }) {
+            Button(action: { pending.answer(true) }) {
                 Text(request.commonAffirmativeLabel ?? L10n.string(request.entries.count > 1 ? "transactionConsent.confirmAll" : "transactionConsent.confirm"))
                     .frame(maxWidth: .infinity, minHeight: 48)
             }
             .buttonStyle(.borderedProminent)
             .disabled(requiresAcknowledgement && !acknowledgedUnsigned)
 
-            Button(action: { pending.respond(false) }) {
+            Button(action: { pending.decline() }) {
                 Text(request.commonDenialLabel ?? L10n.string("transactionConsent.cancel"))
                     .frame(maxWidth: .infinity, minHeight: 48)
             }

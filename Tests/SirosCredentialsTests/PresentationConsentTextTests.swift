@@ -181,6 +181,16 @@ final class PresentationConsentTextTests: XCTestCase {
         XCTAssertNotEqual(try t.render(request([predicate(nil, .string, .eq, ["A"], function: "other")])).entries[0].lines, ["custom"])
     }
 
+    /// A host renderer that says nothing would drop the predicate from the screen the user approves: refused.
+    func testARendererThatReturnsNoWordingIsRefusedNotSilentlyDropped() throws {
+        for output in [[String](), [""], ["   "], ["ok", " \n"]] {
+            let t = PresentationConsentText(locale: Locale(identifier: "en"), predicateRenderers: ["x_check": { _ in output }])
+            XCTAssertThrowsError(try t.render(request([predicate(nil, .string, .eq, ["A"])])), "renderer output \(output)") {
+                XCTAssertTrue($0 is PresentationConsentTextError)
+            }
+        }
+    }
+
     func testTheRefusalMessagesAreLocalised() {
         XCTAssertEqual(text("en").userDeclinedMessage(), "You did not approve this request, so nothing was shared.")
         XCTAssertEqual(text("sv").consentUnavailableMessage(), "Din plånbok kan inte be om ditt godkännande just nu, så ingenting delades.")
