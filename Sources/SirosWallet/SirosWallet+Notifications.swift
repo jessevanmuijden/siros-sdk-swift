@@ -35,6 +35,9 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // A flow that already failed or was cancelled is not revived by a late completion (its key is gone, so the plain
+        // path below would otherwise accept it as a successful plain issuance).
+        if flowAlreadyEnded(msg.flowId) { return }
         // Whether this wallet offered a response-encryption key for the flow, read before the flow's state is dropped.
         lock.lock(); let offeredKey = credentialResponseKeys[msg.flowId] != nil; lock.unlock()
         if offeredKey, msg.credentialResponseEncrypted != true {
@@ -97,8 +100,9 @@ extension SirosWallet {
             // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
             guard let entries = msg.credentials,
                   let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
-                await failIssuanceLocally(
-                    flowId: msg.flowId, message: "The credentials the issuer sent do not match what the engine reported"
+                await rejectDecryptedCompletion(
+                    flowId: msg.flowId, responses: decryptedResponses,
+                    message: "The credentials the issuer sent do not match what the engine reported"
                 )
                 return
             }

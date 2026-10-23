@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Blind issuance: socket replacement without the wallet lock, scoped cleanup, and unpairable completions.**
+  `onSocketReplaced` no longer cleans up inside the callback (the issuance start replaces the socket while holding the
+  wallet lock, which deadlocked): it schedules a cleanup scoped to the reporting engine and to the response keys that
+  engine's EARLIER sockets created, so a key the replacement socket already advertised, or a new login's engine, is left
+  alone. A decrypt's late reply is not sent on a replacement connection, and a key superseded by a newer `generate_proof`
+  makes the older decrypt stale instead of failing the issuance. Decrypted credentials the completion cannot be paired
+  with (a count mismatch, an unreadable encrypted completion) are reported to the issuer with `credential_failure`; a
+  late completion does not revive a failed or cancelled flow; an `epk` carrying a private `d` is refused;
+  `OpenID4xConfig.onCancel` receives the flow type, so cancelling an `oid4vp` parent leaves an issuance's guards alone.
+
+### Fixed
+- **WMP: a retry timer scheduled before a resume does nothing after it, and the event stream ends when a close fails.** A
+  timed retry carries the resume generation it was scheduled in and is validated under the lock that claims the answer,
+  so a resume (which resets the budgets and replays the queue) cannot be followed by stale retries. `WmpPeer.close`
+  finishes `flowEvents()` whether or not the close notification got through.
+
 ### Changed
 - **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
   `Generated/siros_dc_matcher_ffi.swift` from the v0.11.0 tag (keeping the
@@ -34,6 +51,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
+- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
+  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
+  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
+  with the four rulebook configs and the API-misuse errors, tested against the
+  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
+  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
+  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
+  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
+  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
+  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
+  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
+  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
+  over-65535-byte fields refused). Platform-neutral (swift-crypto
+  on Linux), no secret is logged or returned by a public API.
+- **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
+  and a registry-driven builder.** The locale-free request a user approves before
+  anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
+  `legacyPseudonym`, per credential, with the verifier label and, for hosts and
+  tests only, the trust framework and `verifier_id_type`). Predicates apply to ANY
+  claim, and the function set is open-ended, so predicate functions are data:
+  `PredicateFunctions` (default: the nymauth `age_check`) declares per function id
+  its claim, value type, param-to-comparison map, an optional minimum span and
+  whether it reads as an age. Consent building, the local pre-check
+  (`precheck`) and the cross-query merge (`combinedBoundsOk`, the strictest
+  declared minimum span per credential and claim) are driven by it; a function not
+  in the registry is refused before consent. The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`, a
+  throw or a timeout is a decline, and with no handler a `circuit_zk` request is
+  refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
+  shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
+  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 18 merge cases, 22
+  pre-check cases). Numbers are compared as exact decimals: a value Decimal would
+  round (over 38 digits) is refused, `in` members are deduplicated by value, the
+  merge span is refused when it cannot be computed exactly, and a pre-check with a
+  different number of lookups than functions is false; float operands must be finite
+  and exact. `requestSigned` is a required argument (the signature result, never
+  defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
 - **Sensible default display for a credential type that publishes none.** What a
   card draws when the issuer's type metadata has no rendering block, which is
   every type that comes from someone else's catalog.
@@ -462,6 +516,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unchanged.
 
 ### Fixed
+- **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
+  components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
+  and the label lookup. Age bounds that meet at a single day (one predicate, two predicates or two queries) identify the exact
+  birth date, so the "not shared" age wording is dropped for them. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
+  and `["SE", "FI"]` no longer read alike.
 - **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
   engine keeps one session per (tenant, user) and closes the older socket when a
   second connects. The session used to open several at once: `forceReconnect`

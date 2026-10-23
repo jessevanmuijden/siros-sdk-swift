@@ -9,6 +9,7 @@ extension SirosWallet {
     /// like the WebSocket's `flow_complete`; a plain completion that carries a credential entry without its value
     /// is refused whole, as on the WebSocket, rather than reported as a success.
     func handleWmpFlowComplete(flowId: String, result: AnyCodable?) async {
+        if flowAlreadyEnded(flowId) { return }          // a late completion does not revive a failed or cancelled flow
         lock.lock(); let offeredKey = credentialResponseKeys[flowId] != nil; lock.unlock()
         if offeredKey, !Self.claimsEncryptedResponse(result) {
             let ids = result?.objectValue?["credentials"]?.arrayValue?.compactMap { $0.objectValue?["notification_id"]?.stringValue } ?? []
@@ -19,7 +20,8 @@ extension SirosWallet {
         if Self.claimsEncryptedResponse(result) {
             guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {
                 // Encrypted but unreadable: an error, not a plain completion that drops what was decrypted.
-                await failIssuanceLocally(flowId: flowId, message: "The completion could not be read")
+                let decrypted = takeDecryptedCredentialResponses(flowId: flowId)
+                await rejectDecryptedCompletion(flowId: flowId, responses: decrypted, message: "The completion could not be read")
                 return
             }
             await handleFlowComplete(msg: message)

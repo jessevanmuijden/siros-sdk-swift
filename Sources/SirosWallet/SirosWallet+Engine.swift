@@ -139,11 +139,8 @@ extension SirosWallet {
             onComplete: { [weak self] flowId, result in
                 await self?.handleWmpFlowComplete(flowId: flowId, result: result)
             },
-            onCancel: { [weak self] flowId in
-                // `wmp.flow.cancel` from the peer: the same terminal cleanup as an error.
-                self?.cancelTransactionTasks(flowId: flowId)
-                self?.discardCredentialResponseState(flowId: flowId)
-                self?.resetIssuanceGuards()
+            onCancel: { [weak self] flowId, flowType in
+                self?.handleWmpFlowCancel(flowId: flowId, flowType: flowType)
             },
             onError: { [weak self] flowId, code, message in
                 self?.resetIssuanceGuards()
@@ -601,7 +598,7 @@ extension SirosWallet {
         let engine = Self.createEngineSession(engineBase, config.tenantId)
         lock.lock(); engineSession = engine; credentialNotifier = engine; lock.unlock()
         // A replaced socket ends the flows that ran on the old one: their response keys and opened responses go too.
-        engine.onSocketReplaced = { [weak self] in self?.clearBlindIssuanceState() }
+        installSocketReplacedHook(on: engine)
         engine.connect(appToken: appToken, tokenProvider: { [weak self] in
             guard let tokens = self?.authTokens else {
                 throw SirosError.wallet(message: "Not connected")
@@ -1449,5 +1446,40 @@ extension SirosWallet {
         fclose(f)
         return read == count ? 0 : -1
         #endif
+    }
+}
+
+extension SirosWallet {
+    /// `wmp.flow.cancel` from the peer for a flow of its own: the flow's own cleanup, and the issuance guards only when
+    /// the flow can be the issuance. An `oid4vp` parent being cancelled must not reset the guards, offer and attested key
+    /// ids of an unrelated issuance that is in progress.
+    func handleWmpFlowCancel(flowId: String, flowType: String?) {
+        cancelTransactionTasks(flowId: flowId)
+        discardCredentialResponseState(flowId: flowId)
+        if flowType != "oid4vp" { resetIssuanceGuards() }
+    }
+
+    /// What the engine session reports when its connection is lost or replaced. The cleanup runs on its own task, never
+    /// inside the callback: `forceReconnect` is called while the wallet holds its lock (the issuance start's commit), and
+    /// the cleanup takes that lock. It is scoped to the engine that reported and to the keys that engine's earlier sockets
+    /// created, so a key a replacement socket's request already advertised is left alone, and a late report from an
+    /// engine that logout and a new login have replaced touches nothing.
+    func installSocketReplacedHook(on engine: WalletEngineSession) {
+        engine.onSocketReplaced = { [weak self, weak engine] in
+            guard let self, let engine else { return }
+            Task { self.cleanupAfterSocketReplacement(of: engine) }
+        }
+    }
+
+    func cleanupAfterSocketReplacement(of engine: WalletEngineSession) {
+        let current = engine.socketGeneration
+        let id = ObjectIdentifier(engine)
+        lock.lock(); defer { lock.unlock() }
+        guard let live = engineSession, live === engine else { return }
+        for (flowId, origin) in responseKeyOrigin where origin.engine == id && origin.generation < current {
+            credentialResponseKeys.removeValue(forKey: flowId)
+            decryptedCredentialResponses.removeValue(forKey: flowId)
+            responseKeyOrigin.removeValue(forKey: flowId)
+        }
     }
 }

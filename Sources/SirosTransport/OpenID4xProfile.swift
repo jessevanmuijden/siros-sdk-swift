@@ -518,7 +518,8 @@ public struct OpenID4xConfig: @unchecked Sendable {
     public var onComplete: ((String, AnyCodable?) async -> Void)?
     public var onError: ((String, String?, String?) async -> Void)?
     /// The peer cancelled the flow (`wmp.flow.cancel`).
-    public var onCancel: ((String) async -> Void)?
+    /// A flow of its own was cancelled: its id and the flow type it was started as (nil when this profile never saw it start).
+    public var onCancel: ((String, String?) async -> Void)?
     public var attestationProvider: ClientAttestationProvider?
     /// The profile was shut down (the session ended, or failed for good): called synchronously on each shutdown.
     public var onShutdown: (() -> Void)?
@@ -532,7 +533,7 @@ public struct OpenID4xConfig: @unchecked Sendable {
         onMatchRequest: ((String, AnyCodable?) async throws -> MatchResult)? = nil,
         onTrustEvaluation: ((String, AnyCodable?) async throws -> TrustResult)? = nil,
         onComplete: ((String, AnyCodable?) async -> Void)? = nil,
-        onCancel: ((String) async -> Void)? = nil,
+        onCancel: ((String, String?) async -> Void)? = nil,
         onError: ((String, String?, String?) async -> Void)? = nil,
         attestationProvider: ClientAttestationProvider? = nil,
         onShutdown: (() -> Void)? = nil,
@@ -590,6 +591,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     private var endedParents: [String] = []
     private let maxEndedParents = 256
     /// Children whose terminal answer was sent: a redelivered start for one runs nothing. Bounded, oldest dropped.
+    /// The flow type each non-child flow was started as, for `onCancel` (an `oid4vp` parent's cancel must not reset an
+    /// issuance's guards). Dropped when the flow completes, fails or is cancelled.
+    private var parentFlowTypes: [String: String] = [:]
     private var completedChildren: Set<String> = []
     private var completedOrder: [String] = []
     private let maxCompletedChildren = 4096
@@ -635,6 +639,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
             // A start that is refused for good (its flow ended, or the profile stopped) has no task that would ever
             // release the route the peer registered for it; a duplicate of a tracked child keeps its own.
             if ended { peer?.releaseFlow(flowId: params.flowId) }
+        } else {
+            childLock.lock(); parentFlowTypes[params.flowId] = params.flowType; childLock.unlock()
         }
         return FlowStartResult(flowId: params.flowId, flowType: params.flowType)
     }
@@ -704,7 +710,9 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     ///
     /// - Parameter only: a timed retry drains just its OWNING child (revalidated: still queued, budget not spent by
     ///   anyone else); only a resume drains the whole queue.
-    private func drainUnsent(only childId: String? = nil) {
+    /// - Parameter onlyIfGeneration: a timer's resume generation: a timer scheduled before a resume (which reset the
+    ///   budgets and replayed the queue) is stale, and is validated under the same lock that claims the answer.
+    private func drainUnsent(only childId: String? = nil, onlyIfGeneration timerGeneration: Int? = nil) {
         childLock.lock()
         let pending = childId.map { unsentAnswers[$0] != nil ? [$0] : [] } ?? Array(unsentAnswers.keys)
         childLock.unlock()
@@ -714,7 +722,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
                 childLock.lock()
                 // Revalidated at each step: a parent that ended or a shutdown while an earlier send was suspended has
                 // already dropped the entry (or stopped the profile), and its answer must not go out now.
-                guard !stopped, let answer = unsentAnswers.removeValue(forKey: childId) else { childLock.unlock(); continue }
+                guard !stopped, timerGeneration == nil || timerGeneration == resumeGeneration,
+                      let answer = unsentAnswers.removeValue(forKey: childId) else { childLock.unlock(); continue }
                 replaying[childId] = answer.parent
                 let claimedAt = resumeGeneration
                 childLock.unlock()
@@ -770,10 +779,11 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         guard !stopped, unsentAnswers[childId] != nil, used < config.sendRetryDelaysMs.count else { childLock.unlock(); return }
         let delay = config.sendRetryDelaysMs[used]
         retryAttempts[childId] = used + 1
+        let scheduledAt = resumeGeneration
         childLock.unlock()
         Task { [self] in
             try? await Task.sleep(nanoseconds: UInt64(max(delay, 0)) * 1_000_000)
-            drainUnsent(only: childId)
+            drainUnsent(only: childId, onlyIfGeneration: scheduledAt)
         }
     }
 
@@ -899,11 +909,13 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     }
 
     public func handleComplete(params: FlowCompleteParams) async {
+        childLock.lock(); parentFlowTypes.removeValue(forKey: params.flowId); childLock.unlock()
         cancelChildren(of: params.flowId)
         await config.onComplete?(params.flowId, params.result)
     }
 
     public func handleError(params: FlowErrorParams) async {
+        childLock.lock(); parentFlowTypes.removeValue(forKey: params.flowId); childLock.unlock()
         cancelChildren(of: params.flowId)
         await config.onError?(params.flowId, params.code, params.message)
     }
@@ -912,7 +924,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         // A cancelled child answers nothing, even if its handler ignores the cancellation. Cancelling a child
         // stops that operation; only a flow of its own is cleaned up by the wallet.
         let wasChild = cancelChildren(of: params.flowId)
-        if !wasChild { await config.onCancel?(params.flowId) }
+        childLock.lock(); let flowType = parentFlowTypes.removeValue(forKey: params.flowId); childLock.unlock()
+        if !wasChild { await config.onCancel?(params.flowId, flowType) }
     }
 
     // MARK: - Sub-flow Handlers
