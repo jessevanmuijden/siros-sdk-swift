@@ -146,7 +146,7 @@ extension SirosWallet {
         endSessionLocally()
         sessionStore.clearAll()
         accountRegistry.clear()
-        trustCache.clear()
+        trustDecisionCache.clear()
         await clearCredentialStatusCachesAwaited()
         dropInMemoryHolderState()
 
