@@ -41,6 +41,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Binding failures map to coarse kinds (and, for a refusal, a coarse reason) and carry
   no message; the request (it holds the delivered seed) and response redact their
   description, debug description and mirror. The request mirrors the Kotlin ABI: `circuitId` is the catalog circuit id the presentation states as `system_id`, `artifactHash` the catalog hash of the verified circuit, `time` the PROVER-supplied `proof_time` (rulebook v0.4, exactly 20 bytes), `verifierInput` the SHA-256 of the PREFIXED verifier id. Not wired into the wallet.
+- **Sensible default display for a credential type that publishes none.** What a
+  card draws when the issuer's type metadata has no rendering block, which is
+  every type that comes from someone else's catalog.
+  SDK: `CredentialUtils.buildMetadata` and `buildMdocMetadata` fall back to the
+  offer's `issuerLogoUri` (the issuer's own mark) as the last `logo` fallback, and
+  the new `CredentialUtils.buildFallbackMetadata(_:)` builds metadata for a
+  credential that has none from what the credential itself carries (name from its
+  configuration id, issuer name from the host of its issuer identifier, `vct` /
+  `docType` from the credential); it sets no colours or logo, which are the
+  issuer's to declare.
+  Sample app card: a tint derived from the type identifier (FNV-1a over the
+  UTF-16 code units, 24 hues x 3 tones, fixed lightness per theme; the same type
+  gives the same colour on every device, in the Kotlin sample app too) instead of
+  one accent colour for every type; text colour chosen by contrast ratio, not by
+  a mid-grey threshold, so no background yields text under 4.5:1; the issuer row
+  is left out when the credential names no issuer, the wire format is no longer a
+  text slot of its own, and the type identifier takes its place beneath the name
+  (dropping out when the name already says it). Mirrors siros-sdk-kotlin
+  [#211](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/211). Not
+  ported: Kotlin's `hydration` marker on `CredentialMetadata` (Swift has no
+  hydration pass).
 - **Issuance start is visible at once.** `startIssuance(offerUri:)` and
   `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
   before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
