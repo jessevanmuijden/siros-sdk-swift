@@ -109,7 +109,11 @@ extension SirosWallet {
         // Also clears `pendingRenewalSourceBatchId` (see its own clearing in
         // `resetIssuanceGuards()`), whether this renewal attempt succeeded
         // or failed - either way the attempt is over.
-        resetIssuanceGuards()
+        // Only for a completion that belongs to an issuance (it carries the start tag the
+        // trust gate just validated). A presentation's completion is untagged and says
+        // nothing about an issuance in flight beside it: resetting here would clear that
+        // issuance's guards and invalidate its own tag.
+        if msg.startTag != nil { resetIssuanceGuards() }
 
         await persistAndSyncKeystore()
 

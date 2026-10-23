@@ -81,6 +81,13 @@ final class IssuanceTrustGateTests: XCTestCase {
         }
     }
 
+    private final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = false
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return _value }
+        func set() { lock.lock(); _value = true; lock.unlock() }
+    }
+
     private struct Harness {
         let wallet: SirosWallet
         let store: InMemoryCredentialStore
@@ -455,6 +462,41 @@ final class IssuanceTrustGateTests: XCTestCase {
         )
         XCTAssertFalse(reconnected, "A must not close B's socket before noticing it no longer owns the wallet")
         XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testAnAuthorizationPendingAcrossLogoutAndLoginIsRefusedAndNeverUsesTheNewSession() async throws {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.engineSession = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        wallet.pendingAuthorizations["A"] = pendingAuthorization(startEpoch: aEpoch)
+        // The user logs out and logs in as B before A's browser callback returns.
+        _ = wallet.bumpSessionGeneration()
+        let usedNewSession = LockedFlag()
+        wallet.authorizationResumeTokenHook = { usedNewSession.set(); return "tok-of-B" }
+        wallet.authorizationResumeConnectHook = { _ in usedNewSession.set() }
+        wallet.authorizationResumeSendHook = { _ in usedNewSession.set() }
+        wallet.completeAuthorization(flowId: "A", code: "c", state: "s")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(usedNewSession.value, "A's callback must not use B's engine or tokens")
+        XCTAssertNil(wallet.pendingAuthorizations["A"], "the stale context is consumed, not left to be replayed")
+        XCTAssertTrue(h.listener.completed.isEmpty)
+    }
+
+    func testAPresentationCompletionDoesNotClearAnIssuanceInFlightBesideIt() async {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.pendingRenewalSourceBatchId = 100; let bEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        // P's completion (untagged, no credentials) is handled after B sent its tagged start.
+        await wallet.handleFlowComplete(msg: try! JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"{"type":"flow_complete","flow_id":"P"}"#.utf8)))
+        XCTAssertEqual(h.listener.completed, ["P"], "the presentation callback is preserved")
+        XCTAssertTrue(wallet.issuanceInFlight, "B's guard survives")
+        XCTAssertEqual(wallet.pendingRenewalSourceBatchId, 100)
+        wallet.lock.lock(); let after = wallet.issuanceEpoch; wallet.lock.unlock()
+        XCTAssertEqual(after, bEpoch, "B's tag is still valid")
+        await wallet.handleFlowComplete(msg: flowComplete(flowId: "B", credentials: [sdJwtCredential], engineTrusted: true, startTag: bEpoch))
+        let stored = await h.store.getAll()
+        XCTAssertEqual(stored.count, 1, "B's own completion still works")
     }
 
     func testAnAuthorizationThatCannotBeTiedToItsIssuanceIsRefused() {

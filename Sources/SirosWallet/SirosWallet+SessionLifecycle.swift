@@ -175,6 +175,12 @@ extension SirosWallet {
         lock.lock(); defer { lock.unlock() }
         sessionGeneration += 1
         reloginDoneForGeneration = false
+        // The session (logout, login, account replacement) is over, and so is every
+        // issuance of it: an OAuth callback still pending (it keeps its entry, so it
+        // is recognised and refused rather than mistaken for a legacy callback) or a
+        // completion in flight must not be acted on with the next account's engine,
+        // tokens or trust-gate state.
+        issuanceEpoch &+= 1
         return sessionGeneration
     }
 
