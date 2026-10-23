@@ -154,12 +154,16 @@ public final class WmpSession: @unchecked Sendable {
             )
         )
 
-        try await sendNotification(method: "wmp.session.close", params: params)
+        // The local teardown does not depend on the peer hearing about it: a failed close notification (a failed POST on a
+        // healthy stream, say) still disconnects, ends the session and fires the terminal hook, then reports the failure.
+        var notificationError: Error?
+        do { try await sendNotification(method: "wmp.session.close", params: params) } catch { notificationError = error }
         await transport.disconnect()
         setState(.closed)
         fireTerminalOnce()
         sessionId = nil
         resumptionToken = nil
+        if let notificationError { throw notificationError }
     }
 
     /// Send a JSON-RPC request and wait for the correlated response.

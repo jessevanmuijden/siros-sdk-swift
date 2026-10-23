@@ -211,6 +211,19 @@ final class WmpPeerTests: XCTestCase {
         withExtendedLifetime(peer) {}
     }
 
+    /// The local teardown does not depend on the close notification getting through: when it fails, the transport is still
+    /// disconnected and the session ended (so reconnect work stops), and the failure is still reported.
+    func testASessionClosesLocallyEvenWhenTheCloseNotificationFails() async throws {
+        let (peer, transport, _) = makePeer()
+        let shutdown = ShutdownProfile()
+        peer.use(shutdown)
+        try await connectPeer(peer, transport: transport)
+        transport.failingMethod = "wmp.session.close"
+        do { try await peer.close(); XCTFail("the failed notification is reported") } catch { /* expected */ }
+        XCTAssertGreaterThanOrEqual(shutdown.count, 1)
+        XCTAssertEqual(transport.currentState, .disconnected, "the transport is not left running")
+    }
+
     func testProfileInitializeCalledOnUse() {
         let (peer, _, profile) = makePeer()
         XCTAssertNotNil(profile.ctx, "initialize(ctx:) should be called by use(_:)")

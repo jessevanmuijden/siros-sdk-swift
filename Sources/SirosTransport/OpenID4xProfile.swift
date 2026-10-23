@@ -661,9 +661,12 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
 
     /// Sends the queued answers. Each is CLAIMED under the lock before its send is awaited, so a second drain (another
     /// resume while this send is suspended) cannot send it again; a failed send puts it back unless its flow has ended.
-    private func drainUnsent() {
+    ///
+    /// - Parameter only: a timed retry drains just its OWNING child (revalidated: still queued, budget not spent by
+    ///   anyone else); only a resume drains the whole queue.
+    private func drainUnsent(only childId: String? = nil) {
         childLock.lock()
-        let pending = Array(unsentAnswers.keys)
+        let pending = childId.map { unsentAnswers[$0] != nil ? [$0] : [] } ?? Array(unsentAnswers.keys)
         childLock.unlock()
         guard !pending.isEmpty else { return }
         Task { [self] in
@@ -730,7 +733,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         childLock.unlock()
         Task { [self] in
             try? await Task.sleep(nanoseconds: UInt64(max(delay, 0)) * 1_000_000)
-            drainUnsent()
+            drainUnsent(only: childId)
         }
     }
 

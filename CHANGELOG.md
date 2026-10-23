@@ -276,6 +276,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **WMP: a timed retry resends only its own answer, and a session closes locally whatever the close notification does.**
+  A retry timer drains just the child that scheduled it (a resume still drains the whole queue), so an answer that spent
+  its budget is not resent by another child's retry. `WmpSession.close` disconnects the transport, ends the session and
+  fires the terminal hook even when the `wmp.session.close` notification fails, then reports the failure.
 - **WMP child answers: the retry budget is per answer, and cancelled replays leave no marker.** The timed-retry budget
   belongs to each queued answer (cleared when it is sent, ends, or the session resumes), so an answer that used its
   retries up cannot starve the next. A replay's cancellation marker is removed when its send finishes whether or not its
