@@ -69,6 +69,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different number of lookups than functions is false; float operands must be finite
   and exact. `requestSigned` is a required argument (the signature result, never
   defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+- **Sensible default display for a credential type that publishes none.** What a
+  card draws when the issuer's type metadata has no rendering block, which is
+  every type that comes from someone else's catalog.
+  SDK: `CredentialUtils.buildMetadata` and `buildMdocMetadata` fall back to the
+  offer's `issuerLogoUri` (the issuer's own mark) as the last `logo` fallback, and
+  the new `CredentialUtils.buildFallbackMetadata(_:)` builds metadata for a
+  credential that has none from what the credential itself carries (name from its
+  configuration id, issuer name from the host of its issuer identifier, `vct` /
+  `docType` from the credential); it sets no colours or logo, which are the
+  issuer's to declare.
+  Sample app card: a tint derived from the type identifier (FNV-1a over the
+  UTF-16 code units, 24 hues x 3 tones, fixed lightness per theme; the same type
+  gives the same colour on every device, in the Kotlin sample app too) instead of
+  one accent colour for every type; text colour chosen by contrast ratio, not by
+  a mid-grey threshold, so no background yields text under 4.5:1; the issuer row
+  is left out when the credential names no issuer, the wire format is no longer a
+  text slot of its own, and the type identifier takes its place beneath the name
+  (dropping out when the name already says it). Mirrors siros-sdk-kotlin
+  [#211](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/211). Not
+  ported: Kotlin's `hydration` marker on `CredentialMetadata` (Swift has no
+  hydration pass).
 - **Issuance start is visible at once.** `startIssuance(offerUri:)` and
   `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
   before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
