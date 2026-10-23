@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     needed before release.
 
 ### Added
+- **`LogoSanitizer` / `DisplayLogo`: safe rendering of credential and issuer
+  display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
+  returns `.image(pngBytes)`, `.remote(httpsURL)` or a typed `LogoRejection`
+  (fail closed). `data:` logos must be `data:<type>;base64,...` with type
+  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 1024 px per side;
+  they are decoded with ImageIO, checked to be the declared type, and
+  re-encoded as a fresh PNG, so metadata and trailing/polyglot payloads are
+  dropped. **SVG is rejected** (script and external references; no safe
+  renderer is available, and it is not rendered via WKWebView or hand-sanitised).
+  Only `https:` remote logos pass (`http:` and other schemes are refused).
+  Without ImageIO (Linux) every `data:` logo is refused. Same policy as
+  siros-sdk-kotlin.
 - **Issuance start is visible at once.** `startIssuance(offerUri:)` and
   `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
   before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
