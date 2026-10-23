@@ -257,6 +257,7 @@
       "presentation": "Contacting verifier…"
     },
     "steps": {
+      "initializing": "Initializing…",
       "parsingOffer": "Reading credential offer…",
       "offerParsed": "Credential offer parsed",
       "fetchingMetadata": "Fetching issuer information…",
