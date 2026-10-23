@@ -86,13 +86,7 @@ struct ContentView: View {
         // `RequestWscdChoice` prompt can fire during credential issuance
         // regardless of which screen happens to be showing underneath -
         // mirrors how the error/info alerts above are handled globally.
-        .sheet(item: $viewModel.pendingWscdChoice, onDismiss: {
-            // Covers the sheet being dismissed WITHOUT the user tapping a
-            // plugin or Cancel (e.g. swiping it away) - see
-            // `WalletViewModel.dismissWscdChoice`'s doc comment, mirroring
-            // `ProximityEngagementContent`'s identical `onDismiss` handling.
-            viewModel.dismissWscdChoice()
-        }) { choice in
+        .sheet(item: $viewModel.pendingWscdChoice) { choice in
             WscdChoiceSheet(choice: choice)
         }
         // Same top-level rationale: a transaction (EC TS12) can be put to the
