@@ -1261,7 +1261,8 @@ extension SirosWallet {
                             credentialOfferUri: payloadDict["credential_offer_uri"]?.stringValue,
                             redirectUri: redirectUri,
                             codeVerifier: payloadDict["code_verifier"]?.stringValue,
-                            state: effectiveState
+                            state: effectiveState,
+                            startEpoch: engine.startTag(forFlow: msg.flowId)
                         )
                         lock.lock()
                         pendingAuthorizations[msg.flowId] = pending

@@ -455,6 +455,9 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         send(message)
     }
 
+    /// The start tag the flow `flowId` carries now (set by its first message), or nil.
+    public func startTag(forFlow flowId: String) -> Int? { startTags.peek(flowId: flowId) }
+
     /// A dead or replaced socket answers no more starts: tags queued for it would
     /// misalign every later flow.
     private func resetStartTags() { startTags.reset() }
@@ -482,10 +485,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     }
 
     private func discardIssuerTrustReport(flowId: String?) {
+        startTags.discard(flowId: flowId)
         guard let flowId else { return }
         issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
         issuerTrustReports.removeValue(forKey: flowId)
-        startTags.discard(flowId: flowId)
     }
 
     /// Internal so tests can feed frames without a socket.

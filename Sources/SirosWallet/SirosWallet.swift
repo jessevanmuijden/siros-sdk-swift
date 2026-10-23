@@ -29,6 +29,11 @@ struct PendingAuthorization: Sendable {
     let redirectUri: String?
     let codeVerifier: String?
     let state: String
+    /// The issuance epoch the ORIGINATING flow started under (its start tag), carried
+    /// to the resume instead of re-sampling the current epoch after the browser
+    /// round-trip and the token/connection awaits. Nil when the session could not
+    /// tie the flow to its start: the resume is then refused.
+    let startEpoch: Int?
 }
 
 /// Main entry point for the SIROS Wallet SDK (cross-platform).
@@ -583,6 +588,11 @@ public final class SirosWallet: @unchecked Sendable {
     /// evaluation the issuance trust gate runs on each issued mdoc, so a test
     /// can drive the gate without CryptoKit or a backend. Nil in production.
     var mdocIssuanceTrustHook: ((CredentialResult) async -> TrustResult?)?
+
+    /// Test seams for `resumeAuthorization`: replace the token/reconnect step and the
+    /// final `resumeIssuance` send. Nil in production.
+    var authorizationResumeConnectHook: ((WalletEngineSession) async throws -> Void)?
+    var authorizationResumeSendHook: ((Int) -> Void)?
 
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one

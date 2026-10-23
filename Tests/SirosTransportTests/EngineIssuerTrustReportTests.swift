@@ -72,14 +72,6 @@ final class EngineIssuerTrustReportTests: XCTestCase {
 
     // MARK: - Start tags (pair only when unambiguous)
 
-    private final class Clock: @unchecked Sendable {
-        private let lock = NSLock()
-        private var offset: Duration = .zero
-        private let base = ContinuousClock.now
-        func now() -> ContinuousClock.Instant { lock.lock(); defer { lock.unlock() }; return base.advanced(by: offset) }
-        func advance(_ d: Duration) { lock.lock(); offset += d; lock.unlock() }
-    }
-
     func testASingleUnansweredStartTagsItsFlow() async {
         let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
         session.startTags.enqueue(3)
@@ -130,14 +122,53 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         XCTAssertNil(ambiguous.take(flowId: "B"))
     }
 
-    func testAStartTheEngineNeverAnsweredExpiresAndDoesNotMakeLaterFlowsAmbiguous() {
-        let clock = Clock()
-        let tracker = StartTagTracker(ttl: .seconds(60), now: { clock.now() })
-        tracker.enqueue(0) // never answered
-        clock.advance(.seconds(61))
-        tracker.enqueue(1)
-        tracker.firstProgress(flowId: "B")
-        XCTAssertEqual(tracker.take(flowId: "B"), 1)
+    /// Copilot's example: A(0), B(1) outstanding; B's first progress arrives and clears
+    /// both; C(2) is enqueued; A's delayed first progress must not take C's tag.
+    func testALateReplyOfADroppedStartDoesNotTakeANewerStartsTag() {
+        let t = StartTagTracker()
+        t.enqueue(0); t.enqueue(1)
+        t.firstProgress(flowId: "B")
+        XCTAssertTrue(t.isPoisoned, "A may still reply")
+        t.enqueue(2)
+        t.firstProgress(flowId: "A")
+        XCTAssertNil(t.take(flowId: "A"), "A's late reply must not take C's tag")
+        t.firstProgress(flowId: "C")
+        XCTAssertNil(t.take(flowId: "C"), "C cannot be told from A's reply either: refused, never guessed")
+        XCTAssertFalse(t.isPoisoned, "every outstanding reply is now accounted for")
+        t.enqueue(3)
+        t.firstProgress(flowId: "D")
+        XCTAssertEqual(t.take(flowId: "D"), 3, "a clean tracker pairs again")
+    }
+
+    /// Copilot's second example: an unanswered start is never expired into a newer one.
+    func testAStartTheEngineNeverAnsweredIsNotExpiredIntoANewerStart() {
+        let t = StartTagTracker()
+        t.enqueue(0) // A: never answered (or very late)
+        t.enqueue(1) // B
+        t.firstProgress(flowId: "B")
+        XCTAssertNil(t.take(flowId: "B"))
+        t.firstProgress(flowId: "A") // arbitrarily late: no timer ever hands its slot to a newer start
+        XCTAssertNil(t.take(flowId: "A"))
+        XCTAssertFalse(t.isPoisoned)
+    }
+
+    func testAReplyThatNamesNoFlowStillAnswersOneOutstandingStart() {
+        let t = StartTagTracker()
+        t.enqueue(0)
+        t.discard(flowId: nil) // the engine refused the start with an error naming no flow
+        XCTAssertFalse(t.isPoisoned)
+        t.enqueue(1)
+        t.firstProgress(flowId: "X")
+        XCTAssertEqual(t.take(flowId: "X"), 1)
+    }
+
+    func testRetiringTheSocketClearsPoison() {
+        let t = StartTagTracker()
+        t.enqueue(0); t.enqueue(1)
+        t.firstProgress(flowId: "B")
+        XCTAssertTrue(t.isPoisoned)
+        t.reset()
+        XCTAssertFalse(t.isPoisoned)
     }
 
     func testAFlowWhoseProgressWasNeverSeenAndNoStartIsQueuedHasNoTag() async {
@@ -155,3 +186,4 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         XCTAssertNil(tracker.take(flowId: "A"), "a flow of the next socket must not take the dead socket's tag")
     }
 }
+

@@ -8,46 +8,52 @@ import Foundation
 ///
 /// The ordering is NOT guaranteed: go-wallet-backend runs every `flow_start` in
 /// its own goroutine (`internal/engine/session.go`, `go m.handleFlowStart`), so
-/// with two starts unanswered the first reply may belong to either. The tracker
-/// therefore pairs only when it is unambiguous:
+/// with two starts outstanding the first reply may belong to either, and a start
+/// whose tag was dropped can still reply later. So the tracker accounts for every
+/// outstanding reply (`unaccounted` + `pending`) and pairs ONLY when it is certain:
 ///
-/// - exactly ONE start is unanswered: the next unseen flow id answers it and takes
-///   its tag;
-/// - TWO OR MORE are unanswered: it cannot be told which one this flow answers, so
-///   NO tag is assigned and ALL pending tags are dropped (the other flow then finds
-///   nothing pending either). A flow without a tag is refused by the wallet when it
-///   would store credentials, so an ambiguity costs availability, never safety.
+/// - exactly one start is outstanding and it is pending (nothing unaccounted): the
+///   next unseen flow id answers it and takes its tag;
+/// - otherwise the reply cannot be tied to a start: it gets NO tag, all pending tags
+///   are dropped, and the starts that may still reply stay counted as `unaccounted`.
+///   While anything is unaccounted the tracker is `isPoisoned`: no new start can be
+///   paired (a late reply of a dropped start would take its tag), and the wallet
+///   retires the socket (`reset()` via a reconnect, which also ends every flow the
+///   old socket carried) before its next issuance start.
 ///
-/// A pending start expires (`ttl`): a start the engine never answered must not make
-/// later flows look ambiguous. A client-generated flow id would remove the residual
-/// (see the PR description); until then this is the conservative reading.
+/// There is no timer: expiring a start would let its late reply take a newer start's
+/// tag. A flow without a tag is refused by the wallet when it would store credentials,
+/// so ambiguity costs availability, never safety. What stays unprovable without a
+/// client-generated flow id (go-wallet-backend#478) is which of two concurrent starts
+/// a given reply answers; the tracker never guesses.
 final class StartTagTracker: @unchecked Sendable {
-    private struct Pending {
-        let tag: Int?
-        let at: ContinuousClock.Instant
-    }
-
     private let lock = NSLock()
-    private let ttl: Duration
-    private let now: @Sendable () -> ContinuousClock.Instant
-    private var pending: [Pending] = []
+    private var pending: [Int?] = []
+    private var unaccounted = 0
     private var byFlow: [String: Int] = [:]
     private var seen: Set<String> = []
 
-    init(ttl: Duration = .seconds(60), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
-        self.ttl = ttl
-        self.now = now
-    }
-
     func enqueue(_ tag: Int?) {
         lock.lock(); defer { lock.unlock() }
-        pending.append(Pending(tag: tag, at: now()))
+        pending.append(tag)
+    }
+
+    /// Whether a start whose tag was dropped may still reply on this socket.
+    var isPoisoned: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return unaccounted > 0
     }
 
     /// Call for every message of a flow; only the first one of a flow id pairs.
     func firstProgress(flowId: String) {
         lock.lock(); defer { lock.unlock() }
         pairLocked(flowId)
+    }
+
+    /// The tag `flowId` carries right now, without consuming it.
+    func peek(flowId: String) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return byFlow[flowId]
     }
 
     /// The tag of `flowId` (consumed), nil if it has none. A flow that completes before
@@ -59,25 +65,39 @@ final class StartTagTracker: @unchecked Sendable {
         return byFlow.removeValue(forKey: flowId)
     }
 
-    func discard(flowId: String) { _ = take(flowId: flowId) }
+    /// A flow ended in error; with no flow id it still answers one outstanding start.
+    func discard(flowId: String?) {
+        lock.lock(); defer { lock.unlock() }
+        if let flowId {
+            pairLocked(flowId)
+            seen.remove(flowId)
+            byFlow.removeValue(forKey: flowId)
+        } else {
+            answerLocked(assigning: nil)
+        }
+    }
 
     func reset() {
         lock.lock(); defer { lock.unlock() }
-        pending.removeAll(); byFlow.removeAll(); seen.removeAll()
+        pending.removeAll(); unaccounted = 0; byFlow.removeAll(); seen.removeAll()
     }
 
     // Call with `lock` held.
     private func pairLocked(_ flowId: String) {
         guard seen.insert(flowId).inserted else { return }
-        let cutoff = now()
-        pending.removeAll { cutoff - $0.at > ttl }
-        switch pending.count {
-        case 0:
-            return
-        case 1:
-            if let tag = pending.removeFirst().tag { byFlow[flowId] = tag }
-        default:
+        answerLocked(assigning: flowId)
+    }
+
+    /// One reply arrived (for `flowId`, or an error naming no flow).
+    private func answerLocked(assigning flowId: String?) {
+        let outstanding = unaccounted + pending.count
+        guard outstanding > 0 else { return }
+        if unaccounted == 0, pending.count == 1 {
+            let tag = pending.removeFirst()
+            if let flowId, let tag { byFlow[flowId] = tag }
+        } else {
             pending.removeAll()
+            unaccounted = outstanding - 1
         }
     }
 }

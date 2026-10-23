@@ -387,6 +387,62 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertTrue(wallet.startStillOwned(bEpoch))
     }
 
+    // MARK: - OAuth resume carries the originating issuance's epoch
+
+    private func pendingAuthorization(startEpoch: Int?) -> PendingAuthorization {
+        PendingAuthorization(
+            offer: "{}", credentialOfferUri: nil, redirectUri: "https://wallet/cb",
+            codeVerifier: "v", state: "s", startEpoch: startEpoch
+        )
+    }
+
+    func testAResumeSendsWithTheOriginatingEpochNotAFreshSample() async throws {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        var sent: [Int] = []
+        wallet.authorizationResumeConnectHook = { _ in }
+        wallet.authorizationResumeSendHook = { sent.append($0) }
+        try await wallet.resumeAuthorization(
+            engine: WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t"),
+            pending: pendingAuthorization(startEpoch: aEpoch), code: "c", startEpoch: aEpoch, tokens: nil
+        )
+        XCTAssertEqual(sent, [aEpoch])
+    }
+
+    func testAnAuthorizationCancelledMidAwaitIsNotResumedEvenAfterANewerStart() async throws {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        var sent: [Int] = []
+        // A is cancelled while the token / connection awaits are still running, and B starts.
+        wallet.authorizationResumeConnectHook = { _ in
+            wallet.cancelCurrentFlow()
+            wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.lock.unlock()
+        }
+        wallet.authorizationResumeSendHook = { sent.append($0) }
+        try await wallet.resumeAuthorization(
+            engine: WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t"),
+            pending: pendingAuthorization(startEpoch: aEpoch), code: "c", startEpoch: aEpoch, tokens: nil
+        )
+        XCTAssertTrue(sent.isEmpty, "A's resume must not be sent, and must not be re-tagged with B's epoch")
+        // And if it had gone out, A's completion (A's tag) is refused: B owns the wallet.
+        await wallet.handleFlowComplete(msg: flowComplete(flowId: "A", credentials: [sdJwtCredential], engineTrusted: true, startTag: aEpoch))
+        let stored = await h.store.getAll()
+        XCTAssertTrue(stored.isEmpty)
+        XCTAssertTrue(wallet.issuanceInFlight, "B's guard is untouched")
+    }
+
+    func testAnAuthorizationThatCannotBeTiedToItsIssuanceIsRefused() {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.engineSession = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        wallet.pendingAuthorizations["A"] = pendingAuthorization(startEpoch: nil)
+        wallet.completeAuthorization(flowId: "A", code: "c", state: "s")
+        XCTAssertEqual(h.listener.errors.count, 1)
+        XCTAssertNil(wallet.pendingAuthorizations["A"])
+    }
+
     // MARK: - The signed docType
 
     private func msoPayload(docType: String?, tagged: Bool = true) -> [UInt8] {
