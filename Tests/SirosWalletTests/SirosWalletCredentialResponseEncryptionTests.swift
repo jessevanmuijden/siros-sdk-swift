@@ -458,6 +458,8 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             for _ in 0..<200 where w.sessionHasEnded { try await Task.sleep(nanoseconds: 10_000_000) }
             XCTAssertFalse(w.sessionHasEnded, "\(transport): the new connection clears the ended state")
             if transport == "engine" {
+                // The flag is cleared at the start of the connect; the session object is installed a moment later.
+                for _ in 0..<300 where w.engineSession == nil { try await Task.sleep(nanoseconds: 10_000_000) }
                 let engine = try XCTUnwrap(w.engineSession)
                 var message = try keyOnlyProofMessage(flowId: "ok-\(transport)")
                 message.socketGeneration = engine.socketGeneration       // as the session stamps it on receipt
