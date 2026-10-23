@@ -83,7 +83,11 @@ public enum PresentationConsentBuilder {
                 }
             }
         }
-        let revealed = revealedClaimPaths(entries)
+        // A claim is also revealed when the age bounds on it meet at one day (`ge` == `le`, in one predicate, split across
+        // two, or across two queries): the proof then identifies the exact birth date, so "not shared" would be untrue.
+        // The model has no stable credential identity, so the bounds are combined over the WHOLE request, which only ever
+        // errs towards stating every comparison.
+        let revealed = revealedClaimPaths(entries).union(exactBirthDateClaims(entries.flatMap(\.items)))
         entries = entries.map { PresentationConsentEntry(credential: $0.credential, items: withoutAgeWordingWhereRevealed($0.items, revealed: revealed)) }
         let verifier = PresentationConsentVerifier(
             label: label(trust: trust, clientName: verifiedClientIdDisplayName, origin: attestedOrigin),
@@ -145,6 +149,20 @@ public enum PresentationConsentBuilder {
                 functionId: predicate.functionId, claim: predicate.claim, valueType: predicate.valueType,
                 conditions: predicate.conditions, ageForm: nil))
         }
+    }
+
+    /// The claims whose age bounds leave a single day: the greatest `ge` is not below the least `le`.
+    private static func exactBirthDateClaims(_ items: [PresentationConsentItem]) -> Set<ClaimPathKey> {
+        var lower: [ClaimPathKey: Int] = [:], upper: [ClaimPathKey: Int] = [:]
+        for case .predicate(let predicate) in items where predicate.ageForm != nil {
+            let key = ClaimPathKey(predicate.claim.path)
+            for condition in predicate.conditions {
+                guard let text = condition.values.first, let day = CivilDate(text)?.daysSinceEpoch else { continue }
+                if condition.op == .ge { lower[key] = max(lower[key] ?? day, day) }
+                if condition.op == .le { upper[key] = min(upper[key] ?? day, day) }
+            }
+        }
+        return Set(lower.compactMap { key, low in upper[key].map { $0 <= low } == true ? key : nil })
     }
 
     /// The claim paths the whole request reveals other than through an age statement: a disclosure of the claim
