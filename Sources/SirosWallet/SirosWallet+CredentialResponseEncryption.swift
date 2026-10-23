@@ -3,6 +3,11 @@
 import Foundation
 import SirosCredentials
 import SirosTransport
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 /// Why the wallet could not take a Credential Response. Carries no plaintext, no key material and no
 /// credential: an engine that relays the reason (WMP) or a log must learn nothing from it.
@@ -187,14 +192,20 @@ extension SirosWallet {
         // Only a response that carries credentials is kept (a deferred poll's answer has nothing to pair, and its
         // metadata tree, up to 1 MiB, must not pile up per poll), and never more than the engine's 256 credentials
         // for the flow.
-        let heldCount = decryptedCredentialResponses[flowId, default: []].reduce(0) { $0 + $1.credentials.count }
-        guard heldCount + response.credentials.count <= 256 else {
+        // The same JWE delivered again (the engine retrying a child whose answer was lost or cancelled) is idempotent:
+        // it is recognised by its digest and not retained a second time, so the parent's count still pairs.
+        var retained = response
+        retained.sourceDigest = SHA256.hash(data: Data(jwe.utf8)).map { String(format: "%02x", $0) }.joined()
+        let held = decryptedCredentialResponses[flowId, default: []]
+        let duplicate = held.contains { $0.sourceDigest == retained.sourceDigest }
+        let heldCount = held.reduce(0) { $0 + $1.credentials.count }
+        guard duplicate || heldCount + response.credentials.count <= 256 else {
             lock.unlock()
             // Read and rejected: the issuer is owed a credential_failure, ahead of the error answer.
             await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
             throw CredentialResponseError.malformedResponse
         }
-        if !response.credentials.isEmpty { decryptedCredentialResponses[flowId, default: []].append(response) }
+        if !response.credentials.isEmpty, !duplicate { decryptedCredentialResponses[flowId, default: []].append(retained) }
         lock.unlock()
         if let transactionId = response.transactionId {
             return CredentialResponseControl(transactionId: transactionId, interval: response.interval)
@@ -237,13 +248,19 @@ extension SirosWallet {
     /// cleanup must not take the incremented end counter as a live generation), and, on the WebSocket, when it was
     /// received on a socket the engine session has since replaced.
     @discardableResult
-    func requireLiveSession(flowId: String, engine: (any SignResponseSender)? = nil, socketGeneration: Int? = nil) throws -> [Int] {
+    func requireLiveSession(
+        flowId: String, engine: (any SignResponseSender)? = nil, socketGeneration: Int? = nil, requestEpoch: Int? = nil
+    ) throws -> [Int] {
         lock.lock(); defer { lock.unlock() }
         if blindSessionEnded { throw CredentialResponseError.sessionEnded }
         if let engine, let current = engineSession, (engine as AnyObject) !== (current as AnyObject) {
             throw CredentialResponseError.sessionEnded
         }
         if let socketGeneration, let current = engineSession, current.socketGeneration != socketGeneration {
+            throw CredentialResponseError.staleSocket
+        }
+        // Received before the issuance was cancelled (possibly before any flow was named): refused.
+        if let requestEpoch, let current = engineSession, current.requestEpoch != requestEpoch {
             throw CredentialResponseError.staleSocket
         }
         if (flowEndSeq[flowId] ?? 0) > 0 { throw CredentialResponseError.flowEnded }
@@ -303,7 +320,7 @@ extension SirosWallet {
     /// nothing else; a failure answers with an error that carries no plaintext and drops the flow's state.
     func answerDecryptCredentialResponse(engine: any SignResponseSender, msg: SignRequestMessage) async {
         let liveGeneration: [Int]
-        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration) } catch {
+        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration, requestEpoch: msg.requestEpoch) } catch {
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)
             } else if error as? CredentialResponseError == .flowEnded {
@@ -425,7 +442,7 @@ extension SirosWallet {
     /// and, when the engine asked for response encryption, a fresh key's public JWK.
     func answerGenerateProof(engine: any SignResponseSender, msg: SignRequestMessage) async throws {
         let liveGeneration: [Int]
-        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration) } catch {
+        do { liveGeneration = try requireLiveSession(flowId: msg.flowId, engine: engine, socketGeneration: msg.socketGeneration, requestEpoch: msg.requestEpoch) } catch {
             // A request from a superseded socket is dropped; one for an ended session is refused. Neither allocates.
             if sessionHasEnded {
                 engine.sendSignResponse(flowId: msg.flowId, error: "session ended", errorCode: CredentialResponseError.sessionEnded.wmpErrorCode, messageId: msg.messageId)

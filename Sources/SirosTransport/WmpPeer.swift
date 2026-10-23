@@ -171,6 +171,15 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         }
     }
 
+    /// Cancels every flow this peer is running for the wallet (its parent flows; their sign/match children stop with
+    /// them), from a synchronous caller: see ``cancelFlowNow(flowId:reason:)``.
+    public func cancelAllFlowsNow(reason: String? = nil) {
+        flowTypeLock.lock()
+        let parents = flowTypeMap.filter { $0.value != WmpSubFlowTypes.sign && $0.value != WmpSubFlowTypes.match }.keys
+        flowTypeLock.unlock()
+        for flowId in parents { cancelFlowNow(flowId: flowId, reason: reason) }
+    }
+
     // MARK: - Dispatch Loop
 
     /// Stops the profiles' in-flight work (child flows running application handlers) and keeps them from

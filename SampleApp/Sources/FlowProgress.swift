@@ -9,6 +9,15 @@ import SirosFlow
 /// app-specific localized label mapping.
 
 private let stepLabelKeys: [String: String] = [
+    // The wallet's own steps before the engine's first progress event
+    // (`WalletState.FlowActive.step*`). Entitlement and preparation reuse
+    // the "fetching issuer information" wording, as the Kotlin sample app does.
+    "initializing": "flow.steps.initializing",
+    "connecting_engine": "flow.steps.initializing",
+    "establishing_session": "flow.steps.initializing",
+    "checking_entitlement": "flow.steps.fetchingMetadata",
+    "preparing_issuance": "flow.steps.fetchingMetadata",
+    "starting_flow": "flow.steps.parsingOffer",
     "parsing_offer": "flow.steps.parsingOffer",
     "offer_parsed": "flow.steps.offerParsed",
     "fetching_metadata": "flow.steps.fetchingMetadata",

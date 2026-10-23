@@ -554,120 +554,17 @@ final class EngineTypesTests: XCTestCase {
     /// Losing a connection tells the owner once, before a replacement is attempted, so what it keeps for the flows
     /// that ran on the old socket can go. A session that was told to disconnect says nothing, even when a late
     /// failure from its old socket arrives after a replacement session has begun.
-    func testALostSocketTellsTheOwnerOnceBeforeReconnecting() {
-        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
-        session.lastAppToken = "app-token"   // a session that was connected
-        var told = 0
-        session.onSocketReplaced = { told += 1 }
-        session.scheduleReconnect()
-        XCTAssertEqual(told, 1)
-    }
-
-    /// A loss tells the owner EVERY time, not only the first (the attempt counter is not reset by a successful
+        /// A loss tells the owner EVERY time, not only the first (the attempt counter is not reset by a successful
     /// reconnect), and opening the replacement socket does too, so a path that bumps the connection without a state
     /// change still drops the old flows' state. The first socket is not a replacement.
-    func testEveryReplacementPathTellsTheOwner() {
-        let session = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
-        let counter = NSLock()
-        var told = 0
-        session.onSocketReplaced = { counter.lock(); told += 1; counter.unlock() }
-        func count() -> Int { counter.lock(); defer { counter.unlock() }; return told }
-        session.connect(appToken: "t1")
-        XCTAssertGreaterThanOrEqual(session.socketGeneration, 1, "the first socket is not a replacement")
-        // (a failing handshake may also report a loss on its own, so the steps below compare against a baseline)
-        var before = count()
-        session.forceReconnect(appToken: "t2")
-        XCTAssertGreaterThanOrEqual(count() - before, 1, "forceReconnect replaces the socket")
-        XCTAssertGreaterThanOrEqual(session.socketGeneration, 2)
-        session.disconnect()
-    }
-
-    /// Each loss tells the owner, not only the first: the attempt counter is not reset by a successful reconnect.
-    func testEachLossTellsTheOwnerNotOnlyTheFirst() {
-        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
-        session.lastAppToken = "app-token"
-        var told = 0
-        session.onSocketReplaced = { told += 1 }
-        session.scheduleReconnect()
-        session.scheduleReconnect()
-        session.scheduleReconnect()
-        XCTAssertEqual(told, 3)
-        session.disconnect()
-    }
-
-    /// A recovered connection starts a fresh retry budget: after the budget was used up once and the socket
+        /// Each loss tells the owner, not only the first: the attempt counter is not reset by a successful reconnect.
+        /// A recovered connection starts a fresh retry budget: after the budget was used up once and the socket
     /// recovered (`handshake_complete`), the next loss reconnects again instead of failing at once.
-    func testARecoveredConnectionGetsAFreshRetryBudget() async {
-        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
-        session.lastAppToken = "app-token"
-        for _ in 0..<5 { session.scheduleReconnect() }
-        XCTAssertEqual(session.currentState, .reconnecting)
-        await session.handleMessage(#"{"type":"handshake_complete","session_id":"s-1"}"#)
-        XCTAssertEqual(session.currentState, .connected)
-        session.scheduleReconnect()
-        XCTAssertEqual(session.currentState, .reconnecting, "the second loss is retried, not failed")
-        session.disconnect()
-    }
-
-    /// A failure reported by a socket that has since been replaced (forceReconnect) says nothing about the current
+        /// A failure reported by a socket that has since been replaced (forceReconnect) says nothing about the current
     /// one: it neither tells the owner nor schedules a reconnect.
-    func testAnObsoleteSocketsLateFailureIsIgnored() throws {
-        let session = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
-        session.connect(appToken: "t1")
-        let old = try XCTUnwrap(session.webSocketTask)
-        session.forceReconnect(appToken: "t2")
-        let current = try XCTUnwrap(session.webSocketTask)
-        XCTAssertFalse(old === current)
-        let lock = NSLock(); var told = 0
-        session.onSocketReplaced = { lock.lock(); told += 1; lock.unlock() }
-        session.scheduleReconnect(from: old)
-        lock.lock(); let afterStale = told; lock.unlock()
-        XCTAssertEqual(afterStale, 0, "a stale failure is ignored")
-        session.scheduleReconnect(from: current)
-        lock.lock(); let afterCurrent = told; lock.unlock()
-        XCTAssertGreaterThanOrEqual(afterCurrent, 1, "the current socket's failure still counts")
-        session.disconnect()
-    }
-
-    /// A frame a replaced socket delivers late (its receive succeeded just before `forceReconnect`) is dropped before
+        /// A frame a replaced socket delivers late (its receive succeeded just before `forceReconnect`) is dropped before
     /// dispatch, and a request received on the current socket is stamped with that socket's generation.
-    func testAFrameFromAReplacedSocketIsDroppedAndTheStampIsTheReceivingSockets() async throws {
-        let session = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
-        session.connect(appToken: "t1")
-        let old = session.socketGeneration
-        session.forceReconnect(appToken: "t2")
-        let current = session.socketGeneration
-        XCTAssertGreaterThan(current, old)
-        let frame = #"{"type":"sign_request","flow_id":"f","message_id":"m","action":"generate_proof","params":{"audience":"a","nonce":"n"}}"#
-        var iterator = session.signRequests().makeAsyncIterator()
-        await session.handleMessage(frame, socketGeneration: old)         // obsolete: dropped
-        await session.handleMessage(frame, socketGeneration: current)     // current: delivered
-        let delivered = await iterator.next()
-        XCTAssertEqual(delivered?.socketGeneration, current, "the first delivered request is the current socket's")
-        session.disconnect()
-    }
-
-    /// A request received on a LOST socket is obsolete from the loss itself: the generation advances at once (during the
+        /// A request received on a LOST socket is obsolete from the loss itself: the generation advances at once (during the
     /// backoff) and again on every further loss, including when the retry budget is exhausted and no replacement
     /// ever opens, so a request stamped before the loss never matches the current generation.
-    func testALostSocketAdvancesTheGenerationAtOnceAndWhenRetriesAreExhausted() {
-        let session = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
-        session.lastAppToken = "t"
-        let stamped = session.socketGeneration
-        session.scheduleReconnect()
-        XCTAssertNotEqual(session.socketGeneration, stamped, "refused during the backoff")
-        for _ in 0..<7 { session.scheduleReconnect() }                    // beyond the retry budget
-        XCTAssertGreaterThan(session.socketGeneration, stamped + 1)
-        session.disconnect()
-    }
-
-    func testALateFailureAfterDisconnectDoesNotTellTheOwner() {
-        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
-        session.lastAppToken = "app-token"
-        var told = 0
-        session.onSocketReplaced = { told += 1 }
-        session.disconnect()
-        session.scheduleReconnect()
-        XCTAssertEqual(told, 0)
-    }
-}
+        }

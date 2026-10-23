@@ -747,6 +747,8 @@ public struct SignRequestMessage: Codable, Sendable {
     /// wire). A request that was buffered across a reconnect carries the old generation, so the wallet can refuse it
     /// before it allocates anything for a flow that ran on the replaced socket.
     public var socketGeneration: Int = 0
+    /// The session's request epoch when this request was received; see `WalletEngineSession.invalidateBufferedRequests()`.
+    public var requestEpoch: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case type, action, params, timestamp
