@@ -144,6 +144,9 @@ public enum LogoSanitizer {
         guard allowedMediaTypes.contains(sniffed) else { return .failure(.unsupportedMediaType) }
         if let declaredMediaType, declaredMediaType != sniffed { return .failure(.undecodable) }
         guard CGImageSourceGetCount(source) >= 1 else { return .failure(.undecodable) }
+        // ImageIO happily returns a half-filled image for a truncated file
+        // (its status stays "complete"), so completeness is checked here.
+        guard hasEndMarker(bytes, mediaType: sniffed) else { return .failure(.undecodable) }
 
         // Dimensions come from the header, before any pixel buffer exists.
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -178,6 +181,30 @@ public enum LogoSanitizer {
         #else
         return .failure(.platformUnsupported)
         #endif
+    }
+
+    /// Truncation check. This is an integrity check for the user's benefit (a
+    /// half-drawn logo), not a security boundary: the output is rebuilt from
+    /// pixels either way. Looks for the format's end marker anywhere, so a
+    /// complete image followed by trailing junk still passes (and is then
+    /// cleaned). GIF has no reliable marker to search for and is not checked.
+    static func hasEndMarker(_ d: Data, mediaType: String) -> Bool {
+        switch mediaType {
+        case "image/png":
+            // IEND chunk: length 0, "IEND", fixed CRC.
+            let iend = Data([0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82])
+            return d.range(of: iend) != nil
+        case "image/jpeg":
+            return d.range(of: Data([0xFF, 0xD9])) != nil
+        case "image/webp":
+            // RIFF header: bytes 4..<8 are the little-endian size of what follows.
+            guard d.count >= 12 else { return false }
+            let b = Array(d.prefix(8))
+            let size = Int(b[4]) | Int(b[5]) << 8 | Int(b[6]) << 16 | Int(b[7]) << 24
+            return size + 8 <= d.count
+        default:
+            return true
+        }
     }
 
     #if canImport(ImageIO)

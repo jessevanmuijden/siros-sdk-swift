@@ -101,14 +101,16 @@ final class LogoSanitizerTests: XCTestCase {
 final class LogoSanitizerImageTests: XCTestCase {
     private static let marker = "EVIL_PAYLOAD_MARKER_7f3a"
 
+    /// Noise, so that a truncated file really loses pixel data.
     private func makeImage(width: Int, height: Int) -> CGImage {
         let ctx = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpace(name: CGColorSpace.sRGB)!,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )!
-        ctx.setFillColor(CGColor(red: 0.1, green: 0.5, blue: 0.9, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let px = ctx.data!.bindMemory(to: UInt8.self, capacity: height * ctx.bytesPerRow)
+        var g = SystemRandomNumberGenerator()
+        for i in 0..<(height * ctx.bytesPerRow) { px[i] = UInt8.random(in: 0...255, using: &g) }
         return ctx.makeImage()!
     }
 
