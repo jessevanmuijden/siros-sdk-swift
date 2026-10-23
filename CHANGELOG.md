@@ -37,6 +37,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
   answer, declined on timeout (default 120 s), dismissal, supersede and cancellation, and with no UI set. A
   request the wording does not cover is declined without being shown.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
+- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
+  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
+  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
+  with the four rulebook configs and the API-misuse errors, tested against the
+  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
+  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
+  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
+  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
+  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
+  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
+  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
+  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
+  over-65535-byte fields refused). Platform-neutral (swift-crypto
+  on Linux), no secret is logged or returned by a public API.
 - **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
   and a registry-driven builder.** The locale-free request a user approves before
   anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
