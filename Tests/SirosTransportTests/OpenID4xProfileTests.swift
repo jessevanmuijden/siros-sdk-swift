@@ -508,23 +508,60 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertTrue(ctx.sent.contains("c1"))
     }
 
-    /// A retry timer scheduled before a resume is stale after it: the resume reset the budgets and replayed the queue,
-    /// so the old timer must not send the answer again.
+    /// A retry timer scheduled before a resume is stale after it: the resume reset the budgets and replayed the queue, so
+    /// the old timer must not send the answer again. No tight timing: both timers are due ~200 ms after being set, the
+    /// test waits for the one live retry and then for the stale one's due time to have long passed, and only an UPPER
+    /// bound on the number of sends is asserted.
     func testARetryTimerScheduledBeforeAResumeDoesNothingAfterIt() async throws {
-        // original fails (timer T1 at 150 ms); a resume at ~30 ms replays and fails (timer T2 at ~180 ms); T1 firing at
-        // 150 ms must find the generation changed and send nothing.
-        let ctx = ScriptedPeerContext([.fail, .fail, .fail, .fail, .fail])
-        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [150]))
+        let ctx = ScriptedPeerContext([.fail, .fail, .fail, .fail, .fail, .fail])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [200]))
         profile.initialize(ctx: ctx)
         _ = try await profile.startFlow(params: signStart())
-        try await Task.sleep(nanoseconds: 30_000_000)
-        profile.sessionResumed()
-        try await Task.sleep(nanoseconds: 100_000_000)                      // T1 not yet due
-        XCTAssertEqual(ctx.attempts, 2, "original + the resume's replay so far")
-        try await Task.sleep(nanoseconds: 40_000_000)                       // ~170 ms: T1 (150 ms) fired and was stale
-        XCTAssertEqual(ctx.attempts, 2, "the pre-resume timer sent nothing")
-        try await Task.sleep(nanoseconds: 120_000_000)                      // ~290 ms: T2 (the post-resume timer, ~180 ms) fired
-        XCTAssertEqual(ctx.attempts, 3, "exactly one timed retry after the reset")
+        for _ in 0..<500 where ctx.attempts < 1 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(ctx.attempts, 1, "the original send failed; timer T1 is pending")
+        profile.sessionResumed()                                            // replay -> attempt 2 fails -> timer T2
+        for _ in 0..<500 where ctx.attempts < 3 { try await Task.sleep(nanoseconds: 10_000_000) }   // T2 (the live one) retries
+        XCTAssertGreaterThanOrEqual(ctx.attempts, 3)
+        try await Task.sleep(nanoseconds: 800_000_000)                      // long past T1's due time
+        XCTAssertEqual(ctx.attempts, 3, "original, the resume's replay and ONE timed retry: the stale timer sent nothing")
+    }
+
+    /// A catch-up after a resume drains only ITS OWN child. Child A's send stays suspended across a resume while B fails
+    /// and is replayed; when A then fails, A's catch-up must not send B again (that would bypass B's retry limit).
+    func testACatchUpAfterAResumeResendsOnlyItsOwnChild() async throws {
+        // (a) A's ORIGINAL send is the suspended one.
+        let a = ScriptedPeerContext([.blockThenFail, .fail, .fail, .fail, .fail])
+        let profileA = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: []))
+        profileA.initialize(ctx: a)
+        let startA = Task { _ = try await profileA.startFlow(params: self.signStart("c1", parent: "p1")) }
+        for _ in 0..<300 where !a.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+        _ = try await profileA.startFlow(params: signStart("c2", parent: "p2"))                    // B's original fails: queued
+        for _ in 0..<300 where a.attempts < 2 { try await Task.sleep(nanoseconds: 10_000_000) }
+        profileA.sessionResumed()                                                                   // replays B (fails), bumps the generation
+        for _ in 0..<300 where a.attempts < 3 { try await Task.sleep(nanoseconds: 10_000_000) }
+        a.releaseBlocked()                                                                          // A's original now fails: its catch-up
+        for _ in 0..<300 where a.attempts < 4 { try await Task.sleep(nanoseconds: 10_000_000) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        _ = await startA.result
+        XCTAssertEqual(a.attemptedIds.filter { $0 == "c2" }.count, 2, "B: its original and its replay only; \(a.attemptedIds)")
+        XCTAssertEqual(a.attemptedIds.filter { $0 == "c1" }.count, 2, "A: its original and its own catch-up; \(a.attemptedIds)")
+        // (b) A's REPLAY is the suspended one.
+        let b = ScriptedPeerContext([.fail, .blockThenFail, .fail, .fail, .fail, .fail])
+        let profileB = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: []))
+        profileB.initialize(ctx: b)
+        _ = try await profileB.startFlow(params: signStart("c1", parent: "p1"))                    // A's original fails: queued
+        for _ in 0..<300 where b.attempts < 1 { try await Task.sleep(nanoseconds: 10_000_000) }
+        profileB.sessionResumed()                                                                   // A's replay is suspended
+        for _ in 0..<300 where !b.blockedNow { try await Task.sleep(nanoseconds: 10_000_000) }
+        _ = try await profileB.startFlow(params: signStart("c2", parent: "p2"))                    // B's original fails: queued
+        for _ in 0..<300 where b.attempts < 3 { try await Task.sleep(nanoseconds: 10_000_000) }
+        profileB.sessionResumed()                                                                   // replays B (fails)
+        for _ in 0..<300 where b.attempts < 4 { try await Task.sleep(nanoseconds: 10_000_000) }
+        b.releaseBlocked()                                                                          // A's replay fails: its catch-up
+        for _ in 0..<300 where b.attempts < 5 { try await Task.sleep(nanoseconds: 10_000_000) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(b.attemptedIds.filter { $0 == "c2" }.count, 2, "B: its original and its replay only; \(b.attemptedIds)")
+        XCTAssertEqual(b.attemptedIds.filter { $0 == "c1" }.count, 3, "A: original, replay and its own catch-up; \(b.attemptedIds)")
     }
 
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
@@ -1167,12 +1204,15 @@ private final class ScriptedPeerContext: WmpPeerContext, @unchecked Sendable {
     var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
     private var _attempts = 0
     var attempts: Int { lock.lock(); defer { lock.unlock() }; return _attempts }
+    private var _attemptedIds: [String] = []
+    /// The child flow each `notify` call carried, in call order.
+    var attemptedIds: [String] { lock.lock(); defer { lock.unlock() }; return _attemptedIds }
     func releaseBlocked() { lock.lock(); released = true; let c = blocked; blocked = nil; lock.unlock(); c?.resume() }
     private var _routes: [String] = []
     var releasedRoutes: [String] { lock.lock(); defer { lock.unlock() }; return _routes }
     func releaseFlow(flowId: String) { lock.lock(); _routes.append(flowId); lock.unlock() }
     func notify(method: String, params: [String: AnyCodable]?) async throws {
-        lock.lock(); _attempts += 1; let step = script.isEmpty ? Step.succeed : script.removeFirst(); lock.unlock()
+        lock.lock(); _attempts += 1; _attemptedIds.append(params?["flow_id"]?.stringValue ?? "?"); let step = script.isEmpty ? Step.succeed : script.removeFirst(); lock.unlock()
         switch step {
         case .fail: throw WmpSessionError.connectionFailed
         case .blockThenFail:

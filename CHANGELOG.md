@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WMP: a retry timer scheduled before a resume does nothing after it, and the event stream ends when a close fails.** A
   timed retry carries the resume generation it was scheduled in and is validated under the lock that claims the answer,
   so a resume (which resets the budgets and replays the queue) cannot be followed by stale retries. `WmpPeer.close`
-  finishes `flowEvents()` whether or not the close notification got through.
+  finishes `flowEvents()` whether or not the close notification got through. A catch-up after a resume drains only its own
+  child, so an answer that exhausted its retries is not resent by another child's catch-up.
 
 ### Changed
 - **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
