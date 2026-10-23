@@ -604,7 +604,12 @@ public enum CredentialUtils {
             backgroundColor: display?.backgroundColor ?? offer.backgroundColor,
             textColor: display?.textColor ?? offer.textColor,
             logo: display?.logo.map { LogoInfo(uri: $0.uri, altText: $0.altText) }
-                ?? offer.logoUri.map { LogoInfo(uri: $0) },
+                ?? offer.logoUri.map { LogoInfo(uri: $0) }
+                // The issuer's own logo, last. A card draws this beside the
+                // issuer's name, so the issuer's mark is the right fallback
+                // when the type publishes none - and a type from someone
+                // else's catalog usually publishes none.
+                ?? offer.issuerLogoUri.map { LogoInfo(uri: $0) },
             claims: claims,
             svgTemplates: svgTemplates
         )
@@ -713,10 +718,51 @@ public enum CredentialUtils {
             backgroundColor: simple?.backgroundColor ?? offer.backgroundColor,
             textColor: simple?.textColor ?? offer.textColor,
             logo: simple?.logo.map { LogoInfo(uri: $0.uri, altText: $0.altText) }
-                ?? offer.logoUri.map { LogoInfo(uri: $0) },
+                ?? offer.logoUri.map { LogoInfo(uri: $0) }
+                // Then the issuer's own, as in `buildMdocMetadata`.
+                ?? offer.issuerLogoUri.map { LogoInfo(uri: $0) },
             claims: claims,
             svgTemplates: svgTemplates
         )
+    }
+
+    /// Metadata for a credential that has none yet, built from what the
+    /// credential itself carries: its configuration id (for a name), its issuer
+    /// (for the issuer's name and host) and the type it declares (`vct` for an
+    /// SD-JWT VC, `docType` for an mdoc).
+    ///
+    /// `metadata` is a rendering artefact, absent until an issuance flow has an
+    /// offer to build it from; a card that needs to draw something reads this
+    /// instead of leaving every slot to fall back on its own. Nothing here is
+    /// presentation (no colours, no logo): that is the issuer's to declare.
+    /// Mirrors Kotlin's `CredentialUtils.buildFallbackMetadata`
+    /// (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/211).
+    public static func buildFallbackMetadata(_ credential: StoredCredential) -> CredentialMetadata {
+        func nonBlank(_ s: String?) -> String? {
+            guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            return s
+        }
+        let configId = nonBlank(credential.credentialConfigurationId)
+        let issuerIdentifier = nonBlank(credential.credentialIssuerIdentifier)
+        let isMdoc = credential.format == "mso_mdoc"
+        let doctype = isMdoc ? parseMdocDocument(credential.raw)?.docType : nil
+        let vct = isMdoc ? nil : parseJwtPayload(credential.raw)?["vct"] as? String
+        // The segment after the last dot, as Kotlin's `substringAfterLast('.')`.
+        let name = configId.map { formatClaimKey(String($0.split(separator: ".", omittingEmptySubsequences: false).last ?? "")) }
+        return CredentialMetadata(
+            name: name ?? credential.format,
+            issuer: IssuerInfo(
+                name: issuerIdentifier.map { hostOf($0) },
+                url: issuerIdentifier
+            ),
+            vct: vct,
+            doctype: doctype
+        )
+    }
+
+    /// The host of `url`, or the whole string if it doesn't parse as one.
+    private static func hostOf(_ url: String) -> String {
+        URL(string: url)?.host ?? url
     }
 
     /// Format a snake_case or kebab-case key as a human-readable label.
