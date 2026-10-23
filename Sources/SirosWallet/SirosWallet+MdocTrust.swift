@@ -61,7 +61,7 @@ extension SirosWallet {
             evaluationRequest["context"] = extraContext
         }
 
-        let response = try await client.evaluateTrust(evaluationRequest)
+        let response = try await evaluateTrustCached(client, evaluationRequest)
         let decision = response["decision"] as? Bool ?? false
         let respContext = response["context"] as? [String: Any]
 
