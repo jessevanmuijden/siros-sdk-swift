@@ -139,7 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while preparing unwinds instead of sending, the session carries the tag to
   `FlowCompleteMessage.startTag`, and a tag is tied to a flow id only when exactly
   one start is unanswered (the engine runs each `flow_start` in its own goroutine,
-  so with two unanswered the order of replies is unknown: no tag, both refused; the starts that may still reply stay counted, so a late reply can never take a newer start's tag, and nothing expires on a timer). An OAuth resume carries the originating issuance's epoch (`PendingAuthorization.startEpoch`), never a fresh sample, and is not sent if that issuance was cancelled meanwhile.
+  so with two unanswered the order of replies is unknown: no tag, both refused; the starts that may still reply stay counted, so a late reply can never take a newer start's tag, and nothing expires on a timer). An OAuth resume carries the originating issuance's epoch (`PendingAuthorization.startEpoch`), never a fresh sample, and is not sent if that issuance was cancelled meanwhile. A finished flow's id stays known to the tag tracker until the socket is replaced, and an error naming no flow answers no start, so a late or anonymous error cannot consume another start's slot.
   A completion that would store credentials, carries a negative report or carries
   issuance metadata (refresh token, issuer, configuration) but has no start tag is
   refused. For mdoc the docType

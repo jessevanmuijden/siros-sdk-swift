@@ -61,20 +61,21 @@ final class StartTagTracker: @unchecked Sendable {
     func take(flowId: String) -> Int? {
         lock.lock(); defer { lock.unlock() }
         pairLocked(flowId)
-        seen.remove(flowId)
+        // Stays in `seen` until `reset()`: a later message for a finished flow (an
+        // `unknown_flow` error, a duplicate) is not a new reply and must not consume
+        // another start's slot.
         return byFlow.removeValue(forKey: flowId)
     }
 
-    /// A flow ended in error; with no flow id it still answers one outstanding start.
+    /// A flow ended in error. An error naming a flow is that flow's reply (its first
+    /// message if none was seen). An error naming NO flow cannot be tied to a start
+    /// (the engine also emits one when its sign-response channel is full), so it
+    /// answers nothing: the outstanding starts stay counted.
     func discard(flowId: String?) {
         lock.lock(); defer { lock.unlock() }
-        if let flowId {
-            pairLocked(flowId)
-            seen.remove(flowId)
-            byFlow.removeValue(forKey: flowId)
-        } else {
-            answerLocked(assigning: nil)
-        }
+        guard let flowId else { return }
+        pairLocked(flowId)
+        byFlow.removeValue(forKey: flowId)
     }
 
     func reset() {

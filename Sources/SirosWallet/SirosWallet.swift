@@ -589,8 +589,9 @@ public final class SirosWallet: @unchecked Sendable {
     /// can drive the gate without CryptoKit or a backend. Nil in production.
     var mdocIssuanceTrustHook: ((CredentialResult) async -> TrustResult?)?
 
-    /// Test seams for `resumeAuthorization`: replace the token/reconnect step and the
+    /// Test seams for `resumeAuthorization`: replace the token step, the reconnect step and the
     /// final `resumeIssuance` send. Nil in production.
+    var authorizationResumeTokenHook: (() async throws -> String)?
     var authorizationResumeConnectHook: ((WalletEngineSession) async throws -> Void)?
     var authorizationResumeSendHook: ((Int) -> Void)?
 

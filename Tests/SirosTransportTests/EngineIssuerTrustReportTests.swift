@@ -152,14 +152,26 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         XCTAssertFalse(t.isPoisoned)
     }
 
-    func testAReplyThatNamesNoFlowStillAnswersOneOutstandingStart() {
+    func testAnAnonymousErrorCannotBeTiedToAStartSoItAnswersNone() {
         let t = StartTagTracker()
         t.enqueue(0)
-        t.discard(flowId: nil) // the engine refused the start with an error naming no flow
+        t.discard(flowId: nil) // also emitted by the engine when its sign channel is full
         XCTAssertFalse(t.isPoisoned)
         t.enqueue(1)
         t.firstProgress(flowId: "X")
-        XCTAssertEqual(t.take(flowId: "X"), 1)
+        XCTAssertNil(t.take(flowId: "X"), "start 0 is still outstanding: X cannot be told from it, never guessed")
+    }
+
+    func testALateErrorForAFinishedFlowDoesNotConsumeAnotherStartsSlot() {
+        let t = StartTagTracker()
+        t.enqueue(0)
+        t.firstProgress(flowId: "A")
+        XCTAssertEqual(t.take(flowId: "A"), 0)      // A completed
+        t.enqueue(1)                                // B started
+        t.discard(flowId: "A")                      // a late unknown_flow error for A
+        t.enqueue(2)                                // C started before B replied
+        t.firstProgress(flowId: "B")
+        XCTAssertNil(t.take(flowId: "B"), "B must not take C's tag because A's late error ate its slot")
     }
 
     func testRetiringTheSocketClearsPoison() {

@@ -401,6 +401,7 @@ final class IssuanceTrustGateTests: XCTestCase {
         let wallet = h.wallet
         wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
         var sent: [Int] = []
+        wallet.authorizationResumeTokenHook = { "tok" }
         wallet.authorizationResumeConnectHook = { _ in }
         wallet.authorizationResumeSendHook = { sent.append($0) }
         try await wallet.resumeAuthorization(
@@ -415,7 +416,8 @@ final class IssuanceTrustGateTests: XCTestCase {
         let wallet = h.wallet
         wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
         var sent: [Int] = []
-        // A is cancelled while the token / connection awaits are still running, and B starts.
+        // A is cancelled while the connection await is still running, and B starts.
+        wallet.authorizationResumeTokenHook = { "tok" }
         wallet.authorizationResumeConnectHook = { _ in
             wallet.cancelCurrentFlow()
             wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.lock.unlock()
@@ -431,6 +433,28 @@ final class IssuanceTrustGateTests: XCTestCase {
         let stored = await h.store.getAll()
         XCTAssertTrue(stored.isEmpty)
         XCTAssertTrue(wallet.issuanceInFlight, "B's guard is untouched")
+    }
+
+    func testACancelledResumeDoesNotReconnectTheNewerIssuancesSocket() async throws {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        var reconnected = false
+        var sent: [Int] = []
+        // A is suspended in the token request; the user cancels A and starts B; then the token returns.
+        wallet.authorizationResumeTokenHook = {
+            wallet.cancelCurrentFlow()
+            wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.lock.unlock()
+            return "tok"
+        }
+        wallet.authorizationResumeConnectHook = { _ in reconnected = true } // stands for forceReconnect + awaitConnected
+        wallet.authorizationResumeSendHook = { sent.append($0) }
+        try await wallet.resumeAuthorization(
+            engine: WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t"),
+            pending: pendingAuthorization(startEpoch: aEpoch), code: "c", startEpoch: aEpoch, tokens: nil
+        )
+        XCTAssertFalse(reconnected, "A must not close B's socket before noticing it no longer owns the wallet")
+        XCTAssertTrue(sent.isEmpty)
     }
 
     func testAnAuthorizationThatCannotBeTiedToItsIssuanceIsRefused() {

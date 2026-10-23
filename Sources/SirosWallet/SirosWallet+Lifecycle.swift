@@ -204,14 +204,23 @@ extension SirosWallet {
         startEpoch: Int,
         tokens: AuthTokens?
     ) async throws {
-        if let connect = authorizationResumeConnectHook {
-            try await connect(engine)
+        let token: String
+        if let tokenHook = authorizationResumeTokenHook {
+            token = try await tokenHook()
         } else {
             guard let tokens else {
                 throw SirosError.wallet(message: "Not connected")
             }
-            let token = try await tokens.ensureBackendToken()
-            engine.forceReconnect(appToken: token.raw)
+            token = try await tokens.ensureBackendToken().raw
+        }
+        // BEFORE the reconnect: forceReconnect closes whatever socket is current, which
+        // after a cancel and a newer start is the NEWER issuance's. A resume that no
+        // longer owns the wallet must not touch it.
+        guard startStillOwned(startEpoch) else { return }
+        if let connect = authorizationResumeConnectHook {
+            try await connect(engine)
+        } else {
+            engine.forceReconnect(appToken: token)
             try await engine.awaitConnected()
         }
         // Client attestation for the resumed flow: Execute() sets up
