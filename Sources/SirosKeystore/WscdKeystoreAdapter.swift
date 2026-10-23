@@ -93,6 +93,10 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
 
     // MARK: - WscdManager conformance
 
+    public func isWscdPluginPresent(pluginId: String) async -> Bool {
+        await signer.isPluginPresent(pluginId: pluginId)
+    }
+
     public func lifecycleStatus(pluginId: String, contextId: String) async throws -> LifecycleStatus {
         try await requireWscdManager().lifecycleStatus(pluginId: pluginId, contextId: contextId)
     }

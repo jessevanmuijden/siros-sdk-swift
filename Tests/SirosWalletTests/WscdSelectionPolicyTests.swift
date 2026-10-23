@@ -31,6 +31,74 @@ final class WscdSelectionPolicyTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    // Presence: an absent token must fail before anything can prompt.
+    func testAbsentOnlySufficientPluginThrowsNoPluginPresent() async {
+        let policy = makePolicy()
+        do {
+            _ = try await policy.resolve(
+                issuer: "https://issuer.example.com",
+                credentialType: "urn:eu.europa.ec.eudi:pid:1",
+                requiredTier: "iso_18045_high",
+                availablePluginIds: ["softkey", "fido2"],
+                isPluginPresent: { $0 != "fido2" }
+            )
+            XCTFail("expected WscdSelectionError.authenticatorNotPresent")
+        } catch WscdSelectionError.authenticatorNotPresent(_, _, let tier, let absent) {
+            XCTAssertEqual(tier, "iso_18045_high")
+            XCTAssertEqual(absent, ["fido2"])
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
+    func testAbsentPluginIgnoresTofuDefaultMappingAndOverrides() async {
+        let store = InMemorySessionStore()
+        store.activeAccountId = "test:account"
+        let key = "https://issuer.example.com|pid"
+        let policy = WscdSelectionPolicy(sessionStore: store, defaultMapping: [key: "fido2"])
+        policy.setUserOverride(issuer: "https://issuer.example.com", credentialType: "pid", pluginId: "fido2")
+        policy.setGlobalUserOverride(pluginId: "fido2")
+        // Seed TOFU too.
+        _ = try? await policy.resolve(issuer: "https://issuer.example.com", credentialType: "pid",
+                                      requiredTier: "iso_18045_high", availablePluginIds: ["fido2"])
+        do {
+            _ = try await policy.resolve(
+                issuer: "https://issuer.example.com", credentialType: "pid",
+                requiredTier: "iso_18045_high", availablePluginIds: ["fido2"],
+                isPluginPresent: { _ in false }
+            )
+            XCTFail("an absent plugin must not be resolved from overrides/TOFU/mapping")
+        } catch WscdSelectionError.authenticatorNotPresent {
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
+    func testAbsentInsufficientPluginDoesNotMaskNoEligible() async {
+        // An insufficient plugin being absent is irrelevant: still a tier miss.
+        let policy = makePolicy()
+        do {
+            _ = try await policy.resolve(
+                issuer: "i", credentialType: "t", requiredTier: "iso_18045_high",
+                availablePluginIds: ["softkey"], isPluginPresent: { _ in false }
+            )
+            XCTFail("expected noEligiblePlugin")
+        } catch WscdSelectionError.noEligiblePlugin {
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
+    func testPresentPluginsStillResolveWhenAnotherIsAbsent() async throws {
+        // r2ps and fido2 both high; fido2 absent -> r2ps auto-picked, no prompt.
+        let policy = makePolicy()
+        let picked = try await policy.resolve(
+            issuer: "i", credentialType: "t", requiredTier: "iso_18045_high",
+            availablePluginIds: ["fido2", "r2ps"], isPluginPresent: { $0 != "fido2" }
+        )
+        XCTAssertEqual(picked, "r2ps")
+    }
+
     // 4. TOFU hit.
     func testTofuHitReusesPersistedChoiceWithoutPrompting() async throws {
         let store = InMemorySessionStore()

@@ -182,7 +182,7 @@ extension SirosWallet {
     ///   on fallback, generating a lower-tier self-signed attestation
     ///   instead.
     /// - Throws: `WscdSelectionError.noEligiblePlugin` or
-    ///   `.ambiguousChoiceNotMade` when `config.availableKeystores` is set
+    ///   `.ambiguousChoiceNotMade`/`.authenticatorNotPresent` when `config.availableKeystores` is set
     ///   but selection couldn't produce a plugin ID to use - unlike every
     ///   other failure here, these must NOT be swallowed into a nil/
     ///   self-signed fallback, since that fallback would just use an
@@ -212,7 +212,10 @@ extension SirosWallet {
                 issuer: audience,
                 credentialType: credentialType,
                 requiredTier: requiredTier,
-                availablePluginIds: Array(availableKeystores.keys)
+                availablePluginIds: Array(availableKeystores.keys),
+                // Fail BEFORE key generation (and so before any PIN prompt) when
+                // the token behind a sufficient plugin is not there.
+                isPluginPresent: { id in await availableKeystores[id]?.isWscdPluginPresent(pluginId: id) ?? false }
             ), let picked = availableKeystores[pluginId] {
                 effectiveKeystore = picked
             }
