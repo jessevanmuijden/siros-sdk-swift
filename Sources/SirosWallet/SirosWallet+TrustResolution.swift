@@ -126,7 +126,7 @@ extension SirosWallet {
             return
         }
         do {
-            let response = try await client.evaluateTrust(evaluationRequest)
+            let response = try await evaluateTrustCached(client, evaluationRequest)
             let decision = response["decision"] as? Bool ?? false
             let context = response["context"] as? [String: Any]
             let reqContext = request["context"] as? [String: Any]
@@ -150,21 +150,21 @@ extension SirosWallet {
             lastTrustResults[flowId] = trustResult
             lock.unlock()
 
-            // Populate trust cache (only positive results are stored)
-            trustCache.put(identifier: subjectId, result: trustResult)
-
             engine.sendTrustResult(flowId: flowId, trusted: decision)
         } catch {
-            // Degraded mode: check cache for a recent positive result
-            if let cached = trustCache.get(identifier: subjectId) {
-                print("[SirosWallet] ⚠️ Using cached trust result for \(subjectId) (backend unreachable)")
-                lock.lock()
-                lastTrustResults[flowId] = cached
-                lock.unlock()
-                engine.sendTrustResult(flowId: flowId, trusted: true)
-            } else {
-                engine.sendTrustResult(flowId: flowId, trusted: false, reason: error.localizedDescription)
-            }
+            // Fail closed: no earlier answer stands in for an evaluation that
+            // failed (the decision cache only serves fresh, successful ones).
+            engine.sendTrustResult(flowId: flowId, trusted: false, reason: error.localizedDescription)
+        }
+    }
+
+    /// Every `/v1/evaluate` call goes through here; see `TrustDecisionCache`.
+    func evaluateTrustCached(_ client: BackendApiClient, _ request: [String: Any]) async throws -> [String: Any] {
+        guard let key = TrustDecisionCache.key(for: request, client: client) else {
+            return try await client.evaluateTrust(request)
+        }
+        return try await trustDecisionCache.getOrEvaluate(key: key) {
+            try await client.evaluateTrust(request)
         }
     }
 

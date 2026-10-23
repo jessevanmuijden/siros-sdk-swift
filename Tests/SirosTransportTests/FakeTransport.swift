@@ -38,7 +38,19 @@ final class FakeTransport: TransportProtocol, @unchecked Sendable {
         stateCont.yield(.connected)
     }
 
+    /// Sends of this JSON-RPC method throw (a failed POST on an otherwise healthy connection).
+    var failingMethod: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _failingMethod }
+        set { lock.lock(); _failingMethod = newValue; lock.unlock() }
+    }
+    private var _failingMethod: String?
+    struct SendFailed: Error {}
+
     func send(_ message: Data) async throws {
+        lock.lock()
+        let failing = _failingMethod
+        lock.unlock()
+        if let failing, String(decoding: message, as: UTF8.self).contains("\"method\":\"\(failing)\"") { throw SendFailed() }
         lock.lock()
         _sent.append(message)
         lock.unlock()

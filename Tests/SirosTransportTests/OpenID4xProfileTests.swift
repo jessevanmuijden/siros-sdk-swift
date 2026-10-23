@@ -698,6 +698,23 @@ final class OpenID4xProfileTests: XCTestCase {
         }
     }
 
+    /// A timed retry belongs to its own answer: B's retry never resends an answer A that has already used its budget.
+    func testATimedRetryDoesNotResendAnotherAnswerWhoseBudgetIsSpent() async throws {
+        // A: original fails, its one retry fails (spent). B: original fails, its retry succeeds.
+        let ctx = ScriptedPeerContext([.fail, .fail, .fail, .succeed, .succeed])
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in SignSubFlowResult(vpToken: "t") }, sendRetryDelaysMs: [10]))
+        profile.initialize(ctx: ctx)
+        _ = try await profile.startFlow(params: signStart("c1", parent: "p1"))
+        try await Task.sleep(nanoseconds: 200_000_000)
+        _ = try await profile.startFlow(params: signStart("c2", parent: "p2"))
+        for _ in 0..<300 where ctx.sent.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(ctx.sent, ["c2"], "A waits for a resume; only B's own retry went out")
+        profile.sessionResumed()                                           // a resume still drains the whole queue
+        for _ in 0..<300 where !ctx.sent.contains("c1") { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(ctx.sent.contains("c1"))
+    }
+
     func testRepeatedShutdownNotifiesTheApplicationOnce() {
         var told = 0
         let profile = OpenID4xProfile(config: OpenID4xConfig(onShutdown: { told += 1 }))

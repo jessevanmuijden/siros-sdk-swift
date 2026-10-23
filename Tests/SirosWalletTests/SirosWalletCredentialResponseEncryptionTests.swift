@@ -1,10 +1,14 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import XCTest
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import SirosAuth
 import SirosCredentials
 import SirosKeystore
-import SirosTransport
+@testable import SirosTransport
 @testable import SirosCredentials
 @testable import SirosWallet
 #if canImport(CryptoKit)
@@ -54,6 +58,26 @@ private final class RecordingNotifier: CredentialNotifier, @unchecked Sendable {
     }
 }
 
+/// An engine socket that goes nowhere: open until cancelled, sends are swallowed, nothing is ever received. The
+/// real `URLSession` socket is not used from these tests.
+private final class IdleSocket: EngineSocket, @unchecked Sendable {
+    private let lock = NSLock()
+    private var running = true
+    var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
+    func resume() {}
+    func cancel(closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) { lock.lock(); running = false; lock.unlock() }
+    func sendText(_ text: String, completion: @escaping @Sendable (Error?) -> Void) { completion(nil) }
+    func receiveMessage() async throws -> URLSessionWebSocketTask.Message {
+        while isRunning { try await Task.sleep(nanoseconds: 20_000_000) }
+        throw CancellationError()
+    }
+    func sendPing(completion: @escaping @Sendable (Error?) -> Void) { completion(nil) }
+}
+
+private func idleEngine() -> WalletEngineSession {
+    WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t", socketFactory: { _ in IdleSocket() })
+}
+
 /// A WMP transport that answers `wmp.session.create` and records every message it is asked to send, so a test can
 /// see that a session close really went out.
 private final class AnsweringTransport: TransportProtocol, @unchecked Sendable {
@@ -85,6 +109,30 @@ private final class AnsweringTransport: TransportProtocol, @unchecked Sendable {
     func receiveFromServer(_ data: Data) { incomingCont.yield(data) }
     func incoming() -> AsyncStream<Data> { _incoming }
     func disconnect() async { lock.lock(); _state = .disconnected; lock.unlock(); stateCont.yield(.disconnected) }
+}
+
+/// A credential store whose `getAll()` suspends until released, so a test can change the wallet while a restore of the
+/// ready state is waiting for its read.
+private final class SuspendingStore: CredentialStore, @unchecked Sendable {
+    private let inner = InMemoryCredentialStore()
+    private let lock = NSLock()
+    private var gate: CheckedContinuation<Void, Never>?
+    private var opened = false
+    private var _waiting = false
+    var waiting: Bool { lock.lock(); defer { lock.unlock() }; return _waiting }
+    func open() { lock.lock(); opened = true; let g = gate; gate = nil; lock.unlock(); g?.resume() }
+    func getAll() async -> [StoredCredential] {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock(); _waiting = true
+            if opened { lock.unlock(); c.resume() } else { gate = c; lock.unlock() }
+        }
+        return await inner.getAll()
+    }
+    func getById(_ id: Int64) async -> StoredCredential? { await inner.getById(id) }
+    func save(_ credential: StoredCredential) async { await inner.save(credential) }
+    func update(_ credential: StoredCredential) async { await inner.update(credential) }
+    func delete(_ id: Int64) async { await inner.delete(id) }
+    func clear() async { await inner.clear() }
 }
 
 /// A notifier whose hand-over takes a while: the failure must be recorded before the rejecting call returns.
@@ -399,6 +447,9 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
                 config: WalletConfig(backendUrl: "http://127.0.0.1:1", engineUrl: "http://127.0.0.1:1", credentialStore: InMemoryCredentialStore()),
                 authProvider: StubAuthProvider(), keystore: StubKeystoreManager(), accountRegistry: .inMemory()
             )!
+            let previousFactory = SirosWallet.createEngineSession
+            defer { SirosWallet.createEngineSession = previousFactory }
+            SirosWallet.createEngineSession = { _, _ in idleEngine() }
             w.endSessionLocally()                       // logout: the session has ended
             XCTAssertTrue(w.sessionHasEnded)
             let connect = Task { () -> Void in
@@ -489,7 +540,9 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             return SignSubFlowResult(proofs: [ProofObject(proofType: "jwt", jwt: "a.b.c")])
         })))
         w.lock.lock(); w.wmpPeer = peer; w.lock.unlock()
-        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "p1", flowType: "oid4vci", status: "active", credentials: []))
+        // The wallet is `.ready`: nothing on the WMP path sets `.flowActive`, so the cancel must not depend on it.
+        transport.receiveFromServer(Data(#"{"jsonrpc":"2.0","method":"wmp.flow.start","params":{"wmp":{"version":"0.1"},"flow_id":"p1","flow_type":"oid4vci"}}"#.utf8))
+        try await Task.sleep(nanoseconds: 100_000_000)
         transport.receiveFromServer(Data(#"{"jsonrpc":"2.0","method":"wmp.flow.start","params":{"wmp":{"version":"0.1"},"flow_id":"c1","flow_type":"sign","params":{"action":"generate_proof","nonce":"n","audience":"a","parent_flow_id":"p1"}}}"#.utf8))
         for _ in 0..<300 where !gate.entered { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertTrue(gate.entered, "the child is suspended in its handler")
@@ -505,7 +558,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
     /// generation: it allocates nothing and is not answered, while one stamped with the current generation is served.
     func testARequestBufferedAcrossAReconnectOfTheSameSessionIsDropped() async throws {
         let w = wallet()
-        let engine = WalletEngineSession(baseUrl: "http://127.0.0.1:1", tenantId: "t")
+        let engine = idleEngine()
         w.engineSession = engine
         engine.connect(appToken: "t1")                                   // socket generation 1
         var buffered = try keyOnlyProofMessage(flowId: "old")
@@ -540,6 +593,38 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// Cancelling while the wallet is still `.ready` (before any progress named a flow): a request the engine session had
+    /// already received is obsolete, so it creates no key and gets no reply.
+    func testACancelBeforeAnyProgressRefusesTheBufferedProofRequest() async throws {
+        let w = wallet()
+        let engine = idleEngine()
+        w.engineSession = engine
+        engine.connect(appToken: "t")                                      // a real (if unreachable) socket to answer on
+        var buffered = try keyOnlyProofMessage(flowId: "pending")
+        buffered.socketGeneration = engine.socketGeneration
+        buffered.requestEpoch = engine.requestEpoch
+        w.cancelCurrentFlow()                                              // `.ready`: no flow id yet
+        try await w.answerGenerateProof(engine: engine, msg: buffered)
+        w.lock.lock(); XCTAssertTrue(w.credentialResponseKeys.isEmpty, "no key for the cancelled attempt"); w.lock.unlock()
+        // A request received after the cancel is served.
+        var later = try keyOnlyProofMessage(flowId: "next")
+        later.socketGeneration = engine.socketGeneration
+        later.requestEpoch = engine.requestEpoch
+        try await w.answerGenerateProof(engine: engine, msg: later)
+        w.lock.lock(); XCTAssertNotNil(w.credentialResponseKeys["next"]); w.lock.unlock()
+        engine.disconnect()
+    }
+
+    /// The same encrypted response delivered again (the engine retrying a child whose answer was lost or cancelled) is
+    /// retained once, so the parent's completion still pairs by count.
+    func testTheSameEncryptedResponseIsNotRetainedTwice() async throws {
+        let w = wallet()
+        let key = try installOwnKey(w, flowId: "dup")
+        let jwe = try encrypt(#"{"credentials":[{"credential":"one"}]}"#, to: key)
+        for _ in 0..<3 { _ = try await w.decryptCredentialResponse(flowId: "dup", jwe: jwe, deferred: false) }
+        XCTAssertEqual(w.takeDecryptedCredentialResponses(flowId: "dup").flatMap(\.credentials), ["one"])
+    }
+
     /// A buffered `generate_proof` for a flow that already ended is rejected: no key, no reply.
     func testABufferedProofRequestForAnEndedFlowIsRejected() async throws {
         let w = wallet()
@@ -557,7 +642,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
     /// A request that arrives on a superseded engine session is dropped: no key, no answer.
     func testARequestFromASupersededEngineSessionIsDropped() async throws {
         let w = wallet()
-        w.engineSession = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        w.engineSession = idleEngine()
         let stale = RecordingSender()
         try await w.answerGenerateProof(engine: stale, msg: try keyOnlyProofMessage(flowId: "old"))
         XCTAssertTrue(stale.sent.isEmpty, "nothing is answered to the old socket")
@@ -956,6 +1041,34 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertTrue(kept.1, "B's key is kept")
         guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
         XCTAssertEqual(flowId, "B")
+    }
+
+    /// The ready-state restore of a failed issuance waits for the credential store. If a logout publishes
+    /// `.disconnected`, or a replacement issuance begins (without cancelling the failed one), while it waits, the restore
+    /// stands down: the later state is never overwritten with the failed issuance's `.ready`.
+    func testARestoreWaitingForTheStoreNeverOverwritesALaterState() async throws {
+        for scenario in ["logout", "replacement"] {
+            let store = SuspendingStore()
+            let w = SirosWallet(
+                config: WalletConfig(backendUrl: "https://example.invalid", credentialStore: store),
+                authProvider: StubAuthProvider(), keystore: StubKeystoreManager(), accountRegistry: .inMemory()
+            )!
+            w.setState(.flowActive(userId: "u", displayName: nil, flowId: "A", flowType: "oid4vci", status: "active", credentials: []))
+            let failing = Task { await w.failIssuanceLocally(flowId: "A", message: "failed") }
+            for _ in 0..<300 where !store.waiting { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(store.waiting, "the restore is waiting for the store read")
+            let later: WalletState
+            if scenario == "logout" {
+                later = .disconnected()
+            } else {
+                _ = w.issuanceStartEpoch.begin()                                 // B starts; A was never cancelled
+                later = .flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: [])
+            }
+            w.setState(later)
+            store.open()
+            await failing.value
+            XCTAssertEqual(w.state, later, "\(scenario): the restore did not overwrite the later state")
+        }
     }
 
     // MARK: - flow_complete pairing

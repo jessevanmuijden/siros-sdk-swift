@@ -170,18 +170,38 @@ extension SirosWallet {
 
     /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
     ///
-    /// - Parameter ownedBy: the flow and generation this restore belongs to; after the awaited store read the state is
-    ///   changed only if that flow is still the one that ended (a newer issuance's state is left alone).
-    func restoreReadyState(ownedBy owner: (flowId: String, generation: [Int])? = nil) async {
-        switch state {
-        case .flowActive(let userId, let displayName, _, _, _, _),
-             .ready(let userId, let displayName, _, _):
-            let creds = await credentialStore.getAll()
-            if let owner, credentialResponseGeneration(flowId: owner.flowId) != owner.generation { return }
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
-        default:
-            break
+    /// - Parameter ownedBy: the flow, its generation and the issuance attempt this restore belongs to. After the awaited
+    ///   store read they are revalidated, and the state is replaced, under the SAME lock acquisition: a logout that
+    ///   published `.disconnected`, a cancellation, or a replacement issuance that started meanwhile (without cancelling
+    ///   this one) is never overwritten with the previous issuance's `.ready`.
+    func restoreReadyState(ownedBy owner: (flowId: String, generation: [Int], attempt: Int)? = nil) async {
+        lock.lock()
+        let restorable: Bool
+        switch _state {
+        case .flowActive, .ready: restorable = true
+        default: restorable = false
         }
+        lock.unlock()
+        guard restorable else { return }
+        let creds = await credentialStore.getAll()
+        lock.lock()
+        if let owner,
+           credentialResponseGenerationLocked(flowId: owner.flowId) != owner.generation || !issuanceStartEpoch.isCurrent(owner.attempt) {
+            lock.unlock()
+            return
+        }
+        let restored: WalletState
+        switch _state {
+        case .flowActive(let userId, let displayName, _, _, _, _), .ready(let userId, let displayName, _, _):
+            restored = .ready(userId: userId, displayName: displayName, credentials: creds)
+        default:
+            lock.unlock()
+            return
+        }
+        _state = restored
+        let conts = Array(stateContinuations.values)
+        lock.unlock()
+        for c in conts { c.yield(restored) }
     }
 
     // Credential re-issuance/renewal plan (Phase 2): if this flow_complete is

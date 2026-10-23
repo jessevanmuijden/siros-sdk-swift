@@ -59,6 +59,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
+- **Issuance start is visible at once.** `startIssuance(offerUri:)` and
+  `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
+  before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
+  (`WalletState.FlowActive.pendingFlowId`, `WalletState.isPendingFlow`) and a
+  client-side `status` that steps through `initializing`, `connecting_engine`,
+  `establishing_session`, `checking_entitlement` (by-offer path only),
+  `preparing_issuance` and `starting_flow` (`WalletState.FlowActive.step*`)
+  until the engine's own progress events take over. Previously the wallet stayed
+  `.ready` for several seconds on a mobile network (engine reconnect,
+  entitlement check, metadata fetches), so hosts showed no feedback after the
+  user chose a credential type. A start that fails (engine unreachable,
+  entitlement refusal) returns the wallet to `.ready` and throws, as before;
+  `cancelCurrentFlow()` during the start resets at once, sends nothing to the
+  engine (there is no flow id), and the suspended start unwinds with
+  `CancellationError` instead of reaching the engine; a cancelled start cannot
+  clobber a newer one (admission, epoch checks, state commits, failure cleanup
+  and cancel share one critical section on the wallet lock). The flow type stays `"issuance"` across the first engine
+  progress event for flows begun this way (before, it became the step name).
+  Both start paths now take the in-flight guard before connecting the engine.
+  Hosts that switch on `flowId` should treat `isPendingFlow` as "no engine flow
+  yet". Not ported yet: Kotlin's recognition of a flow cancelled after
+  `flow_start` was sent but before the engine named it (needs per-connection
+  generations in `WalletEngineSession`). Mirrors siros-sdk-kotlin
+  [#277](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/277).
+- Sample app: labels for the new steps (en, sv); a user-cancelled start is no
+  longer reported as an error.
 - **`zkp_req` (nym_auth rulebook v0.4): planner, unsatisfiable rules, strict CBOR response validator,
   `proof_time`, prefixed `verifier_id`.** `ZkpReqPlanner` reads the v0.4 DCQL names (`zkp_req`, `_req`,
   `fn_id`, `return`, `meta.source_format`, `vp_formats_supported.zkp_req` with `system_id_values` and
@@ -264,6 +290,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the message instead of the raw JSON body. A body without a code is unchanged.
 
 ### Changed
+- **One TTL trust-decision cache for every `/v1/evaluate` call (replaces `TrustCache`).**
+  Every trust evaluation (mdoc issuer/reader, engine-relayed verifier/issuer,
+  DC API) now goes through `TrustDecisionCache`: only successful decisions (allow
+  and deny) are remembered, keyed by a hash of the whole request body plus the
+  backend client that answered it, so a different certificate, doc type or context
+  never reuses an entry; errors, timeouts and 4xx/5xx are never cached; an expired
+  entry is never served, even when the backend is unreachable; identical concurrent
+  requests share one backend call; 256 entries, least recently used evicted; in
+  memory only; cleared whenever the backend connection is dropped or replaced
+  (logout, account deletion, reconnect). New `WalletConfig.trustDecisionCacheTtl`
+  (seconds, default 300, `0` disables). Trade-off: a revocation can take up to the
+  TTL to take effect. **Behaviour change:** the old "degraded mode" is gone: an
+  earlier positive verifier result no longer stands in for a failed evaluation
+  (engine path and DC API path now fail closed), and the engine's informational
+  `trust_evaluated` issuer report is no longer cached. `TrustCache` is removed (it
+  had no public members). Ports Kotlin SDK #276, item 4
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/276).
 - **Keystore: containers are written at `S.schemaVersion` 4 (was 3).** Version 3
   readers (older SDKs, a wallet-frontend before spec 3.0) crash on or drop
   `S.extensions` and `S.credentials[].metadata`, which is why spec 3.0 moves them
@@ -320,6 +363,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **The ready-state restore after a failed issuance can no longer overwrite a later state.** The restore revalidates its
+  flow, generation and issuance attempt, and replaces the state, under one lock acquisition after the awaited store read:
+  a logout's `.disconnected`, a cancellation, or a replacement issuance that began without cancelling the failed one is
+  left alone. The WMP session closes locally whatever the close notification does (see the WMP entry).
 - **A refusal's cleanup no longer outlives its issuance.** When a plain completion is refused after the wallet offered a
   key, the `credential_failure` send is awaited; if that issuance was cancelled and another began meanwhile, the
   cleanup (and the restore of the ready state after the awaited store read) runs only if the refused flow still owns the
@@ -341,6 +388,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no replacement opens), so requests buffered from it are refused. `reportSignFailure` and `cancelCurrentFlow()`
   mark the flow ended, so a buffered `generate_proof` for it neither recreates its key nor is answered; a decrypt for
   an ended flow is answered `NO_RESPONSE_KEY`.
+- **Blind issuance: requests of lost or replaced sockets, cancelled and failed flows.** `WalletEngineSession` stamps each
+  sign request with the generation (its `epoch`) of the socket that carried it (`SignRequestMessage.socketGeneration`)
+  and with a request epoch (`requestEpoch`); `onSocketReplaced` fires, outside every lock, when the connection is lost
+  or `forceReconnect` replaces it, and a recovered connection starts a fresh retry budget. The wallet refuses a request
+  from an older generation or epoch before allocating anything. `cancelCurrentFlow()` advances the request epoch
+  (also while the wallet is still `.ready`), marks the active flow ended, and stops everything the WMP peer runs
+  (`WmpPeer.cancelAllFlowsNow()`) whatever the wallet state; `reportSignFailure` marks its flow ended. A decrypt for an
+  ended flow is answered `NO_RESPONSE_KEY`, and the same encrypted response delivered again is retained once.
 - **Blind issuance: buffered requests and replaying children.** Each WebSocket sign request carries the socket
   generation it was received on (`SignRequestMessage.socketGeneration`, stamped by the session, not on the wire); a
   `generate_proof` / `decrypt_credential_response` buffered across a same-object reconnect is dropped before it
@@ -372,6 +427,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
   kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
   only after a replacement was stored; tests now pin that.
+- **WMP: a timed retry resends only its own answer, and a session closes locally whatever the close notification does.**
+  A retry timer drains just the child that scheduled it (a resume still drains the whole queue), so an answer that spent
+  its budget is not resent by another child's retry. `WmpSession.close` disconnects the transport, ends the session and
+  fires the terminal hook even when the `wmp.session.close` notification fails, then reports the failure.
 - **WMP child answers: the retry budget is per answer, and cancelled replays leave no marker.** The timed-retry budget
   belongs to each queued answer (cleared when it is sent, ends, or the session resumes), so an answer that used its
   retries up cannot starve the next. A replay's cancellation marker is removed when its send finishes whether or not its
@@ -430,6 +489,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   associated value) and, with FaceTec 10 linked, it broke the whole package
   build. It now always throws `IDVError.unavailable`. `RemoteIDVProvider`
   is unchanged.
+
+### Fixed
+- **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
+  engine keeps one session per (tenant, user) and closes the older socket when a
+  second connects. The session used to open several at once: `forceReconnect`
+  (after an OAuth redirect or a QR scan) cancelled the old socket, and the receive
+  failure that cancel raises then scheduled a reconnect of its own, as did a
+  failed send and a second `connect()` while still connecting; the sockets
+  superseded each other and a flow's replies went to a socket the engine no longer
+  knew. Now every socket has an epoch: opening one supersedes (and cancels) the
+  previous one and any pending backoff attempt, a callback, frame or reconnect
+  attempt of a superseded socket does nothing (a superseded token refresh no
+  longer sets `.reauthRequired` over the new connection), a failed socket is no
+  longer reported by `isConnected` during the backoff, and a duplicate failure of
+  the same socket schedules one backoff, not two. Ports Kotlin SDK #282
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/282). The client
+  ping never closes the socket on a missing pong (Kotlin keeps its pong wait at
+  10 s or more for the same reason), so no change was needed there. Tested through
+  a fake socket (`EngineSocket`, a new internal seam); not run against a real
+  `URLSessionWebSocketTask` on an Apple platform.
 
 ## [0.14.1] - 2026-09-29
 

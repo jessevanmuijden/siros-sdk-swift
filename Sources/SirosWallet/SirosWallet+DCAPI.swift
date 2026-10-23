@@ -173,8 +173,8 @@ extension SirosWallet {
                 context: nil
             )
         } catch {
-            trustResult = trustCache.get(identifier: subjectId)
-                ?? TrustResult(trusted: false, reason: error.localizedDescription, identifier: subjectId)
+            // Fail closed: no earlier answer stands in for a failed evaluation.
+            trustResult = TrustResult(trusted: false, reason: error.localizedDescription, identifier: subjectId)
         }
 
         // Unlike the QR/redirect flow, there is no engine round-trip here to
@@ -724,15 +724,10 @@ extension SirosWallet {
             evaluationRequest["context"] = context
         }
 
-        let response = try await client.evaluateTrust(evaluationRequest)
+        let response = try await evaluateTrustCached(client, evaluationRequest)
         let decision = response["decision"] as? Bool ?? false
         let respContext = response["context"] as? [String: Any]
 
-        // Mirrors the Kotlin SDK's `evaluateTrustDirect` exactly: unlike
-        // `handleTrustEvaluation` (the engine-relayed path), this direct-call
-        // variant deliberately does NOT populate `trustCache` on success -
-        // only `handleDCAPIRequest`'s catch block reads it, as a fallback
-        // when the live call itself fails.
         return TrustResult(
             trusted: decision,
             framework: respContext?["framework"] as? String,
