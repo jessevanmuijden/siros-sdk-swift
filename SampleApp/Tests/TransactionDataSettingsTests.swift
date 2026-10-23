@@ -70,7 +70,7 @@ final class TransactionDataSettingsTests: XCTestCase {
         let bridge = Task { await vm.requestTransactionConsent(Self.sampleRequest()) }
         let pending = try await waitForPending(vm)
         XCTAssertEqual(pending.request.entries.first?.fields.first?.value, "49.99")
-        pending.respond(true)
+        pending.answer(true)
         let answer = await bridge.value
         XCTAssertTrue(answer)
         XCTAssertNil(vm.pendingTransactionConsent)
@@ -80,7 +80,7 @@ final class TransactionDataSettingsTests: XCTestCase {
         let vm = WalletViewModel()
         let declined = Task { await vm.requestTransactionConsent(Self.sampleRequest()) }
         let first = try await waitForPending(vm)
-        first.respond(false)
+        first.decline()
         let declinedAnswer = await declined.value
         XCTAssertFalse(declinedAnswer)
 
@@ -105,7 +105,7 @@ final class TransactionDataSettingsTests: XCTestCase {
         }
         let firstAnswer = await firstTask.value
         XCTAssertFalse(firstAnswer)
-        vm.pendingTransactionConsent?.respond(true)
+        vm.pendingTransactionConsent?.answer(true)
         let secondAnswer = await secondTask.value
         XCTAssertTrue(secondAnswer)
     }
@@ -159,9 +159,9 @@ final class TransactionDataLifecycleTests: XCTestCase {
         let firstAnswer = await first.value
         XCTAssertFalse(firstAnswer)
         let current = try XCTUnwrap(vm.pendingTransactionConsent)
-        stale.respond(true)   // the outgoing prompt answering late
+        stale.answer(true)   // the outgoing prompt answering late
         XCTAssertEqual(vm.pendingTransactionConsent?.id, current.id, "the newer prompt is still showing")
-        current.respond(true)
+        current.answer(true)
         let secondAnswer = await second.value
         XCTAssertTrue(secondAnswer)
     }
@@ -249,9 +249,9 @@ final class TransactionDataLifecycleTests: XCTestCase {
         }
         _ = await first.value
         let current = try XCTUnwrap(vm.pendingTransactionConsent)
-        earlier.respond(false)      // the earlier sheet's late dismissal callback
+        earlier.decline()      // the earlier sheet's late dismissal callback
         XCTAssertEqual(vm.pendingTransactionConsent?.id, current.id, "the newer prompt is untouched")
-        current.respond(true)
+        current.answer(true)
         let answer = await second.value
         XCTAssertTrue(answer)
     }
@@ -263,7 +263,7 @@ final class TransactionDataLifecycleTests: XCTestCase {
         for _ in 0..<200 where vm.pendingTransactionConsent == nil { try await Task.sleep(nanoseconds: 10_000_000) }
         let pending = try XCTUnwrap(vm.pendingTransactionConsent)
         vm.pendingTransactionConsent = nil          // what SwiftUI does on a swipe, before onDisappear
-        pending.respond(false)                      // what the sheet's onDisappear does
+        pending.decline()                      // what the sheet's onDisappear does
         let answer = await request.value
         XCTAssertFalse(answer)
     }
