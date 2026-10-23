@@ -219,7 +219,16 @@ final class WmpPeerTests: XCTestCase {
         peer.use(shutdown)
         try await connectPeer(peer, transport: transport)
         transport.failingMethod = "wmp.session.close"
+        let events = Task { () -> Bool in for await _ in peer.flowEvents() {}; return true }
         do { try await peer.close(); XCTFail("the failed notification is reported") } catch { /* expected */ }
+        let ended = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask { await events.value }
+            group.addTask { try? await Task.sleep(nanoseconds: 2_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(ended, "the event stream ends although the close notification failed")
         XCTAssertGreaterThanOrEqual(shutdown.count, 1)
         XCTAssertEqual(transport.currentState, .disconnected, "the transport is not left running")
     }

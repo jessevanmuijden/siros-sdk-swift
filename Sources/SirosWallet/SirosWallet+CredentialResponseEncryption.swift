@@ -278,8 +278,24 @@ extension SirosWallet {
         lock.lock()
         credentialResponseKeys.removeAll()
         decryptedCredentialResponses.removeAll()
+        responseKeyOrigin.removeAll()
         credentialResponseEpoch += 1
         lock.unlock()
+    }
+
+    /// Whether the flow already ended here (completed, failed, cancelled): a late completion for it is not honoured.
+    func flowAlreadyEnded(_ flowId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (flowEndSeq[flowId] ?? 0) > 0
+    }
+
+    /// A completion whose credentials were decrypted but cannot be stored (the engine's list does not match, or cannot be
+    /// read): the issuer is told with one `credential_failure` per distinct notification id of the decrypted responses,
+    /// then the issuance ends. Their responses have already left the retained state.
+    func rejectDecryptedCompletion(flowId: String, responses: [DecryptedCredentialResponse], message: String) async {
+        let ids = Set(responses.compactMap(\.notificationId).filter { !$0.isEmpty }).sorted()
+        for id in ids { await sendCredentialFailure(flowId: flowId, notificationId: id) }
+        await failIssuanceLocally(flowId: flowId, message: message)
     }
 
     /// Forget this flow's key and anything decrypted for it.
@@ -332,18 +348,24 @@ extension SirosWallet {
         // Taken before the awaits: a failure that arrives after this flow was cancelled (and perhaps another begun)
         // is answered to the engine, but must not touch the wallet-wide state of whatever runs now.
         let generation = liveGeneration
+        let keyAtStart = responseKey(flowId: msg.flowId)
         do {
             let control = try await decryptCredentialResponse(
                 flowId: msg.flowId, jwe: msg.params.jwe, deferred: msg.params.deferred ?? false
             )
+            // The reply goes out on the socket that carried the request: after a replacement the engine session would
+            // pick the NEW connection, which never asked.
+            guard Self.receivedOnCurrentSocket(engine, msg) else { return }
             engine.sendSignResponse(
                 flowId: msg.flowId, credentialCount: control.credentialCount, transactionId: control.transactionId,
                 interval: control.interval, messageId: msg.messageId
             )
         } catch {
             if Task.isCancelled || error is CancellationError { return }
+            guard Self.receivedOnCurrentSocket(engine, msg) else { return }
             let code = (error as? CredentialResponseError)?.wmpErrorCode ?? "DECRYPT_FAILED"
-            let current = generation == credentialResponseGeneration(flowId: msg.flowId)
+            // A key replaced by a newer `generate_proof` meanwhile is a stale operation, not a failure of the flow.
+            let current = generation == credentialResponseGeneration(flowId: msg.flowId) && !keySuperseded(flowId: msg.flowId, since: keyAtStart)
             if current { discardCredentialResponseState(flowId: msg.flowId) }
             engine.sendSignResponse(
                 flowId: msg.flowId, error: "credential response could not be taken", errorCode: code, messageId: msg.messageId
@@ -352,9 +374,27 @@ extension SirosWallet {
         }
     }
 
+    /// Whether the connection `msg` arrived on is still the engine session's current one.
+    static func receivedOnCurrentSocket(_ engine: any SignResponseSender, _ msg: SignRequestMessage) -> Bool {
+        guard let session = engine as? WalletEngineSession else { return true }
+        return session.socketGeneration == msg.socketGeneration
+    }
+
+    func responseKey(flowId: String) -> CredentialResponseKey? {
+        lock.lock(); defer { lock.unlock() }
+        return credentialResponseKeys[flowId]
+    }
+
+    /// Whether the flow's key was replaced (by a newer `generate_proof`) since `key` was read.
+    func keySuperseded(flowId: String, since key: CredentialResponseKey?) -> Bool {
+        guard let current = responseKey(flowId: flowId) else { return false }
+        return current !== key
+    }
+
     /// The same action over WMP; the profile reports a failure as a flow error carrying only the code.
     func wmpDecryptCredentialResponse(flowId: String, params: SignSubFlowParams) async throws -> SignSubFlowResult {
         let generation = try requireLiveSession(flowId: flowId)
+        let keyAtStart = responseKey(flowId: flowId)
         do {
             let control = try await decryptCredentialResponse(flowId: flowId, jwe: params.jwe, deferred: params.deferred ?? false)
             return SignSubFlowResult(
@@ -366,7 +406,7 @@ extension SirosWallet {
             // The profile's flow error goes to the peer only; the wallet's own terminal handling is here.
             let code = (error as? CredentialResponseError) ?? CredentialResponseError.decryptFailed
             // A flow that was cancelled meanwhile (and perhaps replaced) is not failed again here.
-            if generation != credentialResponseGeneration(flowId: flowId) { throw code }
+            if generation != credentialResponseGeneration(flowId: flowId) || keySuperseded(flowId: flowId, since: keyAtStart) { throw code }
             await failIssuanceLocally(flowId: flowId, message: code.wmpErrorCode ?? "DECRYPT_FAILED")
             throw code
         }
@@ -487,6 +527,10 @@ extension SirosWallet {
         // A flow that ended meanwhile gets no reply (not even proofs) built from its stale state.
         if generation != credentialResponseGeneration(flowId: msg.flowId) { throw CancellationError() }
         let jwk = credentialResponseEncryptionJwk(flowId: msg.flowId, request: encryption, generation: generation)
+        if jwk != nil, let session = engine as? WalletEngineSession {
+            // Which socket created this key: a later replacement's cleanup removes only keys of EARLIER sockets.
+            lock.lock(); responseKeyOrigin[msg.flowId] = (ObjectIdentifier(session), msg.socketGeneration); lock.unlock()
+        }
         engine.sendSignResponse(
             flowId: msg.flowId, proofs: proofs.isEmpty ? nil : proofs, credentialResponseEncryptionJwk: jwk, messageId: msg.messageId
         )

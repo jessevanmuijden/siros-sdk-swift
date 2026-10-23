@@ -60,13 +60,21 @@ private final class RecordingNotifier: CredentialNotifier, @unchecked Sendable {
 
 /// An engine socket that goes nowhere: open until cancelled, sends are swallowed, nothing is ever received. The
 /// real `URLSession` socket is not used from these tests.
+private final class SentTexts: @unchecked Sendable {
+    private let lock = NSLock(); private var texts: [String] = []
+    func add(_ t: String) { lock.lock(); texts.append(t); lock.unlock() }
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return texts }
+    var signResponses: Int { all.filter { $0.contains("\"sign_response\"") }.count }
+}
+
 private final class IdleSocket: EngineSocket, @unchecked Sendable {
     private let lock = NSLock()
     private var running = true
+    var recorder: SentTexts?
     var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
     func resume() {}
     func cancel(closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) { lock.lock(); running = false; lock.unlock() }
-    func sendText(_ text: String, completion: @escaping @Sendable (Error?) -> Void) { completion(nil) }
+    func sendText(_ text: String, completion: @escaping @Sendable (Error?) -> Void) { recorder?.add(text); completion(nil) }
     func receiveMessage() async throws -> URLSessionWebSocketTask.Message {
         while isRunning { try await Task.sleep(nanoseconds: 20_000_000) }
         throw CancellationError()
@@ -74,8 +82,10 @@ private final class IdleSocket: EngineSocket, @unchecked Sendable {
     func sendPing(completion: @escaping @Sendable (Error?) -> Void) { completion(nil) }
 }
 
-private func idleEngine() -> WalletEngineSession {
-    WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t", socketFactory: { _ in IdleSocket() })
+private func idleEngine(recorder: SentTexts? = nil) -> WalletEngineSession {
+    WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t", socketFactory: { _ in
+        let socket = IdleSocket(); socket.recorder = recorder; return socket
+    })
 }
 
 /// A WMP transport that answers `wmp.session.create` and records every message it is asked to send, so a test can
@@ -1073,6 +1083,166 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    // MARK: - Socket replacement, superseded keys, late completions
+
+    /// Replacing the engine socket from inside the issuance start's epoch-checked commit (the wallet lock is held there)
+    /// completes: the cleanup runs on its own task, not inside the callback, and removes only the keys that EARLIER
+    /// sockets created: a key the replacement socket's request advertised is left alone.
+    func testReplacingTheSocketUnderTheWalletLockDoesNotDeadlockAndKeepsTheNewSocketsKey() async throws {
+        let w = wallet()
+        let engine = idleEngine()
+        w.engineSession = engine
+        w.installSocketReplacedHook(on: engine)
+        engine.connect(appToken: "t")
+        var old = try keyOnlyProofMessage(flowId: "old")
+        old.socketGeneration = engine.socketGeneration
+        old.requestEpoch = engine.requestEpoch
+        try await w.answerGenerateProof(engine: engine, msg: old)
+        w.lock.lock(); XCTAssertNotNil(w.credentialResponseKeys["old"]); w.lock.unlock()
+        let epoch = w.issuanceStartEpoch.begin()
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "", flowType: "oid4vci", status: "x", credentials: []))
+        let finished = Task { () -> Bool in
+            do { try w.replaceEngineSocketForIssuance(epoch: epoch) { engine.forceReconnect(appToken: "t2") }; return true } catch { return true }
+        }
+        let completed = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask { await finished.value }
+            group.addTask { try? await Task.sleep(nanoseconds: 3_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(completed, "the socket replacement under the wallet lock did not deadlock")
+        // The replacement socket's own request creates a key before the cleanup may have run.
+        var fresh = try keyOnlyProofMessage(flowId: "new")
+        fresh.socketGeneration = engine.socketGeneration
+        fresh.requestEpoch = engine.requestEpoch
+        try await w.answerGenerateProof(engine: engine, msg: fresh)
+        for _ in 0..<200 {
+            w.lock.lock(); let gone = w.credentialResponseKeys["old"] == nil; w.lock.unlock()
+            if gone { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        w.cleanupAfterSocketReplacement(of: engine)       // a cleanup that runs AFTER the new key exists, whatever the task's timing
+        w.lock.lock()
+        XCTAssertNil(w.credentialResponseKeys["old"], "the departed socket's key is cleaned up")
+        XCTAssertNotNil(w.credentialResponseKeys["new"], "the replacement socket's key is not")
+        w.lock.unlock()
+        engine.disconnect()
+    }
+
+    /// A late report from an engine that logout and a new login replaced touches nothing of the new engine's state.
+    func testALateSocketReportFromAReplacedEngineLeavesTheNewEnginesKeysAlone() async throws {
+        let w = wallet()
+        let oldEngine = idleEngine(), newEngine = idleEngine()
+        w.engineSession = newEngine
+        try installKey(w, flowId: "k")
+        w.lock.lock(); w.responseKeyOrigin["k"] = (ObjectIdentifier(newEngine), 0); w.lock.unlock()
+        w.cleanupAfterSocketReplacement(of: oldEngine)
+        w.lock.lock(); XCTAssertNotNil(w.credentialResponseKeys["k"]); w.lock.unlock()
+    }
+
+    /// A decrypt whose receiver was suspended while the socket was replaced does not send its reply on the NEW connection.
+    func testALateDecryptReplyIsNotSentOnTheReplacementSocket() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        let w = wallet()
+        let sent = SentTexts()
+        let engine = idleEngine(recorder: sent)
+        w.engineSession = engine
+        engine.connect(appToken: "t")
+        try installKey(w, flowId: "late")
+        let gate = Gate()
+        w.credentialMetadataReceiver = { _, _, _ in while await !gate.isOpen { await Task.yield() } }
+        var message = try decryptMessage(flowId: "late", jwe: Self.jwe)
+        message.socketGeneration = engine.socketGeneration
+        message.requestEpoch = engine.requestEpoch
+        let decrypting = Task { await w.answerDecryptCredentialResponse(engine: engine, msg: message) }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        engine.forceReconnect(appToken: "t2")                              // the connection the request came on is gone
+        await gate.release()
+        await decrypting.value
+        XCTAssertEqual(sent.signResponses, 0, "nothing is answered on the replacement connection")
+        engine.disconnect()
+    }
+
+    /// A key replaced by a newer `generate_proof` while an older decrypt was suspended: the old decrypt's failure is
+    /// stale, so it neither deletes the new key nor fails the issuance, on both transports.
+    func testASupersededKeyIsAStaleOperationNotATerminalFailure() async throws {
+        actor Gate { var open = false; func release() { open = true }; var isOpen: Bool { open } }
+        for transport in ["engine", "wmp"] {
+            let w = wallet()
+            let listener = Listener()
+            w.eventListener = listener
+            try installKey(w, flowId: "sk")
+            let gate = Gate()
+            w.credentialMetadataReceiver = { _, _, _ in while await !gate.isOpen { await Task.yield() } }
+            let sender = RecordingSender()
+            let decrypting = Task { () -> Void in
+                if transport == "engine" {
+                    await w.answerDecryptCredentialResponse(engine: sender, msg: try! decryptMessage(flowId: "sk", jwe: Self.jwe))
+                } else {
+                    _ = try? await w.wmpDecryptCredentialResponse(flowId: "sk", params: SignSubFlowParams(action: "decrypt_credential_response", jwe: Self.jwe, deferred: false))
+                }
+            }
+            try await Task.sleep(nanoseconds: 80_000_000)
+            let replacement = w.credentialResponseEncryptionJwk(flowId: "sk", request: request)    // a newer generate_proof
+            XCTAssertNotNil(replacement)
+            await gate.release()
+            await decrypting.value
+            w.lock.lock(); let kept = w.credentialResponseKeys["sk"] != nil; w.lock.unlock()
+            XCTAssertTrue(kept, "\(transport): the newer key survives the older decrypt's failure")
+            XCTAssertTrue(listener.errors.isEmpty, "\(transport): the issuance is not failed by it")
+        }
+    }
+
+    /// Decrypted credentials the engine's completion cannot be paired with (a count mismatch, or a completion that does
+    /// not read) are reported to the issuer: one `credential_failure` per distinct decrypted notification id.
+    func testAnUnpairableEncryptedCompletionTellsTheIssuer() async throws {
+        for variant in ["count mismatch", "unreadable wmp completion"] {
+            let w = wallet()
+            let notifier = RecordingNotifier()
+            w.credentialNotifier = notifier
+            try installKey(w, flowId: "up")
+            _ = try await w.decryptCredentialResponse(flowId: "up", jwe: Self.jwe, deferred: false)     // notification_id 3fwe98js
+            if variant == "count mismatch" {
+                await w.handleFlowComplete(msg: try flowComplete(flowId: "up", entries: 2))
+            } else {
+                await w.handleWmpFlowComplete(flowId: "up", result: .object_([
+                    "credential_response_encrypted": .bool(true), "credentials": .array([.object_([:])]),
+                ]))
+            }
+            XCTAssertEqual(notifier.sent.map(\.notificationId), ["3fwe98js"], variant)
+            XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure, variant)
+        }
+    }
+
+    /// A late plain completion does not revive a flow that already failed or was cancelled.
+    func testALateCompletionDoesNotReviveAnEndedFlow() async throws {
+        let store = InMemoryCredentialStore()
+        let w = wallet(store: store)
+        let listener = Listener()
+        w.eventListener = listener
+        try installKey(w, flowId: "end")
+        w.reportSignFailure(flowId: "end", message: "decrypt failed", notifyError: false)           // key removed, flow ended
+        let now = Int64(Date().timeIntervalSince1970)
+        let jwt = "eyJ.\(Data(#"{"exp":\#(now + 3600),"iat":\#(now)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).sig"
+        let object: [String: Any] = ["type": "flow_complete", "flow_id": "end", "credentials": [["format": "vc+sd-jwt", "credential": jwt]]]
+        await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+        await w.handleWmpFlowComplete(flowId: "end", result: .object_(["credentials": .array([.object_(["format": .string("vc+sd-jwt"), "credential": .string(jwt)])])]))
+        let stored = await store.getAll()
+        XCTAssertTrue(stored.isEmpty, "nothing is stored for an ended flow")
+        XCTAssertTrue(listener.completed.isEmpty)
+    }
+
+    /// Cancelling an `oid4vp` parent does not reset the guards of an unrelated issuance in progress.
+    func testCancellingAPresentationParentLeavesAnIssuancesGuardsAlone() {
+        let w = wallet()
+        w.lock.lock(); w.issuanceInFlight = true; w.activeAttestedKeyIds = ["kid-1"]; w.lock.unlock()
+        w.handleWmpFlowCancel(flowId: "v1", flowType: "oid4vp")
+        w.lock.lock(); XCTAssertTrue(w.issuanceInFlight); XCTAssertEqual(w.activeAttestedKeyIds, ["kid-1"]); w.lock.unlock()
+        w.handleWmpFlowCancel(flowId: "i1", flowType: "oid4vci")                      // an issuance's own cancel still resets
+        w.lock.lock(); XCTAssertFalse(w.issuanceInFlight); XCTAssertNil(w.activeAttestedKeyIds); w.lock.unlock()
+    }
+
     // MARK: - flow_complete pairing
 
     func testFlowCompletePairsEntriesWithDecryptedCredentialsAndTakesTheNotificationIdFromTheBody() async throws {
@@ -1275,10 +1445,8 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         w.eventListener = listener
         _ = w.credentialResponseEncryptionJwk(flowId: "c1", request: request)
         // The profile reaches the wallet through the same callback `connectViaWmp` installs.
-        let profile = OpenID4xProfile(config: OpenID4xConfig(onCancel: { [weak w] flowId in
-            w?.cancelTransactionTasks(flowId: flowId)
-            w?.discardCredentialResponseState(flowId: flowId)
-            w?.resetIssuanceGuards()
+        let profile = OpenID4xProfile(config: OpenID4xConfig(onCancel: { [weak w] flowId, flowType in
+            w?.handleWmpFlowCancel(flowId: flowId, flowType: flowType)
         }))
         await profile.handleCancel(params: FlowCancelParams(flowId: "c1"))
         w.lock.lock(); let has = w.credentialResponseKeys["c1"] != nil; w.lock.unlock()

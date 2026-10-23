@@ -70,6 +70,11 @@ public enum CredentialResponseJwe {
             throw CredentialResponseJweError.malformed("zip and crit are not supported")
         }
 
+        // RFC 7518 section 4.6.1.1: the ephemeral key is a PUBLIC key. One carrying `d` exposes its private half to
+        // whoever relays the message (it could derive the shared secret), so such a response is never accepted.
+        if let epk = header["epk"] as? [String: Any], epk["d"] != nil {
+            throw CredentialResponseJweError.malformed("epk carries a private key")
+        }
         guard let epk = header["epk"] as? [String: Any], epk["kty"] as? String == "EC" else {
             throw CredentialResponseJweError.malformed("epk is missing")
         }

@@ -94,8 +94,10 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
     public func close(reason: String = "complete") async throws {
         // Handlers still running for the orchestrator's child flows end with the session, and answer nothing.
         registry.shutdownProfiles()
+        // The event stream ends whether or not the close notification got through: a consumer must not stay suspended on
+        // a session that is closed.
+        defer { eventContinuation.finish() }
         try await session.close(reason: reason)
-        eventContinuation.finish()
     }
 
     // MARK: - PeerContext (outgoing)

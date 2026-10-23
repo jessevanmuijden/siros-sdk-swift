@@ -134,6 +134,23 @@ final class CredentialResponseJweTests: XCTestCase {
         )) { XCTAssertEqual($0 as? CredentialResponseJweError, .unsupportedCurve) }
     }
 
+    /// RFC 7518 section 4.6.1.1: the ephemeral key is public. A header whose `epk` carries `d` exposes its private half to
+    /// the relay, so the response is refused before any key agreement.
+    func testAnEphemeralKeyWithAPrivateMemberIsRefused() throws {
+        let v = try vectors()
+        let jwe = try XCTUnwrap(v.cases["ECDH-ES|A256GCM"])
+        var parts = jwe.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        var header = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(CredentialResponseJwe.decode(parts[0]))) as? [String: Any])
+        var epk = try XCTUnwrap(header["epk"] as? [String: Any])
+        epk["d"] = "VEmDZpDXXK8p8N0Cndsxs924q6nS1RXFASRl6BfUqdw"
+        header["epk"] = epk
+        parts[0] = CredentialResponseJwe.encode(try JSONSerialization.data(withJSONObject: header))
+        XCTAssertThrowsError(try CredentialResponseJwe.decrypt(parts.joined(separator: "."), recipient: v.recipient)) {
+            guard case .malformed(let why)? = $0 as? CredentialResponseJweError else { return XCTFail("\($0)") }
+            XCTAssertTrue(why.contains("private"), why)
+        }
+    }
+
     // MARK: - RFC vectors for the primitives
 
     /// RFC 7518 Appendix C: Concat KDF over an ECDH-ES agreement, A128GCM, apu "Alice", apv "Bob".
