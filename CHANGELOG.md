@@ -53,6 +53,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AccountDeletionResponse` per backend outcome, and by
   `WscdSelectionPolicy.clearAll()`. The sample app's Devices screen offers it
   with a typed confirmation.
+- **Sensible default display for a credential type that publishes none.** What a
+  card draws when the issuer's type metadata has no rendering block, which is
+  every type that comes from someone else's catalog.
+  SDK: `CredentialUtils.buildMetadata` and `buildMdocMetadata` fall back to the
+  offer's `issuerLogoUri` (the issuer's own mark) as the last `logo` fallback, and
+  the new `CredentialUtils.buildFallbackMetadata(_:)` builds metadata for a
+  credential that has none from what the credential itself carries (name from its
+  configuration id, issuer name from the host of its issuer identifier, `vct` /
+  `docType` from the credential); it sets no colours or logo, which are the
+  issuer's to declare.
+  Sample app card: a tint derived from the type identifier (FNV-1a over the
+  UTF-16 code units, 24 hues x 3 tones, fixed lightness per theme; the same type
+  gives the same colour on every device, in the Kotlin sample app too) instead of
+  one accent colour for every type; text colour chosen by contrast ratio, not by
+  a mid-grey threshold, so no background yields text under 4.5:1; the issuer row
+  is left out when the credential names no issuer, the wire format is no longer a
+  text slot of its own, and the type identifier takes its place beneath the name
+  (dropping out when the name already says it). Mirrors siros-sdk-kotlin
+  [#211](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/211). Not
+  ported: Kotlin's `hydration` marker on `CredentialMetadata` (Swift has no
+  hydration pass).
+- **Issuance start is visible at once.** `startIssuance(offerUri:)` and
+  `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
+  before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
+  (`WalletState.FlowActive.pendingFlowId`, `WalletState.isPendingFlow`) and a
+  client-side `status` that steps through `initializing`, `connecting_engine`,
+  `establishing_session`, `checking_entitlement` (by-offer path only),
+  `preparing_issuance` and `starting_flow` (`WalletState.FlowActive.step*`)
+  until the engine's own progress events take over. Previously the wallet stayed
+  `.ready` for several seconds on a mobile network (engine reconnect,
+  entitlement check, metadata fetches), so hosts showed no feedback after the
+  user chose a credential type. A start that fails (engine unreachable,
+  entitlement refusal) returns the wallet to `.ready` and throws, as before;
+  `cancelCurrentFlow()` during the start resets at once, sends nothing to the
+  engine (there is no flow id), and the suspended start unwinds with
+  `CancellationError` instead of reaching the engine; a cancelled start cannot
+  clobber a newer one (admission, epoch checks, state commits, failure cleanup
+  and cancel share one critical section on the wallet lock). The flow type stays `"issuance"` across the first engine
+  progress event for flows begun this way (before, it became the step name).
+  Both start paths now take the in-flight guard before connecting the engine.
+  Hosts that switch on `flowId` should treat `isPendingFlow` as "no engine flow
+  yet". Not ported yet: Kotlin's recognition of a flow cancelled after
+  `flow_start` was sent but before the engine named it (needs per-connection
+  generations in `WalletEngineSession`). Mirrors siros-sdk-kotlin
+  [#277](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/277).
+- Sample app: labels for the new steps (en, sv); a user-cancelled start is no
+  longer reported as an error.
+- **`zkp_req` (nym_auth rulebook v0.4): planner, unsatisfiable rules, strict CBOR response validator,
+  `proof_time`, prefixed `verifier_id`.** `ZkpReqPlanner` reads the v0.4 DCQL names (`zkp_req`, `_req`,
+  `fn_id`, `return`, `meta.source_format`, `vp_formats_supported.zkp_req` with `system_id_values` and
+  `proof_system_values`); `ZkpReqUnsatisfiable` is the rulebook's request-only rules (`pseudonym` with
+  `ver` and `prf`, one `age_check` of at least 365 days, `verifier_context`, holder binding).
+  `ZkpReqResponseValidator` checks the base64url CBOR `ZkpPresentation` `{system_id, proof,
+  issuer_key_set (at most 8 DER certificates of at most 4096 bytes), proof_time, results}` with its own
+  strict CBOR reader (definite lengths only, duplicate keys refused structurally, depth 16) that walks the
+  raw bytes and its own JSON reader that keeps duplicate members. `ZkpReqProofTime` is the exact 20-byte
+  `YYYY-MM-DDThh:mm:ssZ` form (shape first, parsed only to settle that the instant is real) with the verifier
+  tolerance helper (recommended 60 s skew, 600 s age: the verifier's to configure). The time is the PROVER's;
+  nothing reads a clock here. `ZkpReqPresentationBuilder` encodes a presentation and returns a `vp_token` only
+  after the validator accepts it. `ZkpReqVerifierId` forms the PREFIXED `verifier_id`
+  (`x509_san_dns:<dns>`, `semantic_id:<id>`) whose SHA-256 is `verifier_input`. Tested against the 241
+  vectors of siros-dc-matcher 93047bc (digest 9f482d7a...), verbatim. Supersedes the JSON `circuit_zk`
+  response shape. Not wired into the wallet; the prover seam still refuses.
+- **`DeliveredSecretReceipt`: the wallet's side of delivered secrets (privatedata-spec 5A).**
+  `receive` applies the rules to a Credential Response that carries
+  `org.siros.secret_seed`: refused when the response is not JWE-encrypted, is a deferred
+  response, has no `notification_id`, has a malformed member (1 to 8 namespaces of 1 to
+  64 bytes, not `namespaces`, each seed 32 lowercase hex), has a non-object
+  `credential_metadata`, or fails the commitment (`SHA256(seed) == ssc` for the designated
+  namespace, constant time). It returns the `metadata` entries to store in each credential
+  (in the order received), the display members WITHOUT the seed (strip before merge) and
+  the seeds for the secret store only; `mergedDisplayMetadata` merges the stripped response
+  over the issuer metadata and `advertisement` validates the issuer's namespace-names-only
+  advertisement. Pure; the result and errors never print a seed. Tested against the
+  privatedata-spec 1b796d2 delivered-secret vectors, verbatim. Not wired into the wallet yet.
+- **`circuit_zk` response shape: `CircuitZkX5Chain` and `CircuitZkResponseValidator`.** The
+  presentation now carries `x5chain`, the holder-supplied issuer chain: the credential's own
+  Document Signer chain from `issuerAuth`'s unprotected header (COSE label 33), leaf first,
+  padded STANDARD base64 of each DER certificate, at most 8 certificates and 4096 bytes each
+  (a chain that breaks a limit is never built). `CircuitZkResponseValidator` checks the shape of a
+  `circuit_zk` entry in a `vp_token` and its binding to the request (offer, handles, result
+  shapes; a JSON `null` is a type error everywhere, duplicates are judged on the raw text,
+  unknown functions and members are refused) and is run by a wallet on the response it built.
+  Tested against the 80 shared vectors of siros-dc-matcher 932b07a, copied verbatim. The
+  verification time `T` is not part of this change. Not wired into the wallet.
 - **Keystore: privatedata-spec 3.0, `S.schemaVersion` 4.** `JweKeystore` (and
   `WscdKeystoreAdapter` through it) now writes `S.schemaVersion` 4; migrating a
   version 3 container changes that number and nothing else. It reads versions 1
@@ -169,6 +254,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PUT /user/session/instances/{id}/status`, which the backend no longer has.
   Use `deleteAccount(confirmation:stepUp:)`. `listWalletInstances()` stays.
 ### Changed
+- **One TTL trust-decision cache for every `/v1/evaluate` call (replaces `TrustCache`).**
+  Every trust evaluation (mdoc issuer/reader, engine-relayed verifier/issuer,
+  DC API) now goes through `TrustDecisionCache`: only successful decisions (allow
+  and deny) are remembered, keyed by a hash of the whole request body plus the
+  backend client that answered it, so a different certificate, doc type or context
+  never reuses an entry; errors, timeouts and 4xx/5xx are never cached; an expired
+  entry is never served, even when the backend is unreachable; identical concurrent
+  requests share one backend call; 256 entries, least recently used evicted; in
+  memory only; cleared whenever the backend connection is dropped or replaced
+  (logout, account deletion, reconnect). New `WalletConfig.trustDecisionCacheTtl`
+  (seconds, default 300, `0` disables). Trade-off: a revocation can take up to the
+  TTL to take effect. **Behaviour change:** the old "degraded mode" is gone: an
+  earlier positive verifier result no longer stands in for a failed evaluation
+  (engine path and DC API path now fail closed), and the engine's informational
+  `trust_evaluated` issuer report is no longer cached. `TrustCache` is removed (it
+  had no public members). Ports Kotlin SDK #276, item 4
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/276).
 - **Keystore: containers are written at `S.schemaVersion` 4 (was 3).** Version 3
   readers (older SDKs, a wallet-frontend before spec 3.0) crash on or drop
   `S.extensions` and `S.credentials[].metadata`, which is why spec 3.0 moves them
@@ -233,6 +335,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   associated value) and, with FaceTec 10 linked, it broke the whole package
   build. It now always throws `IDVError.unavailable`. `RemoteIDVProvider`
   is unchanged.
+
+### Fixed
+- **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
+  engine keeps one session per (tenant, user) and closes the older socket when a
+  second connects. The session used to open several at once: `forceReconnect`
+  (after an OAuth redirect or a QR scan) cancelled the old socket, and the receive
+  failure that cancel raises then scheduled a reconnect of its own, as did a
+  failed send and a second `connect()` while still connecting; the sockets
+  superseded each other and a flow's replies went to a socket the engine no longer
+  knew. Now every socket has an epoch: opening one supersedes (and cancels) the
+  previous one and any pending backoff attempt, a callback, frame or reconnect
+  attempt of a superseded socket does nothing (a superseded token refresh no
+  longer sets `.reauthRequired` over the new connection), a failed socket is no
+  longer reported by `isConnected` during the backoff, and a duplicate failure of
+  the same socket schedules one backoff, not two. Ports Kotlin SDK #282
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/282). The client
+  ping never closes the socket on a missing pong (Kotlin keeps its pong wait at
+  10 s or more for the same reason), so no change was needed there. Tested through
+  a fake socket (`EngineSocket`, a new internal seam); not run against a real
+  `URLSessionWebSocketTask` on an Apple platform.
 
 ## [0.14.1] - 2026-09-29
 

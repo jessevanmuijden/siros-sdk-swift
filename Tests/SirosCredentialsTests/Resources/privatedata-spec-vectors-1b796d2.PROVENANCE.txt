@@ -1,0 +1,6 @@
+privatedata-spec-vectors-1b796d2.jsonl is a VERBATIM copy of test-vectors/vectors.jsonl of
+sirosfoundation/privatedata-spec, main, merge commit 1b796d2b9043fff890fd059f47c8b51382d37ff0 (SPEC 2.7).
+Only the delivered-secret-* vectors are used by DeliveredSecretReceiptTests. Never edit by hand; re-copy
+and update the hash in the test when the source changes.
+
+  sha256 2893c0c68da7735ef17da110405161c2f81d09d9faebc1340f00218c4e3f9ec4

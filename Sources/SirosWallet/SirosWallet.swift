@@ -425,7 +425,11 @@ public final class SirosWallet: @unchecked Sendable {
     // Internal (not private) so `@testable import` can seed a fake client
     // directly, matching this file's existing precedent for other testable
     // internals (e.g. `cachedWia`, `currentWalletInstanceId()`).
-    var apiClient: BackendApiClient?
+    var apiClient: BackendApiClient? {
+        // A new, dropped or logged-out backend connection must not inherit
+        // decisions the previous one obtained.
+        didSet { trustDecisionCache.clear() }
+    }
     var engineSession: WalletEngineSession?
     /// Transport-independent notifier for OID4VCI §10 events.
     var credentialNotifier: CredentialNotifier?
@@ -466,6 +470,14 @@ public final class SirosWallet: @unchecked Sendable {
     /// above; guarded by the same `lock`. See `resetIssuanceGuards()` for
     /// why every terminal path must clear it.
     var issuanceInFlight = false
+    /// Identifies the current issuance start attempt - see
+    /// ``IssuanceStartEpoch`` and `SirosWallet+IssuanceStart.swift`.
+    let issuanceStartEpoch = IssuanceStartEpoch()
+    /// Test seam only: called with a window name from inside the start
+    /// state machine's critical sections (`admit.afterGuard`,
+    /// `advance.afterCheck`, `fail.afterCheck`), so a test can make another
+    /// thread race exactly that window. Never set in production.
+    var issuanceStartHook: ((String) -> Void)?
     /// When set, the next `flow_complete` is a renewal's - see
     /// `renewCredential`/`SirosWallet+Notifications.swift`'s `handleFlowComplete`.
     /// Not `private` for the same cross-file-extension-access reason as
@@ -505,11 +517,10 @@ public final class SirosWallet: @unchecked Sendable {
     // `SirosWallet+Engine.swift` need it too - same cross-file-extension-
     // access reason as `keystore` above.
     var pendingAuthorizations: [String: PendingAuthorization] = [:]
-    /// Persistent trust cache for degraded-mode operation.
-    // Not `private`: `SirosWallet+DCAPI.swift` and `SirosWallet+Engine.swift`
-    // need it too - same cross-file-extension-access reason as `keystore`
-    // above.
-    let trustCache = TrustCache()
+    /// The one cache for `/v1/evaluate` decisions (see `TrustDecisionCache`).
+    // Not `private`: the trust call sites live in several extension files -
+    // same cross-file-extension-access reason as `keystore` above.
+    let trustDecisionCache: TrustDecisionCache
 
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one
@@ -733,6 +744,7 @@ public final class SirosWallet: @unchecked Sendable {
         accountRegistry: AccountRegistry? = nil
     ) {
         self.config = config
+        self.trustDecisionCache = TrustDecisionCache(ttl: config.trustDecisionCacheTtl)
         self.transactionDataEnabledValue = config.transactionDataEnabled
         self.authProvider = authProvider
         self.sessionStore = sessionStore
