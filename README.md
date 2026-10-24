@@ -112,6 +112,9 @@ with its own protocol client - compose `SirosKeystore`, `SirosAuth` and
 `SirosCredentials` directly, without `SirosFlow` or the facade. Both are
 supported; see [docs/TWO-APIS.md](docs/TWO-APIS.md).
 
+Issuer and credential logos (https, `data:` raster and SVG, what is accepted and refused): see
+[docs/ISSUER-LOGOS.md](docs/ISSUER-LOGOS.md).
+
 ## Architecture
 
 ```
