@@ -233,6 +233,7 @@
       "nfc_chip_read_failed": "Chippet i ditt dokument kunde inte läsas. Försök igen och håll dokumentet stilla mot telefonens ovansida.",
       "nfc_not_authenticated": "Chippet i ditt dokument kunde inte verifieras, så ingen e-legitimation utfärdades.",
       "chip_untrusted": "Chippet i ditt dokument kunde inte bekräftas som utfärdat av en erkänd myndighet, så ingen e-legitimation utfärdades.",
+      "chip_photo_mismatch": "Ditt ansikte stämde inte med fotot som är lagrat i dokumentets chip, så ingen e-legitimation utfärdades. Försök igen eller använd en annan identitetshandling.",
       "document_expired": "Dokumentet har gått ut, så ingen e-legitimation utfärdades. Använd ett giltigt identitetsdokument.",
       "session_expired": "Verifieringen tog för lång tid eller har redan använts. Börja om.",
       "issuance_failed": "Din identitet verifierades, men e-legitimationen kunde inte utfärdas. Försök igen senare.",

@@ -62,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
+- **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
+  `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
+  not match the photo stored on the document's chip
+  (sirosfoundation/facetec-api#77). Until now the code would have reached the
+  app as `providerError`. Both `FaceTecIDVProvider` and `RemoteIDVClient` map
+  it, the same as siros-sdk-kotlin's `IDVException.ChipPhotoMismatch`. Adding a
+  case breaks exhaustive `switch`es over `IDVError`. The sample app has a
+  message for it in English and Swedish.
 - **CI: the SwiftPM unit tests run on an iOS Simulator (`Test (iOS Simulator)`).** Until now nothing
   ran the `#if os(iOS)` code or tests: `Test (macOS)` compiles them out and `Build (iOS)` only
   compiles. Ten tests that fail only on iOS are skipped by name and tracked in

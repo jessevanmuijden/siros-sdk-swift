@@ -80,6 +80,7 @@ final class RemoteIDVClientTests: XCTestCase {
             ("chip_untrusted", "idv_chip_untrusted"),
             ("document_expired", "idv_document_expired"),
             ("session_expired", "idv_session_expired"),
+            ("chip_photo_mismatch", "idv_chip_photo_mismatch"),
         ]
         for (code, errorCode) in expected {
             let error = RemoteIDVClient.idvError(
@@ -89,7 +90,8 @@ final class RemoteIDVClientTests: XCTestCase {
             XCTAssertEqual(error.errorCode, errorCode, code)
             XCTAssertEqual(error.errorDescription, "the reason", code)
             switch (code, error) {
-            case ("chip_untrusted", .chipUntrusted), ("document_expired", .documentExpired), ("session_expired", .sessionExpired):
+            case ("chip_untrusted", .chipUntrusted), ("document_expired", .documentExpired), ("session_expired", .sessionExpired),
+                 ("chip_photo_mismatch", .chipPhotoMismatch):
                 break
             default:
                 XCTFail("\(code): wrong case \(error)")

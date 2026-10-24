@@ -27,6 +27,7 @@ final class IdvErrorMessageTests: XCTestCase {
             ("nfc_chip_read_failed", .documentChipNotVerified(reason: "nfc_chip_read_failed", message: raw)),
             ("nfc_not_authenticated", .documentChipNotVerified(reason: "nfc_not_authenticated", message: raw)),
             ("chip_untrusted", .chipUntrusted(message: raw)),
+            ("chip_photo_mismatch", .chipPhotoMismatch(message: raw)),
             ("document_expired", .documentExpired(message: raw)),
             ("issuance_failed", .providerError(code: "issuance_failed", message: raw)),
             ("internal_error", .providerError(code: "internal_error", message: raw)),
