@@ -1203,6 +1203,50 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         w.lock.lock(); XCTAssertFalse(w.issuanceInFlight); XCTAssertNil(w.activeAttestedKeyIds); w.lock.unlock()
     }
 
+    // MARK: - WMP completion carries its issuance epoch
+
+    private func encryptedWmpResult() -> AnyCodable {
+        .object_(["credential_response_encrypted": .bool(true), "credentials": .array([.object_(["format": .string("dc+sd-jwt")])])])
+    }
+
+    /// The real WMP path end to end, without a hand-set start tag: the epoch captured when the flow's key was
+    /// created travels with the completion into the trust gate, so the credential is stored and the listener told.
+    func testAnEncryptedWmpCompletionIsStoredAndReportedUnderItsFlowsOriginalEpoch() async throws {
+        let store = InMemoryCredentialStore()
+        let w = wallet(store: store)
+        let listener = Listener()
+        w.eventListener = listener
+        // The key request as the WMP generate_proof makes it (records the flow's epoch) ...
+        _ = w.credentialResponseEncryptionJwk(flowId: "wmp-ok", request: request)
+        // ... then the fixture's known key stands in for the random one so the sample JWE opens.
+        try installKey(w, flowId: "wmp-ok")
+        _ = try await w.decryptCredentialResponse(flowId: "wmp-ok", jwe: Self.jwe, deferred: false)
+
+        await w.handleWmpFlowComplete(flowId: "wmp-ok", result: encryptedWmpResult())
+
+        let stored = await store.getAll()
+        XCTAssertEqual(stored.count, 1, "the paired credential reaches the store")
+        XCTAssertEqual(listener.completed, ["wmp-ok"])
+        XCTAssertTrue(listener.errors.isEmpty)
+    }
+
+    /// No recorded epoch means the issuance cannot be established: refused with an error, not dropped silently.
+    func testAnEncryptedWmpCompletionWithoutAnEpochIsRefusedNotDropped() async throws {
+        let store = InMemoryCredentialStore()
+        let w = wallet(store: store)
+        let listener = Listener()
+        w.eventListener = listener
+        try installKey(w, flowId: "wmp-none")          // a key with no recorded epoch
+        _ = try await w.decryptCredentialResponse(flowId: "wmp-none", jwe: Self.jwe, deferred: false)
+
+        await w.handleWmpFlowComplete(flowId: "wmp-none", result: encryptedWmpResult())
+
+        let stored = await store.getAll()
+        XCTAssertTrue(stored.isEmpty)
+        XCTAssertEqual(listener.errors.count, 1, "the failure reaches the listener")
+        XCTAssertTrue(listener.completed.isEmpty)
+    }
+
     // MARK: - flow_complete pairing
 
     func testFlowCompletePairsEntriesWithDecryptedCredentialsAndTakesTheNotificationIdFromTheBody() async throws {

@@ -86,6 +86,10 @@ public final class SirosWallet: @unchecked Sendable {
     /// refused. Removed when the flow ends and when the session does.
     var offeredResponseKeyFlows: Set<String> = []
     var responseKeyOrigin: [String: (engine: ObjectIdentifier, generation: Int)] = [:]
+    /// The issuance epoch in force when a WMP flow first asked this wallet for its response key: the tag a
+    /// completion over WMP is processed under (the WebSocket carries it as `FlowCompleteMessage.startTag`, which has
+    /// no wire form). Removed with the flow's other blind-issuance state.
+    var wmpFlowIssuanceEpochs: [String: Int] = [:]
     /// Set when the session ends (logout, destroy, a refused installation); a new connection clears it.
     var blindSessionEnded = false
     /// Validates and splits a decrypted response's `credential_metadata` (see `CredentialMetadataReceiver`).
