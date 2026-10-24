@@ -176,6 +176,40 @@ final class LogoSanitizerImageTests: XCTestCase {
         }
     }
 
+    func testExifOrientationBakedIntoPixels() {
+        let jpg = encode(makeImage(width: 40, height: 20), uti: "public.jpeg", properties: [kCGImagePropertyOrientation: 6])
+        guard case .success(let logo) = LogoSanitizer.sanitize(uri("image/jpeg", jpg)) else { return XCTFail() }
+        assertCleanPng(logo, width: 20, height: 40) // rotated, not sideways
+    }
+
+    /// A decoy end marker inside metadata must not make a truncated file look complete.
+    func testPngDecoyIendInMetadataDoesNotHideTruncation() {
+        let png = [UInt8](encode(makeImage(width: 64, height: 64), uti: "public.png"))
+        let iend: [UInt8] = [0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]
+        // Ancillary chunk "prVt" whose data contains an IEND-looking sequence (CRC not checked by the guard).
+        let dataLen = iend.count
+        let chunk: [UInt8] = [0, 0, 0, UInt8(dataLen)] + Array("prVt".utf8) + iend + [0, 0, 0, 0]
+        let withDecoy = Array(png[0..<33]) + chunk + Array(png[33...])
+        XCTAssertTrue(LogoSanitizer.hasEndMarker(Data(withDecoy), mediaType: "image/png"))
+        let truncated = Data(withDecoy.prefix(33 + chunk.count + (png.count - 33) / 2))
+        XCTAssertFalse(LogoSanitizer.hasEndMarker(truncated, mediaType: "image/png"))
+        XCTAssertFalse(LogoSanitizer.hasEndMarker(Data(withDecoy.dropLast(1)), mediaType: "image/png"))
+        if case .failure = LogoSanitizer.sanitize(uri("image/png", truncated)) {} else { XCTFail("truncated PNG accepted") }
+    }
+
+    /// An EXIF thumbnail's EOI must not make a truncated main image look complete.
+    func testJpegThumbnailEoiDoesNotHideTruncation() {
+        let jpg = [UInt8](encode(makeImage(width: 64, height: 64), uti: "public.jpeg"))
+        // APP1 segment (length covers itself) holding an embedded mini-JPEG with its own SOI/EOI.
+        let payload: [UInt8] = [0xFF, 0xD8, 0x41, 0x42, 0xFF, 0xD9]
+        let seg: [UInt8] = [0xFF, 0xE1, 0, UInt8(2 + payload.count)] + payload
+        let withThumb = Array(jpg[0..<2]) + seg + Array(jpg[2...])
+        XCTAssertTrue(LogoSanitizer.hasEndMarker(Data(withThumb), mediaType: "image/jpeg"))
+        XCTAssertFalse(LogoSanitizer.hasEndMarker(Data(withThumb.prefix(2 + seg.count + (jpg.count - 2) / 2)), mediaType: "image/jpeg"))
+        // Trailing bytes after a complete image are still fine.
+        XCTAssertTrue(LogoSanitizer.hasEndMarker(Data(withThumb + [1, 2, 3]), mediaType: "image/jpeg"))
+    }
+
     func testDeclaredTypeMustMatchContent() {
         let png = encode(makeImage(width: 4, height: 4), uti: "public.png")
         if case .failure(.undecodable) = LogoSanitizer.sanitize(uri("image/jpeg", png)) {} else {

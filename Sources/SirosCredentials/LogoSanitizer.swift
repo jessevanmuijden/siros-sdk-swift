@@ -151,16 +151,26 @@ public enum LogoSanitizer {
 
         // Dimensions come from the header, before any pixel buffer exists.
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-              w > 0, h > 0
+              let srcW = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let srcH = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              srcW > 0, srcH > 0
         else { return .failure(.undecodable) }
-        guard w <= maxDimension, h <= maxDimension else { return .failure(.dimensionsTooLarge) }
+        guard srcW <= maxDimension, srcH <= maxDimension else { return .failure(.dimensionsTooLarge) }
 
-        guard let image = CGImageSourceCreateImageAtIndex(source, 0, sourceOptions),
-              CGImageSourceGetStatus(source) == .statusComplete,
-              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete
-        else { return .failure(.undecodable) }
+        // The thumbnail API is ImageIO's way to get pixels with the EXIF
+        // orientation applied (the metadata is dropped below). The max size is
+        // the cap, which the header check above already enforced.
+        let thumbOptions: CFDictionary = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+            kCGImageSourceShouldCache: false,
+        ] as CFDictionary
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions) else {
+            return .failure(.undecodable)
+        }
+        let w = image.width, h = image.height
+        guard w > 0, h > 0, w <= maxDimension, h <= maxDimension else { return .failure(.undecodable) }
 
         // Redraw into a known sRGB RGBA bitmap: only pixels cross over.
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
@@ -186,26 +196,58 @@ public enum LogoSanitizer {
 
     /// Truncation check. This is an integrity check for the user's benefit (a
     /// half-drawn logo), not a security boundary: the output is rebuilt from
-    /// pixels either way. Looks for the format's end marker anywhere, so a
-    /// complete image followed by trailing junk still passes (and is then
-    /// cleaned). GIF has no reliable marker to search for and is not checked.
+    /// pixels either way. It walks the container structure (PNG chunks, JPEG
+    /// segments) so a marker embedded in metadata (e.g. an EXIF thumbnail's
+    /// EOI) cannot stand in for the real end. A complete image followed by
+    /// trailing bytes still passes (and is then cleaned). GIF has no cheap
+    /// structural end and is not checked.
     static func hasEndMarker(_ d: Data, mediaType: String) -> Bool {
+        let b = [UInt8](d)
         switch mediaType {
-        case "image/png":
-            // IEND chunk: length 0, "IEND", fixed CRC.
-            let iend = Data([0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82])
-            return d.range(of: iend) != nil
-        case "image/jpeg":
-            return d.range(of: Data([0xFF, 0xD9])) != nil
+        case "image/png": return pngHasIend(b)
+        case "image/jpeg": return jpegHasEoi(b)
         case "image/webp":
             // RIFF header: bytes 4..<8 are the little-endian size of what follows.
-            guard d.count >= 12 else { return false }
-            let b = Array(d.prefix(8))
+            guard b.count >= 12 else { return false }
             let size = Int(b[4]) | Int(b[5]) << 8 | Int(b[6]) << 16 | Int(b[7]) << 24
-            return size + 8 <= d.count
+            return size + 8 <= b.count
         default:
             return true
         }
+    }
+
+    private static func pngHasIend(_ b: [UInt8]) -> Bool {
+        var i = 8 // after the signature
+        while i + 12 <= b.count {
+            let len = Int(b[i]) << 24 | Int(b[i + 1]) << 16 | Int(b[i + 2]) << 8 | Int(b[i + 3])
+            guard len <= b.count - i - 12 else { return false } // chunk runs past the end
+            if b[i + 4] == 0x49, b[i + 5] == 0x45, b[i + 6] == 0x4E, b[i + 7] == 0x44 { return len == 0 }
+            i += 12 + len
+        }
+        return false
+    }
+
+    private static func jpegHasEoi(_ b: [UInt8]) -> Bool {
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return false }
+        var i = 2
+        while i + 1 < b.count {
+            guard b[i] == 0xFF else { return false }
+            let m = b[i + 1]
+            if m == 0xFF { i += 1; continue } // fill byte
+            if m == 0xD9 { return true }
+            if m == 0x01 || (0xD0...0xD8).contains(m) { i += 2; continue } // standalone
+            guard i + 3 < b.count else { return false }
+            let len = Int(b[i + 2]) << 8 | Int(b[i + 3])
+            guard len >= 2, i + 2 + len <= b.count else { return false } // segment runs past the end
+            i += 2 + len
+            if m == 0xDA { // entropy-coded data: skip to the next real marker
+                while i + 1 < b.count {
+                    if b[i] == 0xFF, b[i + 1] != 0x00, !(0xD0...0xD7).contains(b[i + 1]) { break }
+                    i += 1
+                }
+            }
+        }
+        return false
     }
 
     #if canImport(ImageIO)
