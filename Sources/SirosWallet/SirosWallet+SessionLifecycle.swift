@@ -180,7 +180,11 @@ extension SirosWallet {
         // is recognised and refused rather than mistaken for a legacy callback) or a
         // completion in flight must not be acted on with the next account's engine,
         // tokens or trust-gate state.
-        issuanceEpoch &+= 1
+        // (`resetIssuanceGuardsLocked` also advances `issuanceEpoch` and RELEASES the
+        // in-flight guard: a start invalidated below returns early from its failure
+        // path, so nothing else would ever release it and every later issuance or
+        // renewal would be refused.)
+        resetIssuanceGuardsLocked()
         // A start still preparing (metadata fetches, token refresh) belongs to the
         // ended session too: it must unwind at its next epoch-checked step instead of
         // committing its old offer or dispatching under the next account.

@@ -523,6 +523,13 @@ final class IssuanceTrustGateTests: XCTestCase {
             XCTAssertTrue(error is CancellationError)
         }
         XCTAssertThrowsError(try wallet.dispatchIssuanceStart(epoch: epoch) { XCTFail("must not dispatch") })
+        // The stale start's own failure path returns early (stale epoch) and releases
+        // nothing, so the session change itself must have released the guard ...
+        XCTAssertFalse(wallet.failIssuanceStart(epoch, SirosError.wallet(message: "x")) is SirosError)
+        wallet.lock.lock(); let held = wallet.issuanceInFlight; wallet.lock.unlock()
+        XCTAssertFalse(held, "the in-flight guard was released by the session change")
+        // ... so a NEW issuance on the new session can be admitted.
+        XCTAssertNoThrow(try wallet.admitIssuanceStart())
     }
 
     func testAnAuthorizationThatCannotBeTiedToItsIssuanceIsRefused() {
