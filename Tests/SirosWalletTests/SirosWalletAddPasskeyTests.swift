@@ -19,28 +19,48 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         private(set) var registrations: [RegisterOptions] = []
         private(set) var order: [String] = []
         private(set) var rollbackCalls = 0
+        /// Ids removed by `rollbackRegistration(credentialId:)`, and ids that
+        /// `rollbackLastRegistration()` removed (the provider's most recent one).
+        private(set) var rolledBackIds: [Data] = []
+        private(set) var rolledBackLastIds: [Data] = []
+        /// Models `LocalAuthProvider.lastCredentialId`: the credential the
+        /// provider touched most recently, whether registered or used.
+        private(set) var lastCredentialId: Data?
+        /// When set, each `register` makes a new credential id `new-pk-<n>`.
+        var distinctCredentialIds = false
+        private var registerCount = 0
+        private(set) var prfSaltsEvaluated: [Data] = []
         var assertionFailure: Error?
         var registerFailure: Error?
         var prf: PrfOutput? = PrfOutput(first: Data(repeating: 0x42, count: 32))
         var prfCeremony: Result<PrfOutput, Error> = .failure(SirosError.auth(message: "no prf"))
         func register(options: RegisterOptions) async throws -> RegisterResult {
-            lock.lock(); registrations.append(options); order.append("create"); lock.unlock()
+            lock.lock(); registrations.append(options); order.append("create"); registerCount += 1
+            let id = Data((distinctCredentialIds ? "new-pk-\(registerCount)" : "new-pk").utf8)
+            lastCredentialId = id
+            lock.unlock()
             if let registerFailure { throw registerFailure }
             return RegisterResult(
-                credentialId: Data("new-pk".utf8), attestationObject: Data([7]), clientDataJSON: Data([8]), prfOutput: prf
+                credentialId: id, attestationObject: Data([7]), clientDataJSON: Data([8]), prfOutput: prf
             )
         }
         func authenticate(options: AuthenticateOptions) async throws -> AuthenticateResult {
-            lock.lock(); assertions.append(options); order.append("assert"); lock.unlock()
+            lock.lock(); assertions.append(options); order.append("assert"); lastCredentialId = Data("pk-1".utf8); lock.unlock()
             if let assertionFailure { throw assertionFailure }
             return AuthenticateResult(
                 credentialId: Data("pk-1".utf8), authenticatorData: Data([1]), clientDataJSON: Data([2]),
                 signature: Data([3]), userHandle: Data([4])
             )
         }
-        func getPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput { try prfCeremony.get() }
+        func getPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput {
+            lock.lock(); prfSaltsEvaluated.append(salt); lock.unlock()
+            return try prfCeremony.get()
+        }
         func rollbackLastRegistration() {
-            lock.lock(); rollbackCalls += 1; lock.unlock()
+            lock.lock(); rollbackCalls += 1; if let lastCredentialId { rolledBackLastIds.append(lastCredentialId) }; lock.unlock()
+        }
+        func rollbackRegistration(credentialId: Data) {
+            lock.lock(); rollbackCalls += 1; rolledBackIds.append(credentialId); lock.unlock()
         }
     }
 
@@ -67,6 +87,9 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
     private final class RecordingKeystore: KeystoreManager, @unchecked Sendable {
         var isUnlocked = true
         var prepareError: Error?
+        var commitError: Error?
+        /// What `exportEncryptedContainer` returns; must be JSON for a sync to POST it.
+        var exportPayload = Data("exported".utf8)
         private let opLock = NSLock()
         private(set) var prepared: [(credentialId: Data, prfOutput: Data, prfSalt: Data, hkdfSalt: Data, hkdfInfo: Data)] = []
         private(set) var committed: [Data] = []
@@ -81,10 +104,20 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             credentialId: Data, prfOutput: Data, prfSalt: Data, hkdfSalt: Data, hkdfInfo: Data
         ) async throws -> PreparedPrfKey {
             if let prepareError { throw prepareError }
+            opLock.lock()
             prepared.append((credentialId, prfOutput, prfSalt, hkdfSalt, hkdfInfo))
-            return PreparedPrfKey(container: Data("container-for-new-pk".utf8), credentialId: credentialId)
+            // A snapshot of the container AS IT IS NOW: it names every entry
+            // committed so far, so a snapshot taken before an earlier commit
+            // is visibly older.
+            let snapshot = prepareSnapshotsFollowCommits
+                ? "container[\(committed.map { String(decoding: $0, as: UTF8.self) }.joined(separator: ","))+\(String(decoding: credentialId, as: UTF8.self))]"
+                : "container-for-new-pk"
+            opLock.unlock()
+            return PreparedPrfKey(container: Data(snapshot.utf8), credentialId: credentialId)
         }
+        var prepareSnapshotsFollowCommits = false
         func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+            if let commitError { throw commitError }
             opLock.lock(); committed.append(prepared.credentialId); operationOrder.append("commit"); opLock.unlock()
         }
         func generateKey(algorithm: String) async throws -> String { "key" }
@@ -94,7 +127,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         func signVpToken(credential: String, disclosedClaims: [String]?, nonce: String, audience: String, kid: String?) async throws -> String { "" }
         func exportEncryptedContainer() async throws -> Data {
             opLock.lock(); operationOrder.append("export"); opLock.unlock()
-            return Data("exported".utf8)
+            return exportPayload
         }
         func listKeys() -> [KeyInfo] { [] }
         func saveCredential(id: Int64, json: String) async throws {}
@@ -123,6 +156,33 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         /// Opened the moment a `register-finish` request is actually sent,
         /// so a test can wait for "the finish is in flight" without a guess.
         let finishStarted = Gate()
+
+        /// `X-Private-Data-ETag` to send back, by path suffix. Only a
+        /// transport that sees headers (`responseFn`) can learn it.
+        var etags: [String: String] = [:]
+        /// Etag handed out per register-finish, in order (the n-th finish gets the n-th).
+        var finishEtags: [String] = []
+        private var finishCount = 0
+
+        var responseFn: HttpResponseFunction {
+            { [self] method, url, headers, body in
+                var status = 200
+                var data = Data()
+                do { data = try await httpFn(method, url, headers, body) } catch SirosError.backendApi(let code, _, let errorBody) {
+                    status = code; data = Data((errorBody ?? "").utf8)
+                }
+                var out: [String: String] = [:]
+                lock.lock()
+                if status == 200, url.path.hasSuffix("register-finish") {
+                    if finishCount < finishEtags.count { out["X-Private-Data-ETag"] = finishEtags[finishCount] }
+                    finishCount += 1
+                } else if status == 200, let tag = etags.first(where: { url.path.hasSuffix($0.key) })?.value {
+                    out["X-Private-Data-ETag"] = tag
+                }
+                lock.unlock()
+                return HttpResponse(status: status, data: data, headers: out)
+            }
+        }
 
         func failFinish(_ code: Int, _ body: String) {
             finish = .failure(SirosError.backendApi(code: code, message: "failed", body: body))
@@ -657,6 +717,231 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         // account cache still shows only the original passkey.
         XCTAssertTrue(f.keystore.committed.isEmpty, "must not commit into the keystore of a session that moved on")
         assertUnchanged(f)
+    }
+
+    // MARK: - Review fixes (#197)
+
+    private struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
+
+    private func etagClient(_ f: Fixture) -> BackendApiClient {
+        let client = BackendApiClient(baseUrl: "https://wallet.example.invalid", responseFn: f.server.responseFn)
+        client.setAppToken("t")
+        return client
+    }
+
+    private func finishCalls(_ f: Fixture) -> [Server.Call] { f.server.calls.filter { $0.path.hasSuffix("register-finish") } }
+
+    private func sentContainer(_ call: Server.Call) -> String {
+        let b64 = (call.body?["privateData"] as? [String: Any])?["$b64u"] as? String
+        return b64.flatMap { SirosWallet.b64UrlDecode($0) }.map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
+
+    /// Ordinary syncs must persist the ETag they learn beside the container,
+    /// or after a restart (a fresh client with no tag) enrolment sends none
+    /// (overwriting another device's changes) or an older one (a false conflict).
+    func testOrdinarySyncsPersistTheirEtagSoARestartedEnrolmentCarriesIt() async throws {
+        let f = makeFixture()
+        f.keystore.exportPayload = Data(#"{"jwe":"x"}"#.utf8)
+        f.wallet.apiClient = etagClient(f)
+
+        f.server.etags["private-data"] = "etag-sync-1"
+        await f.wallet.persistAndSyncKeystore()
+        XCTAssertEqual(f.sessionStore.privateDataEtag, "etag-sync-1")
+        f.server.etags["private-data"] = "etag-sync-2"
+        await f.wallet.persistAndSyncKeystore()
+        XCTAssertEqual(f.sessionStore.privateDataEtag, "etag-sync-2", "the newest write's tag, not the first one's")
+
+        // A restart: the client is new and has learnt nothing.
+        f.server.etags = [:]
+        f.wallet.apiClient = etagClient(f)
+        let result = try await f.wallet.addPasskey(nickname: "Laptop")
+
+        guard case .added = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(finishCalls(f).first?.headers["X-Private-Data-If-Match"], "etag-sync-2")
+    }
+
+    /// The registration path syncs through `syncPrivateDataToBackend()` itself.
+    func testTheRegistrationSyncPersistsItsEtag() async throws {
+        let f = makeFixture()
+        f.sessionStore.privateDataJwe = #"{"jwe":"registered"}"#
+        f.wallet.apiClient = etagClient(f)
+        f.server.etags["private-data"] = "etag-registration"
+
+        try await f.wallet.syncPrivateDataToBackend()
+
+        XCTAssertEqual(f.sessionStore.privateDataEtag, "etag-registration")
+    }
+
+    /// A sync that finishes after the session moved on must not write its tag
+    /// under the account that is active now.
+    func testASyncThatOutlivesItsSessionDoesNotWriteItsEtagIntoTheNextAccount() async throws {
+        let f = makeFixture()
+        let old = etagClient(f)
+        f.wallet.apiClient = old
+        f.server.etags["private-data"] = "etag-of-account-1"
+        // The session moves on: another client is installed before the sync returns.
+        f.wallet.apiClient = etagClient(f)
+
+        try await f.wallet.syncPrivateDataToBackend(using: old, containerJson: #"{"jwe":"x"}"#)
+
+        XCTAssertNil(f.sessionStore.privateDataEtag)
+    }
+
+    // MARK: PRF salt of the entry that matched
+
+    /// A passkey added on another device has no cache entry here, so the
+    /// assertion fell back to this installation's stored salt - the first
+    /// passkey's. The output is then for the wrong input: it must be evaluated
+    /// again with the matched entry's own salt, and reported as recovered so
+    /// the cache is healed.
+    func testAPrfOutputDerivedFromTheWrongSaltIsReevaluatedWithTheEntrysOwnSalt() async throws {
+        let f = makeFixture()
+        f.auth.prfCeremony = .success(PrfOutput(first: Data(repeating: 0x77, count: 32)))
+        let container = try twoPasskeyContainer(
+            first: Data("pk-1".utf8), second: Data("pk-2".utf8),
+            firstSalt: Data(repeating: 0x11, count: 32), secondSalt: Data(repeating: 0x22, count: 32)
+        )
+        let wrongSalt = Data([1, 2, 3])  // the stored first-passkey salt; pk-2's entry has Data([9])
+        let assertion = SirosWallet.PasskeyAssertion(
+            challengeId: "c", credential: [:], prfOutput: PrfOutput(first: Data([1])), prfSalt: wrongSalt,
+            cachedAccount: nil, credentialId: Data("pk-2".utf8)
+        )
+
+        let login = try await f.wallet.resolveLoginPrf(assertion: assertion, privateData: container, cachedAccount: nil)
+        XCTAssertEqual(login.prfOutput.first, Data(repeating: 0x77, count: 32))
+        XCTAssertEqual(login.prfSalt, Data([9]))
+        XCTAssertEqual(login.recoveredSalt, Data([9]), "reported as recovered so the cache is healed")
+        XCTAssertEqual(f.auth.prfSaltsEvaluated, [Data([9])])
+
+        let unlock = try await f.wallet.resolveUnlockKeystorePrf(assertion: assertion, storedContainer: container)
+        XCTAssertEqual(unlock.prfOutput.first, Data(repeating: 0x77, count: 32))
+        XCTAssertEqual(unlock.recoveredSalt, Data([9]))
+    }
+
+    // MARK: Backend acceptance is final
+
+    /// Once `register-finish` said `added`, a local commit failure must not
+    /// roll the authenticator credential back (the backend still has its PRF
+    /// entry): the failure is reported, the caches carry the accepted
+    /// container, and the keystore is locked so nothing can push one without it.
+    func testACommitFailureAfterTheBackendAcceptedDoesNotRollBackThePasskey() async throws {
+        let f = makeFixture()
+        f.keystore.commitError = Boom()
+
+        let result = try await f.wallet.addPasskey(nickname: "Laptop")
+
+        guard case let .localCommitFailed(credentialId, message) = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(credentialId, "bmV3LXBr")
+        XCTAssertEqual(message, "boom")
+        XCTAssertEqual(f.auth.rollbackCalls, 0, "an accepted passkey is not rolled back")
+        XCTAssertEqual(f.sessionStore.privateDataJwe, "container-for-new-pk", "the cache holds what the backend accepted")
+        XCTAssertEqual(
+            f.registry.findAccount(accountId: "default:user-1")?.passkeys.map(\.credentialId),
+            ["cGstMQ", SirosWallet.b64UrlEncode(Data("new-pk".utf8))]
+        )
+        XCTAssertFalse(f.keystore.isUnlocked, "locked, so no export can drop the accepted entry")
+    }
+
+    /// `rollbackLastRegistration()` removes whatever credential the provider
+    /// touched most recently - which, while the finish is pending, can be the
+    /// ORIGINAL passkey used for another authorisation. The rollback must name
+    /// the credential this enrolment created.
+    func testARefusedFinishRollsBackOnlyTheCredentialItCreated() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        f.server.finishGate = gate
+        f.server.failFinish(400, #"{"error":"bad"}"#)
+
+        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
+        await f.server.finishStarted.wait()
+        // Another authorisation with the original passkey while finish is pending.
+        _ = try await f.auth.authenticate(options: AuthenticateOptions(rpId: "wallet.example.com", challenge: Data([1])))
+        await gate.open()
+
+        let result = try await addTask.value
+        guard case .registrationRejected = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(f.auth.rolledBackIds, [Data("new-pk".utf8)])
+        XCTAssertTrue(f.auth.rolledBackLastIds.isEmpty, "never 'the last one': that was pk-1")
+    }
+
+    // MARK: Enrolment is one transaction
+
+    /// Two enrolments must not snapshot the same container: the second is
+    /// prepared only after the first committed, so what it sends includes the
+    /// first's entry, under the tag the first finish returned.
+    func testOverlappingEnrolmentsAreSerialisedSoTheSecondSnapshotIncludesTheFirst() async throws {
+        let f = makeFixture()
+        f.auth.distinctCredentialIds = true
+        f.keystore.prepareSnapshotsFollowCommits = true
+        f.server.finishEtags = ["e1", "e2"]
+        f.wallet.apiClient = etagClient(f)
+
+        async let a = f.wallet.addPasskey(nickname: "A")
+        async let b = f.wallet.addPasskey(nickname: "B")
+        let (ra, rb) = try await (a, b)
+
+        guard case .added = ra, case .added = rb else { return XCTFail("got \(ra) \(rb)") }
+        let calls = finishCalls(f)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertTrue(sentContainer(calls[0]).hasPrefix("container[+"), "the first sees no earlier entry: \(sentContainer(calls[0]))")
+        XCTAssertFalse(sentContainer(calls[1]).hasPrefix("container[+"),
+                       "the second snapshot must include the first's entry: \(sentContainer(calls[1]))")
+        XCTAssertEqual(calls[1].headers["X-Private-Data-If-Match"], "e1", "the tag that matches the snapshot it sends")
+        XCTAssertEqual(f.sessionStore.privateDataEtag, "e2")
+        XCTAssertEqual(f.keystore.committed.count, 2)
+    }
+
+    /// A sync queued behind an enrolment runs after the enrolment published
+    /// its cache, so the final cache is the sync's container under its tag -
+    /// not the enrolment's older container re-written over it.
+    func testASyncQueuedBehindAnEnrolmentLeavesItsOwnContainerAndEtagInTheCache() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        f.server.finishGate = gate
+        f.server.finishEtags = ["e-add"]
+        f.server.etags["private-data"] = "e-sync"
+        f.keystore.exportPayload = Data(#"{"jwe":"sync"}"#.utf8)
+        f.wallet.apiClient = etagClient(f)
+
+        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
+        await f.server.finishStarted.wait()
+        async let sync: Void = f.wallet.persistAndSyncKeystore()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await gate.open()
+
+        let result = try await addTask.value
+        _ = try await sync
+        guard case .added = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(f.keystore.operationOrder, ["commit", "export"])
+        XCTAssertEqual(f.sessionStore.privateDataJwe, #"{"jwe":"sync"}"#)
+        XCTAssertEqual(f.sessionStore.privateDataEtag, "e-sync")
+    }
+
+    /// An enrolment whose response lands while the session scope is being
+    /// replaced must not be applied, even though no generation was bumped yet:
+    /// login, register, resume and unlock change the scope and the keystore
+    /// BEFORE they bump it. `resumeSession()` is one of those entry points.
+    func testASessionScopeChangeBeforeTheGenerationBumpStillDiscardsTheEnrolment() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        f.server.finishGate = gate
+
+        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
+        await f.server.finishStarted.wait()
+        await f.wallet.resumeSession()
+        // The scope is now another account, with its own cached container.
+        f.sessionStore.activeAccountId = "default:user-2"
+        f.sessionStore.privateDataJwe = "user-2-container"
+        await gate.open()
+
+        let result = try await addTask.value
+
+        guard case .sessionChanged = result else { return XCTFail("got \(result)") }
+        XCTAssertTrue(f.keystore.committed.isEmpty, "the new account's keystore is not touched")
+        XCTAssertEqual(f.sessionStore.privateDataJwe, "user-2-container")
+        f.sessionStore.activeAccountId = "default:user-1"
+        assertUnchanged(f)
+        XCTAssertEqual(f.auth.rollbackCalls, 0, "the backend accepted it: the passkey stays")
     }
 
     // MARK: - excludeCredentials (review finding)

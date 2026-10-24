@@ -594,17 +594,22 @@ public struct PreparedPrfKey: Sendable {
     public let credentialId: Data
     /// The entry itself; nil for a keystore that has its own way to commit.
     let entry: PrfKeyInfo?
+    /// The unlocked session of the preparing keystore this was prepared in,
+    /// checked on commit; see `JweKeystore.unlockToken`.
+    let ownerToken: UUID?
 
     public init(container: Data, credentialId: Data) {
         self.container = container
         self.credentialId = credentialId
         self.entry = nil
+        self.ownerToken = nil
     }
 
-    init(container: Data, credentialId: Data, entry: PrfKeyInfo) {
+    init(container: Data, credentialId: Data, entry: PrfKeyInfo, ownerToken: UUID) {
         self.container = container
         self.credentialId = credentialId
         self.entry = entry
+        self.ownerToken = ownerToken
     }
 }
 

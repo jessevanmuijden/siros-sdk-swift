@@ -110,6 +110,12 @@ facetec-api contract the provider keeps and the error-code table.
 switch try await wallet.addPasskey(nickname: "Laptop") {
 case .added:
     break  // the new passkey can now unlock the wallet's data too
+case .sessionChanged:
+    break  // the backend accepted it for the account it was started for, but the
+           // active session changed meanwhile, so nothing was applied locally
+case .localCommitFailed:
+    break  // the backend accepted it and the cached container has it; the wallet
+           // locked its keystore - unlock again to pick the new entry up
 case .authorizationRequired, .authorizationFailed, .retryNeeded, .privateDataConflict:
     break  // nothing changed; call again (the backend's challenge was spent)
 case .authorizerUnavailable, .passkeyCreationUnavailable, .prfUnsupported,

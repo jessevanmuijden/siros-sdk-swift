@@ -315,6 +315,19 @@ extension SirosWallet {
         }
     }
 
+    /// PRF output for `credentialId` evaluated over `salt`, with the same
+    /// "authenticator cannot do PRF" error `recoverPrfFromPrivateData` gives.
+    func recoverPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput {
+        do {
+            return try await authProvider.getPrfOutput(credentialId: credentialId, salt: salt)
+        } catch {
+            throw SirosError.wallet(
+                message: "PRF not supported by authenticator — cannot decrypt wallet data",
+                underlying: error
+            )
+        }
+    }
+
     /// The `PrfKeyInfo` entry of `credentialId` in `privateData`, or nil when the
     /// container is empty, unreadable or has no entry for it.
     func ownPrfKeyInfo(credentialId: Data, in privateData: Data) -> PrfKeyInfo? {
@@ -400,6 +413,21 @@ extension SirosWallet {
             // doc comment) the verified anonymous entry.
             let own = ownPrfKeyInfo(credentialId: assertion.credentialId, in: privateData)
                 ?? anonymousOriginalPrfKeyInfo(credentialId: assertion.credentialId, account: cachedAccount, in: privateData)
+            // The salt the PRF output was evaluated with must be the one the
+            // matched entry was created with. A passkey added on another
+            // device has no cache entry here, and `performPasskeyAssertion`
+            // then falls back to this installation's stored salt - the FIRST
+            // passkey's - so the output is for the wrong input even though
+            // the entry's HKDF parameters are right. Evaluate again with the
+            // entry's own salt, and report it as recovered so the account
+            // cache is healed by the successful login.
+            if let own, !own.prfSalt.isEmpty, own.prfSalt != knownPrfSalt {
+                let output = try await recoverPrfOutput(credentialId: assertion.credentialId, salt: own.prfSalt)
+                return LoginPrfResolution(
+                    prfOutput: output, prfSalt: own.prfSalt,
+                    hkdfSalt: own.hkdfSalt, hkdfInfo: own.hkdfInfo, recoveredSalt: own.prfSalt
+                )
+            }
             let hkdfSalt = own?.hkdfSalt
                 ?? sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
                 ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfSalt) }
@@ -484,6 +512,14 @@ extension SirosWallet {
             // including the verified-anonymous-entry fallback.
             let own = ownPrfKeyInfo(credentialId: assertion.credentialId, in: storedContainer)
                 ?? anonymousOriginalPrfKeyInfo(credentialId: assertion.credentialId, account: assertion.cachedAccount, in: storedContainer)
+            // See `resolveLoginPrf`: re-evaluate PRF with the entry's own salt
+            // when the output was derived from a different one.
+            if let own, !own.prfSalt.isEmpty, let usedSalt = assertion.prfSalt, own.prfSalt != usedSalt {
+                let output = try await recoverPrfOutput(credentialId: assertion.credentialId, salt: own.prfSalt)
+                return UnlockKeystorePrfResolution(
+                    prfOutput: output, hkdfSalt: own.hkdfSalt, hkdfInfo: own.hkdfInfo, recoveredSalt: own.prfSalt
+                )
+            }
             guard let hkdfSalt = own?.hkdfSalt ?? sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
                 throw SirosError.keystore(message: "Missing HKDF salt")
             }

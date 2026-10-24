@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Add passkey: review fixes (#197).** Enrolment is one transaction under the keystore-container lock (prepare, the
+  matching ETag, finish, commit and cache publication), so overlapping enrolments and queued syncs cannot send an
+  older snapshot under a newer tag; it is invalidated before login, register, resume and unlock replace the session
+  scope, and a prepared key is refused by a keystore that was locked and unlocked since (new
+  `AddPasskeyResult.localCommitFailed`: a commit failure after the backend accepted no longer rolls the passkey back).
+  Rollback names the credential it created (new `AuthProvider.rollbackRegistration(credentialId:)`, default falls back
+  to `rollbackLastRegistration()`). Every successful private-data sync persists its ETag. `WscdKeystoreAdapter`
+  forwards `setCredentialId`, and a PRF output derived from a different salt than the matched entry's is re-evaluated
+  with the entry's own. README example handles `sessionChanged`.
 - **Account deletion: review fixes (#196).** The delete-begin response must carry a non-empty, well-formed
   `allowCredentials` list (no silent fall-back to a discoverable prompt), and only `410 STEP_UP_EXPIRED` reads as an
   expired step-up. The wipe now clears `AuthServerClient`'s token cache, reports failures of the credential store, the

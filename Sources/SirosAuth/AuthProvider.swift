@@ -25,12 +25,23 @@ public protocol AuthProvider: AnyObject, Sendable {
     /// simply goes unused on the device, an accepted limitation. A fully
     /// local/dev provider (`LocalAuthProvider`) can and does remove it.
     func rollbackLastRegistration()
+
+    /// Best-effort: undo the registration of exactly `credentialId`. Unlike
+    /// ``rollbackLastRegistration()`` this cannot remove another credential:
+    /// "the last one" is whatever the provider touched most recently, which
+    /// can be an authentication with an existing passkey made while the
+    /// enrolment was still pending. Callers that know the credential they
+    /// created use this. The default falls back to ``rollbackLastRegistration()``
+    /// for a provider with no per-credential removal.
+    func rollbackRegistration(credentialId: Data)
 }
 
 public extension AuthProvider {
     /// Default: nothing to roll back. See the protocol requirement's doc
     /// comment.
     func rollbackLastRegistration() {}
+
+    func rollbackRegistration(credentialId: Data) { rollbackLastRegistration() }
 }
 
 // MARK: - Registration types

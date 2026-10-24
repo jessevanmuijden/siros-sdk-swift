@@ -50,4 +50,10 @@ public enum AddPasskeyResult: Sendable, Equatable {
     /// to avoid recording it under the wrong identity. Call `addPasskey`
     /// again on that account's session if it still needs doing.
     case sessionChanged(message: String?)
+    /// The backend accepted the passkey and the cached container carries its
+    /// PRF entry, but this wallet's live keystore could not take the entry.
+    /// The new passkey was NOT rolled back (it is on the account), and the
+    /// keystore was locked so nothing can push a container without the entry;
+    /// unlock the wallet again to continue with the entry in place.
+    case localCommitFailed(credentialId: String?, message: String?)
 }

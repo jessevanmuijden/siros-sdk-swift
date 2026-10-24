@@ -178,8 +178,28 @@ extension SirosWallet {
     func bumpSessionGeneration() -> Int {
         lock.lock(); defer { lock.unlock() }
         sessionGeneration += 1
+        enrollmentEpoch &+= 1
         reloginDoneForGeneration = false
         return sessionGeneration
+    }
+
+    /// Whether an enrolment started under (`generation`, `epoch`) still belongs
+    /// to the live session: no logout or new session finished, and no login,
+    /// register, resume or unlock has started replacing the scope since.
+    /// The caller holds `lock`.
+    func enrollmentIsCurrentLocked(generation: Int, epoch: UInt64) -> Bool {
+        sessionGeneration == generation && enrollmentEpoch == epoch
+    }
+
+    /// Ends every in-flight `addPasskey`'s claim on the session. Called before
+    /// the session scope or the keystore's contents are replaced.
+    func invalidateEnrollment() {
+        lock.lock(); enrollmentEpoch &+= 1; lock.unlock()
+    }
+
+    func currentEnrollmentEpoch() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return enrollmentEpoch
     }
 
     func endSelfDrivenRelogin() {

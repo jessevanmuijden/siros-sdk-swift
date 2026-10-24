@@ -249,14 +249,21 @@ extension SirosWallet {
     // `startIssuanceByOffer`/`startIssuance` (this function now lives in
     // `SirosWallet+Lifecycle.swift`) - same cross-file-extension-access
     // reason as `keystore` above.
-    func rollbackLocalCredential() {
+    /// - Parameter credentialId: the credential this operation created. Pass it
+    ///   whenever it is known: "the last registration" can be a different
+    ///   passkey by the time a refusal arrives.
+    func rollbackLocalCredential(credentialId: Data? = nil) {
         // Delegates to whatever `authProvider` can actually do - see
         // `AuthProvider.rollbackLastRegistration()`'s doc comment. Used to be
         // hardcoded to `LocalAuthProvider` specifically, which made the
         // rollback path untestable with a plain test double (and silently a
         // no-op for any future provider that could genuinely roll back but
         // wasn't `LocalAuthProvider`).
-        authProvider.rollbackLastRegistration()
+        if let credentialId {
+            authProvider.rollbackRegistration(credentialId: credentialId)
+        } else {
+            authProvider.rollbackLastRegistration()
+        }
     }
 
     // MARK: - Private helpers
@@ -376,6 +383,7 @@ extension SirosWallet {
             if let data = containerJson.data(using: .utf8),
                let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 _ = try await client.updatePrivateData(dict)
+                persistPrivateDataEtag(of: client)
             }
         } catch {
             #if canImport(os)
@@ -391,6 +399,21 @@ extension SirosWallet {
             // as success.
             throw error
         }
+    }
+
+    /// Stores the ETag `client` just learnt from a successful private-data
+    /// write beside the container it belongs to, so a restart (a fresh
+    /// `BackendApiClient` with no ETag) still has a true precondition for
+    /// `addPasskey`'s `register-finish`: neither none (which would overwrite
+    /// another device's changes) nor an older one (a false conflict).
+    ///
+    /// Only while `client` is still this wallet's client: the store is scoped
+    /// to the ACTIVE account, and a logout and login in between would
+    /// otherwise write account A's tag under account B.
+    private func persistPrivateDataEtag(of client: BackendApiClient) {
+        lock.lock(); defer { lock.unlock() }
+        guard apiClient === client else { return }
+        sessionStore.privateDataEtag = client.privateDataEtag
     }
 
     func persistAndSyncKeystore() async {

@@ -594,6 +594,13 @@ public final class SirosWallet: @unchecked Sendable {
     /// ``sessionGeneration``. Cleared by `bumpSessionGeneration()`.
     var reloginDoneForGeneration: Bool = false
 
+    /// Advanced by `invalidateEnrollment()` BEFORE anything replaces the
+    /// session scope or the keystore contents (login, register, resume,
+    /// unlock). `sessionGeneration` is bumped only after those complete, so an
+    /// `addPasskey` response landing in between would still pass a generation
+    /// check; this closes that window. Always read and written under `lock`.
+    var enrollmentEpoch: UInt64 = 0
+
     /// Set by `destroy()`. The state is left untouched there (a destroyed
     /// wallet is not a logged-out one), so without this a reauthentication
     /// signal from a task still unwinding could pass the guard and log back in
@@ -1042,6 +1049,8 @@ public final class SirosWallet: @unchecked Sendable {
                 displayName: displayName
             )
 
+            // The keystore is about to hold a new account's contents.
+            invalidateEnrollment()
             // prfSalt must land in the new PrfKeyInfo, not a random value.
             try await keystore.unlock(
                 prfOutput: prfOutput.first,
@@ -1176,6 +1185,9 @@ public final class SirosWallet: @unchecked Sendable {
             // into the active scope. The registry's active account is only
             // moved once the unlock has succeeded.
             let accountId = "\(config.tenantId):\(session.uuid)"
+            // Before the scope moves: an in-flight `addPasskey` for the
+            // previous account must not be applied to this one.
+            invalidateEnrollment()
             sessionStore.activeAccountId = accountId
             // Now the server has named the account, so a refusal from anything
             // below this line is unambiguously about it.
@@ -1343,6 +1355,7 @@ public final class SirosWallet: @unchecked Sendable {
     public func resumeSession() async {
         // Restore the active account ID so the session store reads the right data
         let resumingAccountId = accountRegistry.activeAccountId
+        invalidateEnrollment()
         if let resumingAccountId {
             sessionStore.activeAccountId = resumingAccountId
         }
@@ -1418,6 +1431,7 @@ public final class SirosWallet: @unchecked Sendable {
             let storedContainer = Data(storedJwe.utf8)
             let resolved = try await resolveUnlockKeystorePrf(assertion: assertion, storedContainer: storedContainer)
 
+            invalidateEnrollment()
             try await keystore.unlock(
                 prfOutput: resolved.prfOutput.first,
                 encryptedContainer: storedContainer,

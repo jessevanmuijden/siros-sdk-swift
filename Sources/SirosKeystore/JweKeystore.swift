@@ -29,6 +29,13 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
     var credentials: [Int64: String] = [:]
     private var presentationRecords: [Int64: String] = [:]
     private var _mainKey: SymmetricKey?
+
+    /// Identifies the current unlocked session of this keystore: replaced on
+    /// every unlock and on lock. A `PreparedPrfKey` carries the one it was
+    /// prepared under, so a commit arriving after the keystore was locked and
+    /// unlocked again - possibly for another account - is refused instead of
+    /// appending one account's PRF entry to another's container.
+    private var unlockToken = UUID()
     private var containerMetadata: ContainerData?
     // Preserve full WalletStateContainer for round-trip fidelity
     var preservedWalletState: [String: Any]?
@@ -200,6 +207,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
                 mainKeyInfo: mainKeyInfo
             )
             _mainKey = unwrappedMainKey
+            unlockToken = UUID()
 
             let jwePayload = try decryptJwe(container.jwe, mainKey: unwrappedMainKey)
             if let jweDict = jwePayload as? [String: Any] {
@@ -221,6 +229,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
             modifiedPresentationIds.removeAll()
             let (newMainKey, newMainKeyInfo) = EncryptedContainer.generateMainKey()
             _mainKey = newMainKey
+            unlockToken = UUID()
 
             let prfKey = EncryptedContainer.derivePrfKey(
                 prfOutput: prfOutput,
@@ -274,6 +283,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         credentialRefreshTokens.removeAll()
         credentialMetadata.removeAll()
         _mainKey = nil
+        unlockToken = UUID()
         containerMetadata = nil
         preservedWalletState = nil
         rewriteRefusal = nil
@@ -591,7 +601,8 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
             unwrapKey: encapsulation.unwrapKey
         )
         return PreparedPrfKey(
-            container: try exportContainerLocked(extraPrfKey: entry), credentialId: credentialId, entry: entry
+            container: try exportContainerLocked(extraPrfKey: entry), credentialId: credentialId, entry: entry,
+            ownerToken: unlockToken
         )
     }
 
@@ -602,6 +613,9 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         guard var meta = containerMetadata else { throw KeystoreError.containerMissing("No container metadata") }
         guard let entry = prepared.entry else {
             throw KeystoreError.invalidParameter("Not a PRF key prepared by this keystore")
+        }
+        guard prepared.ownerToken == unlockToken else {
+            throw KeystoreError.invalidParameter("PRF key was prepared in a different unlocked session of this keystore")
         }
         if !meta.prfKeys.contains(where: { $0.credentialId == entry.credentialId }) {
             meta.prfKeys.append(entry)

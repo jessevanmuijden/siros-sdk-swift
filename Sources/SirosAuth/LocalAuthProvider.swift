@@ -81,6 +81,23 @@ public final class LocalAuthProvider: AuthProvider, @unchecked Sendable {
         #endif
     }
 
+    /// Removes exactly `credentialId` (and its key), whatever was used last.
+    public func rollbackRegistration(credentialId: Data) {
+        let removed: CredentialEntry? = lock.withLock {
+            let entry = credentials.removeValue(forKey: credentialId)
+            if lastCredentialId == credentialId {
+                lastCredentialId = nil
+                lastPrfOutput = nil
+            }
+            return entry
+        }
+        #if canImport(Security)
+        if let tag = removed?.keyTag {
+            deleteKey(tag: tag)
+        }
+        #endif
+    }
+
     public init() {}
 
     /// Authenticator-data flags of an assertion: UP (0x01) and UV (0x04).
