@@ -60,6 +60,11 @@ extension SirosWallet {
         // happens to be current by the time each credential is stored.
         let vctmDocument = activeVctmDocument
         let attestedKeyIds = activeAttestedKeyIds
+        // THIS flow's epoch: the one in force when its flow_start was sent, carried by
+        // the session until completion (`FlowCompleteMessage.startTag`), not the
+        // current one: a flow cancelled before its first progress, with a newer flow
+        // started meanwhile, must not adopt the newer flow's epoch.
+        let epochAtStart = msg.startTag
         // A completed flow has no further sign_presentation coming - drop
         // its cached DCQL match results (if any; a no-op for an issuance
         // flow, which never populates this map) so it doesn't linger
@@ -67,6 +72,30 @@ extension SirosWallet {
         // `pendingMatchResultsByFlow.remove(msg.flowId)` here.
         pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
         lock.unlock()
+
+        var credentialsToStore = msg.credentials
+        if msg.credentialResponseEncrypted == true {
+            // Engine-blind issuance: the engine never held the credentials. Entry i of the engine's
+            // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
+            guard let entries = msg.credentials,
+                  let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
+                await rejectDecryptedCompletion(
+                    flowId: msg.flowId, responses: decryptedResponses,
+                    message: "The credentials the issuer sent do not match what the engine reported"
+                )
+                return
+            }
+            credentialsToStore = paired
+        }
+        // The issuer trust gate sees the credentials that will be stored: for a
+        // wallet-encrypted completion the engine's entries carry no values, so
+        // the gate runs on the decrypted ones (same shape as the Kotlin SDK's
+        // `fillEncryptedCompletion` before `issuanceTrustRefusal`).
+        var gateMsg = msg
+        gateMsg.credentials = credentialsToStore
+
+        // Fail closed on issuer trust before anything is stored or superseded.
+        if await issuanceTrustGateHandled(gateMsg, offer: offer, epoch: epochAtStart) { return }
 
         // Shared across every copy in this response so the UI can group them
         // into one card (see StoredCredential.batchId) - ALWAYS assigned,
@@ -94,20 +123,6 @@ extension SirosWallet {
         // as success - see storeFailureReason below.
         var storedCount = 0
         var storeFailureReason: String?
-        var credentialsToStore = msg.credentials
-        if msg.credentialResponseEncrypted == true {
-            // Engine-blind issuance: the engine never held the credentials. Entry i of the engine's
-            // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
-            guard let entries = msg.credentials,
-                  let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
-                await rejectDecryptedCompletion(
-                    flowId: msg.flowId, responses: decryptedResponses,
-                    message: "The credentials the issuer sent do not match what the engine reported"
-                )
-                return
-            }
-            credentialsToStore = paired
-        }
         if let credentials = credentialsToStore {
             for (index, cred) in credentials.enumerated() {
                 let outcome = await storeIssuedCredential(
@@ -138,7 +153,11 @@ extension SirosWallet {
         // Also clears `pendingRenewalSourceBatchId` (see its own clearing in
         // `resetIssuanceGuards()`), whether this renewal attempt succeeded
         // or failed - either way the attempt is over.
-        resetIssuanceGuards()
+        // Only for a completion that belongs to an issuance (it carries the start tag the
+        // trust gate just validated). A presentation's completion is untagged and says
+        // nothing about an issuance in flight beside it: resetting here would clear that
+        // issuance's guards and invalidate its own tag.
+        if msg.startTag != nil { resetIssuanceGuards() }
 
         await persistAndSyncKeystore()
 
@@ -384,16 +403,8 @@ extension SirosWallet {
                 return (false, reason)
             }
 
-            // VICAL issuer-trust (ISO 18013-5 Annex C): defensive check on
-            // the newly-issued credential's issuerAuth, surfaced via logging
-            // only - not a blocking gate, same convention as
-            // evaluateReaderTrust's remote/local-fallback reader-trust check
-            // at presentation time (see evaluateIssuerTrust's doc comment).
-            if let issuerTrust = await verifyAndEvaluateIssuerTrust(mdocDocument.issuerSigned.issuerAuth, docType: mdocDocument.docType) {
-                #if canImport(os)
-                logger.info("mdoc issuer trust for docType=\(mdocDocument.docType, privacy: .public): trusted=\(issuerTrust.trusted, privacy: .public) reason=\(issuerTrust.reason ?? "", privacy: .public)")
-                #endif
-            }
+            // The mdoc's issuer trust (ISO 18013-5 Annex C `issuerAuth`) was
+            // decided before anything was stored - see `issuanceTrustGateHandled`.
 
             var metadata: CredentialMetadata?
             if let off = offer {
