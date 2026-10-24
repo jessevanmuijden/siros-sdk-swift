@@ -713,15 +713,27 @@ public final class SirosWallet: @unchecked Sendable {
     // Not `private`: `SirosWallet+DCAPI.swift` and `SirosWallet+Engine.swift`
     // need it too - same cross-file-extension-access reason as `keystore`
     // above.
-    func recordPresentation(_ record: PresentationRecord) async {
-        lock.lock(); _presentationHistory.insert(record, at: 0); lock.unlock()
-        if keystore.isUnlocked {
-            if let data = try? JSONEncoder().encode(record), let raw = String(data: data, encoding: .utf8) {
+    /// - Parameter token: when given, the record is applied only while it is
+    ///   current. The check, the in-memory insert and the keystore write are
+    ///   one step under `credentialWriteGate`, which a wipe drains, so a
+    ///   handler that resumed after an account deletion records nothing.
+    @discardableResult
+    func recordPresentation(_ record: PresentationRecord, token: TeardownToken? = nil) async -> Bool {
+        let applied: Bool = await credentialWriteGate.withLock { [self] in
+            lock.lock()
+            if let token, !isCurrentLocked(token) { lock.unlock(); return false }
+            _presentationHistory.insert(record, at: 0)
+            lock.unlock()
+            if keystore.isUnlocked,
+               let data = try? JSONEncoder().encode(record), let raw = String(data: data, encoding: .utf8) {
                 try? await keystore.savePresentationRecord(id: record.id, json: raw)
-                await persistAndSyncKeystore()
             }
+            return true
         }
+        guard applied else { return false }
+        if keystore.isUnlocked { await persistAndSyncKeystore() }
         await checkRenewThresholds(consumedCredentialIds: record.credentialIds)
+        return true
     }
 
     /// Per-credential-configuration-id override for

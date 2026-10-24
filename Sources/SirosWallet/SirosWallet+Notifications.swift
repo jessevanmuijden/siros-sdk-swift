@@ -35,6 +35,10 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // Read ONCE, before any await, and passed to every credential save: a
+        // wipe that lands while the first credential awaits its metadata must
+        // refuse the whole batch, not just that credential.
+        let completionEpoch = currentTeardownToken().epoch
         cancelTransactionTasks(flowId: msg.flowId)
         lock.lock(); legacyFlowSnapshots.removeValue(forKey: msg.flowId); lock.unlock()
         lock.lock()
@@ -77,8 +81,10 @@ extension SirosWallet {
                 let outcome = await storeIssuedCredential(
                     cred, index: index, flowId: msg.flowId, offer: offer, vctm: vctm,
                     vctmDocument: vctmDocument,
-                    attestedKeyIds: attestedKeyIds, batchId: batchId
+                    attestedKeyIds: attestedKeyIds, batchId: batchId, epoch: completionEpoch
                 )
+                // A completion the account deletion overtook is dropped whole.
+                if outcome.failureReason == Self.wipedDuringIssuance { return }
                 if outcome.stored { storedCount += 1 }
                 if let reason = outcome.failureReason { storeFailureReason = reason }
             }
@@ -305,9 +311,11 @@ extension SirosWallet {
         vctm: Vctm?,
         vctmDocument: VctmDocument?,
         attestedKeyIds: [String]?,
-        batchId: Int64
+        batchId: Int64,
+        epoch capturedEpoch: UInt64? = nil
     ) async -> (stored: Bool, failureReason: String?) {
-        lock.lock(); let epoch = storeEpoch; lock.unlock()
+        // A caller that handles a whole batch passes the epoch it read once up front.
+        lock.lock(); let epoch = capturedEpoch ?? storeEpoch; lock.unlock()
         // A container this build must not rewrite is read-only. Storing would be
         // silently discarded (`CredentialStore.save` does not throw), and the
         // issuer would then be told the credential was accepted.

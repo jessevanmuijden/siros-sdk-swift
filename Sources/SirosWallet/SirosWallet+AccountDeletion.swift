@@ -73,6 +73,25 @@ extension SirosWallet {
         }
     }
 
+    /// What a long-running handler captures before its first `await`: the
+    /// session generation and the wipe epoch. If either has moved when the
+    /// handler resumes (the account was deleted, the session ended), its
+    /// results must not be applied.
+    struct TeardownToken: Equatable {
+        let generation: Int
+        let epoch: UInt64
+    }
+
+    func currentTeardownToken() -> TeardownToken {
+        lock.lock(); defer { lock.unlock() }
+        return TeardownToken(generation: sessionGeneration, epoch: storeEpoch)
+    }
+
+    /// The caller holds `lock`.
+    func isCurrentLocked(_ token: TeardownToken) -> Bool {
+        sessionGeneration == token.generation && storeEpoch == token.epoch
+    }
+
     private func currentApiClient() -> BackendApiClient? {
         lock.lock(); defer { lock.unlock() }
         return apiClient

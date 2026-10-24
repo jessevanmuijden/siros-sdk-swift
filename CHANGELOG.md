@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   external authenticator are left alone) before locking. `ASAuthorizationAuthProvider` passes the requested
   `userVerification` to both assertion requests, and `LocalAuthProvider` assertions carry the UV flag (the key is gated
   by `.userPresence`).
+  Late completions are fenced too: a credential-selection consent that returns after the wipe records no presentation
+  and caches no matches, a batch overtaken by the wipe is dropped whole (the epoch is read once per completion), and
+  `WscdKeystoreAdapter` admits key creation through a gate that the erase closes and drains, so a key being created
+  during the erase is erased with the rest.
 - **Host-resolution timeouts fire on their own queue.** `hostResolvesToOnlyPublicAddresses` raced its lookup against a
   timer on the same global queue, so a timer could wait behind lookups blocked in `getaddrinfo` (13 s against a 0.2 s
   bound on a CI iOS simulator, failing `testResolutionGivesUpAfterHostResolutionTimeout`). The timer now has a dedicated

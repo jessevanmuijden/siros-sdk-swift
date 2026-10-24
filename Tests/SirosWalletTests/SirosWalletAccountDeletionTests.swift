@@ -5,6 +5,7 @@ import Foundation
 import SirosAuth
 import SirosCredentials
 import SirosKeystore
+import SirosTransport
 @testable import SirosWallet
 
 /// `SirosWallet.deleteAccount` (go-wallet-backend#352): the begin -> assertion
@@ -39,6 +40,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         var clearCredentialsError: Error?
         private(set) var clearedCredentials = false
         private(set) var clearedPresentationRecords = false
+        private(set) var savedPresentationRecords = 0
         private(set) var locked = false
         var eraseKeyMaterialError: Error?
         private(set) var erasedKeyMaterial = false
@@ -54,7 +56,8 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         func signPresentation(nonce: String, audience: String, credentialIds: [Int64], kid: String?) async throws -> String { "" }
         func signVpToken(credential: String, disclosedClaims: [String]?, nonce: String, audience: String, kid: String?) async throws -> String { "" }
         func exportEncryptedContainer() async throws -> Data { Data() }
-        func listKeys() -> [KeyInfo] { [] }
+        var keyIds: [String] = []
+        func listKeys() -> [KeyInfo] { keyIds.map { KeyInfo(keyId: $0, algorithm: "ES256") } }
         func saveCredential(id: Int64, json: String) async throws {}
         func getCredential(id: Int64) async throws -> String? { nil }
         func getAllCredentials() async throws -> [Int64: String] { [:] }
@@ -63,7 +66,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             if let clearCredentialsError { throw clearCredentialsError }
             clearedCredentials = true
         }
-        func savePresentationRecord(id: Int64, json: String) async throws {}
+        func savePresentationRecord(id: Int64, json: String) async throws { savedPresentationRecords += 1 }
         func getAllPresentationRecords() async throws -> [Int64: String] { [:] }
         func clearPresentationRecords() async throws { clearedPresentationRecords = true }
         func generateKeypairs(count: Int) async throws -> [KeypairInfo] { [] }
@@ -361,6 +364,79 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertEqual(result, .failed(.notLoggedIn))
         XCTAssertTrue(f.server.calls.isEmpty)
         XCTAssertTrue(f.auth.options.isEmpty)
+    }
+
+    // MARK: - Consent handlers that outlive the wipe
+
+    private final class ConsentGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entered = false
+        private var releaseContinuation: CheckedContinuation<Void, Never>?
+        private var released = false
+        func park() async {
+            lock.lock(); entered = true
+            if released { lock.unlock(); return }
+            await withCheckedContinuation { releaseContinuation = $0; lock.unlock() }
+        }
+        var hasEntered: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+        func release() {
+            lock.lock(); released = true; let c = releaseContinuation; releaseContinuation = nil; lock.unlock()
+            c?.resume()
+        }
+    }
+
+    private final class ConsentListener: WalletEventListener, @unchecked Sendable {
+        let gate = ConsentGate()
+        let choose: Int64
+        init(choose: Int64) { self.choose = choose }
+        func onCredentialSelectionRequired(request: PresentationRequest) async -> [Int64] {
+            await gate.park()
+            return [choose]
+        }
+        func onCredentialReceived(credential: StoredCredential) {}
+        func onFlowComplete(flowId: String, redirectUri: String?) {}
+        func onFlowError(flowId: String, errorMessage: String, redirectUri: String?) {}
+        func onNoMatchingCredential(flowId: String, requestedTypes: [String], reason: String?, redirectUri: String?) {}
+        func onAuthorizationRequired(flowId: String, authorizationUrl: String, redirectUri: String, state: String) {}
+        func onTxCodeRequired(flowId: String, description: String?) -> String? { nil }
+        func onReauthenticationRequired() {}
+        func onWalletLifecycleBlocked(reason: SirosError.WalletLifecycleRefusal, message: String?) {}
+        func onCredentialRenewedWithAttributeDiff(credential: StoredCredential, diff: CredentialAttributeDiff) {}
+        func onCredentialNearExpiry(credential: StoredCredential, eligibleRemaining: Int, threshold: Int) {}
+        func onTransactionLogFailure() {}
+        func onIssuerNotTrusted(flowId: String, issuer: String?, reason: String) {}
+    }
+
+    /// A consent listener that returns after the account was deleted must not
+    /// bring back cached match results or presentation history.
+    func testConsentGivenAfterTheWipeRestoresNothing() async throws {
+        let store = InMemoryCredentialStore()
+        await store.save(StoredCredential(id: 5, format: "dc+sd-jwt", raw: "a.b.c", kid: "k1", batchId: 5, instanceId: 0))
+        let keystore = RecordingKeystore()
+        keystore.keyIds = ["k1"]
+        let wallet = SirosWallet(
+            config: WalletConfig(backendUrl: "https://wallet.example.invalid", credentialStore: store),
+            authProvider: RecordingAuthProvider(), sessionStore: InMemorySessionStore(), keystore: keystore,
+            accountRegistry: .inMemory()
+        )!
+        wallet.credentialConsumptionPolicy = .neverConsume
+        let listener = ConsentListener(choose: 5)
+        wallet.eventListener = listener
+        let engine = WalletEngineSession(baseUrl: "https://wallet.example.invalid", tenantId: "t")
+        let request = try JSONDecoder().decode(
+            MatchRequestMessage.self, from: Data(#"{"type":"match_request","flow_id":"flow-1"}"#.utf8)
+        )
+
+        let handler = Task { await wallet.handleMatchRequest(engine: engine, msg: request) }
+        while !listener.gate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        _ = await wallet.wipeLocalState()
+        listener.gate.release()
+        await handler.value
+
+        XCTAssertTrue(wallet.presentationHistory.isEmpty, "no presentation record after the wipe")
+        wallet.lock.lock(); let cached = wallet.pendingMatchResultsByFlow.count; wallet.lock.unlock()
+        XCTAssertEqual(cached, 0, "no cached match results after the wipe")
+        XCTAssertEqual(keystore.savedPresentationRecords, 0)
     }
 
     // MARK: - Authorization-server token cache

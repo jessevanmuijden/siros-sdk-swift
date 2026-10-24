@@ -1017,11 +1017,14 @@ extension SirosWallet {
     /// branch (see `pendingMatchResultsByFlow`'s doc comment), and responds
     /// with a `"consent"` or `"decline"` flow action. Mirrors Kotlin's
     /// `handleCredentialSelection` exactly.
-    private func handleCredentialSelection(
+    func handleCredentialSelection(
         engine: WalletEngineSession,
         flowId: String,
         payload: [String: AnyCodable]?
     ) async {
+        // Captured before the first await: the consent listener can return
+        // after the account was deleted, and nothing below may then be applied.
+        let token = currentTeardownToken()
         do {
             let dcqlQuery = payload?["dcql_query"]?.objectValue.map { anyCodableDictToAny($0) }
 
@@ -1059,7 +1062,10 @@ extension SirosWallet {
             // never fires for this flow type. sign_presentation's ZK branch
             // needs this cached so it knows the originating query's
             // format/zkSystemTypes/ppidContext.
-            lock.lock(); pendingMatchResultsByFlow[flowId] = matchResults; lock.unlock()
+            lock.lock()
+            guard isCurrentLocked(token) else { lock.unlock(); return }
+            pendingMatchResultsByFlow[flowId] = matchResults
+            lock.unlock()
 
             // Nothing to present - because nothing matched, or because what
             // was selected can no longer be presented (the app is trusted to
@@ -1079,7 +1085,7 @@ extension SirosWallet {
 
             var seenClaims = Set<String>()
             let requestedClaims = matchResults.flatMap { $0.requestedClaims.flatMap { $0 } }.filter { seenClaims.insert($0).inserted }
-            await recordPresentation(PresentationRecord(
+            let recorded = await recordPresentation(PresentationRecord(
                 id: randomUint32Id(),
                 flowId: flowId,
                 verifierName: verifierName,
@@ -1088,7 +1094,8 @@ extension SirosWallet {
                 requestedClaims: requestedClaims,
                 timestamp: Int64(Date().timeIntervalSince1970 * 1000),
                 zkProof: selection.zkProof
-            ))
+            ), token: token)
+            guard recorded else { return }
 
             let consentPayload = Self.buildConsentPayload(matchResults: matchResults, selectedIds: selectedIds, allCreds: allCreds)
             engine.sendFlowAction(flowId: flowId, action: "consent", payload: consentPayload)
@@ -1101,7 +1108,8 @@ extension SirosWallet {
         }
     }
 
-    private func handleMatchRequest(engine: WalletEngineSession, msg: MatchRequestMessage) async {
+    func handleMatchRequest(engine: WalletEngineSession, msg: MatchRequestMessage) async {
+        let token = currentTeardownToken()  // see `handleCredentialSelection`
         let allCreds = await credentialStore.getAll()
         lock.lock()
         // Read only - do NOT remove. The later `sign_presentation` step
@@ -1143,7 +1151,10 @@ extension SirosWallet {
         // Cache for the later sign_presentation step's ZK branch - mirrors
         // handleCredentialSelection and Kotlin's matchRequests() collector,
         // which populates the same map for this transport's equivalent step.
-        lock.lock(); pendingMatchResultsByFlow[msg.flowId] = matchResults; lock.unlock()
+        lock.lock()
+        guard isCurrentLocked(token) else { lock.unlock(); return }
+        pendingMatchResultsByFlow[msg.flowId] = matchResults
+        lock.unlock()
 
         // The app is trusted to only return IDs it was offered, but shouldn't
         // be the only thing enforcing consumption - re-validate here too
@@ -1161,7 +1172,7 @@ extension SirosWallet {
 
         var seenClaims = Set<String>()
         let requestedClaims = matchResults.flatMap { $0.requestedClaims.flatMap { $0 } }.filter { seenClaims.insert($0).inserted }
-        await recordPresentation(PresentationRecord(
+        let recorded = await recordPresentation(PresentationRecord(
             id: randomUint32Id(),
             flowId: msg.flowId,
             credentialIds: selectedIds,
@@ -1171,7 +1182,8 @@ extension SirosWallet {
             requestedClaims: requestedClaims,
             timestamp: Int64(Date().timeIntervalSince1970 * 1000),
             zkProof: selection.zkProof
-        ))
+        ), token: token)
+        guard recorded else { return }
 
         let matches: [CredentialMatch] = selectedIds.compactMap { id in
             guard let cred = candidates.first(where: { $0.id == id }) else { return nil }
