@@ -27,6 +27,15 @@ public protocol WmpPeerContext: AnyObject {
 
     /// The codec used for encoding/decoding messages.
     var codec: WmpCodec { get }
+
+    /// Stop routing a flow that this side has finished (it sent its terminal `wmp.flow.complete` or
+    /// `wmp.flow.error`): the peer only forgets a flow on an INCOMING terminal message, so a locally
+    /// finished child would otherwise stay tracked for the session.
+    func releaseFlow(flowId: String)
+}
+
+public extension WmpPeerContext {
+    func releaseFlow(flowId: String) {}
 }
 
 /// Handles profile-specific flow types. The Peer dispatches flow operations
@@ -70,4 +79,17 @@ public protocol WmpResolveHandler: AnyObject {
 
     /// Process a resolve request for a supported type.
     func handleResolve(params: ResolveParams) async throws -> ResolveResult
+}
+
+/// A profile with work of its own in flight (child flows running application handlers) that the peer must be
+/// able to stop when the session ends.
+public protocol WmpShutdownProfile: AnyObject {
+    /// Cancel everything in flight and answer nothing more.
+    func shutdown()
+}
+
+/// A profile that holds answers it could not send while the connection was down.
+public protocol WmpResumeProfile: AnyObject {
+    /// The session resumed: send what could not be sent.
+    func sessionResumed()
 }

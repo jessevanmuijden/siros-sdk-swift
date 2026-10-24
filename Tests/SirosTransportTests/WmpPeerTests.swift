@@ -51,6 +51,26 @@ private final class StubProfile: WmpProfile, WmpFlowHandler, WmpMethodHandler, W
     }
 }
 
+private final class ShutdownProfile: WmpProfile, WmpShutdownProfile, @unchecked Sendable {
+    let name = "shutdown"
+    let capabilities: [String] = []
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+    func initialize(ctx: WmpPeerContext) {}
+    func shutdown() { lock.lock(); _count += 1; lock.unlock() }
+}
+
+private final class ResumeProfile: WmpProfile, WmpResumeProfile, @unchecked Sendable {
+    let name = "resume"
+    let capabilities: [String] = []
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+    func initialize(ctx: WmpPeerContext) {}
+    func sessionResumed() { lock.lock(); _count += 1; lock.unlock() }
+}
+
 // MARK: - Helpers
 
 private extension WmpPeerTests {
@@ -85,6 +105,134 @@ private extension WmpPeerTests {
 // MARK: - Tests
 
 final class WmpPeerTests: XCTestCase {
+
+    /// A profile's in-flight child handlers stop when the session ends, however it ends: an explicit close, a
+    /// session that failed for good (reconnects exhausted), and a caller that tears the wallet down.
+    func testProfilesAreShutDownWhenTheSessionEnds() async throws {
+        // 1. close()
+        let (peerA, transportA, _) = makePeer()
+        let shutdownA = ShutdownProfile()
+        peerA.use(shutdownA)
+        try await connectPeer(peerA, transport: transportA)
+        try? await peerA.close()
+        XCTAssertGreaterThanOrEqual(shutdownA.count, 1, "shutdown is idempotent; the session's own close may also reach it")
+
+        // 2. a teardown by a caller that cannot wait for close()
+        let (peerB, transportB, _) = makePeer()
+        let shutdownB = ShutdownProfile()
+        peerB.use(shutdownB)
+        try await connectPeer(peerB, transport: transportB)
+        peerB.shutdownProfiles()
+        XCTAssertGreaterThanOrEqual(shutdownB.count, 1)
+
+        // 3. a session that fails for good: no close() is ever called
+        let transportC = FakeTransport()
+        let sessionC = WmpSession(
+            transport: transportC,
+            config: WmpSessionConfig(requestTimeoutMs: 2_000, maxReconnectAttempts: 1, reconnectBaseMs: 1, reconnectMaxMs: 1)
+        )
+        let peerC = WmpPeer(session: sessionC)
+        let shutdownC = ShutdownProfile()
+        peerC.use(shutdownC)
+        try await connectPeer(peerC, transport: transportC)
+        transportC.simulateFailure()
+        for _ in 0..<150 where shutdownC.count == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertGreaterThanOrEqual(shutdownC.count, 1, "a failed session ends its children without a close()")
+    }
+
+    /// A real reconnection reaches the profiles: the session resumes after a loss, and the peer tells them, so
+    /// answers kept for the resume go out. Creating the session is not a resume.
+    func testAProfileIsToldWhenTheSessionResumesAfterALoss() async throws {
+        let transport = FakeTransport()
+        let session = WmpSession(
+            transport: transport,
+            config: WmpSessionConfig(requestTimeoutMs: 2_000, maxReconnectAttempts: 3, reconnectBaseMs: 1, reconnectMaxMs: 1)
+        )
+        let peer = WmpPeer(session: session)
+        let profile = ResumeProfile()
+        peer.use(profile)
+        try await connectPeer(peer, transport: transport)
+        XCTAssertEqual(profile.count, 0, "creating the session is not a resume")
+        await transport.disconnect()
+        let codec = WmpCodec()
+        var resumeId: String?
+        for _ in 0..<300 where resumeId == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            for data in transport.sentMessages {
+                if let req = try? codec.decodeRequest(data), req.method == "wmp.session.resume" { resumeId = req.id }
+            }
+        }
+        transport.receiveFromServer(#"{"jsonrpc":"2.0","id":"\#(try XCTUnwrap(resumeId))","result":{}}"#.data(using: .utf8)!)
+        for _ in 0..<300 where profile.count == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(profile.count, 1)
+    }
+
+    /// A cancel made locally reaches the handler and forgets the flow before it is sent, without waiting for an echo.
+    func testALocalCancelStopsTheFlowHereAtOnce() async throws {
+        let (peer, transport, profile) = makePeer()
+        try await connectPeer(peer, transport: transport)
+        transport.receiveFromServer(
+            """
+            {"jsonrpc":"2.0","method":"wmp.flow.start","params":{"wmp":{"version":"0.1","session_id":"ses-1"},"flow_type":"stub.flow","flow_id":"lc-1"}}
+            """.data(using: .utf8)!
+        )
+        for _ in 0..<100 where profile.startedFlows.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(profile.startedFlows.count, 1)
+        try await peer.cancelFlow(flowId: "lc-1", reason: "user")
+        XCTAssertEqual(profile.cancels.map(\.flowId), ["lc-1"], "the handler is told by the local cancel itself")
+    }
+
+    /// A host reading `stateStream` still sees every state: the peer's own watching does not take elements from it.
+    func testThePeerDoesNotConsumeTheHostsStateStream() async throws {
+        let (peer, transport, _) = makePeer()
+        let seen = Task { () -> [WmpSessionState] in
+            var states: [WmpSessionState] = []
+            for await s in peer.stateStream { states.append(s); if s == .closed { break } }
+            return states
+        }
+        try await connectPeer(peer, transport: transport)
+        try? await peer.close()
+        let states = await seen.value
+        XCTAssertTrue(states.contains(.active), "\(states)")
+        XCTAssertEqual(states.last, .closed)
+    }
+
+    /// The terminal hook is in place before `create` returns: `create` starts the disconnect monitor, so a loss
+    /// right after it must already find the hook.
+    func testTheTerminalHookIsInstalledBeforeTheSessionIsCreated() async throws {
+        let transport = FakeTransport()
+        let session = WmpSession(transport: transport, config: WmpSessionConfig(requestTimeoutMs: 2_000))
+        let peer = WmpPeer(session: session)
+        let connect = Task { try await peer.connect(authToken: "token") }
+        let deadline = Date().addingTimeInterval(2)
+        while transport.sentMessages.isEmpty, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertNotNil(session.onTerminal, "installed while create is still in flight")
+        connect.cancel()
+        withExtendedLifetime(peer) {}
+    }
+
+    /// The local teardown does not depend on the close notification getting through: when it fails, the transport is still
+    /// disconnected and the session ended (so reconnect work stops), and the failure is still reported.
+    func testASessionClosesLocallyEvenWhenTheCloseNotificationFails() async throws {
+        let (peer, transport, _) = makePeer()
+        let shutdown = ShutdownProfile()
+        peer.use(shutdown)
+        try await connectPeer(peer, transport: transport)
+        transport.failingMethod = "wmp.session.close"
+        let events = Task { () -> Bool in for await _ in peer.flowEvents() {}; return true }
+        do { try await peer.close(); XCTFail("the failed notification is reported") } catch { /* expected */ }
+        let ended = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask { await events.value }
+            group.addTask { try? await Task.sleep(nanoseconds: 2_000_000_000); return false }
+            let first = await group.next() ?? false
+            events.cancel()          // the unstructured consumer too, or a stream that never ends would hang the group
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(ended, "the event stream ends although the close notification failed")
+        XCTAssertGreaterThanOrEqual(shutdown.count, 1)
+        XCTAssertEqual(transport.currentState, .disconnected, "the transport is not left running")
+    }
 
     func testProfileInitializeCalledOnUse() {
         let (peer, _, profile) = makePeer()
