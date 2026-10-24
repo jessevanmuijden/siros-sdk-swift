@@ -208,12 +208,20 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         return try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8))
     }
 
+    /// The wallet's initial issuance epoch is 0: a completion carries the tag its flow started under,
+    /// and the trust gate drops one that has credentials but no tag.
+    private static func decodeFlowComplete(_ object: [String: Any]) throws -> FlowCompleteMessage {
+        var msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
+        msg.startTag = 0
+        return msg
+    }
+
     private func flowComplete(flowId: String, entries: Int, encrypted: Bool = true) throws -> FlowCompleteMessage {
         let credentials = (0..<entries).map { _ in ["format": "dc+sd-jwt", "vct": "urn:eudi:pid:1"] }
         let object: [String: Any] = [
             "type": "flow_complete", "flow_id": flowId, "credentials": credentials, "credential_response_encrypted": encrypted,
         ]
-        return try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
+        return try Self.decodeFlowComplete(object)
     }
 
     // MARK: - Helpers for responses the wallet must reject
@@ -1017,7 +1025,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             try installKey(w, flowId: "pk")
             if transport == "engine" {
                 let object: [String: Any] = ["type": "flow_complete", "flow_id": "pk", "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-1"]]]
-                await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+                await w.handleFlowComplete(msg: try Self.decodeFlowComplete(object))
             } else {
                 await w.handleWmpFlowComplete(flowId: "pk", result: .object_(["credentials": .array([.object_(["format": .string("dc+sd-jwt"), "credential": .string("a.b.c"), "notification_id": .string("n-1")])])]))
             }
@@ -1151,7 +1159,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let now = Int64(Date().timeIntervalSince1970)
         let jwt = "eyJ.\(Data(#"{"exp":\#(now + 3600),"iat":\#(now)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).sig"
         let object: [String: Any] = ["type": "flow_complete", "flow_id": "dg", "credentials": [["format": "vc+sd-jwt", "credential": jwt]]]
-        await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+        await w.handleFlowComplete(msg: try Self.decodeFlowComplete(object))
         let stored = await store.getAll()
         XCTAssertTrue(stored.isEmpty, "the queued plaintext completion is a downgrade, not an issuance")
         XCTAssertEqual(listener.errors.count, 1)
@@ -1255,7 +1263,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let now = Int64(Date().timeIntervalSince1970)
         let jwt = "eyJ.\(Data(#"{"exp":\#(now + 3600),"iat":\#(now)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).sig"
         let object: [String: Any] = ["type": "flow_complete", "flow_id": "end", "credentials": [["format": "vc+sd-jwt", "credential": jwt]]]
-        await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+        await w.handleFlowComplete(msg: try Self.decodeFlowComplete(object))
         await w.handleWmpFlowComplete(flowId: "end", result: .object_(["credentials": .array([.object_(["format": .string("vc+sd-jwt"), "credential": .string(jwt)])])]))
         let stored = await store.getAll()
         XCTAssertTrue(stored.isEmpty, "nothing is stored for an ended flow")

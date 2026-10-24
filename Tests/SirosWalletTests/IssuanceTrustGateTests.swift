@@ -242,6 +242,86 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertEqual(h.listener.untrusted.first?.reason, "mdoc issuer is not trusted: not in VICAL")
     }
 
+    // MARK: - Wallet-encrypted completions: the gate sees the DECRYPTED credentials
+
+    /// A parseable mdoc (`docType`, one name space, an `issuerAuth` shell); trust is decided by the hook.
+    private func mdocRaw() -> String {
+        let item: CBOR = .tagged(.encodedCBORDataItem, .byteString(CBOR.map([
+            .utf8String("digestID"): .unsignedInt(0),
+            .utf8String("random"): .byteString([UInt8](repeating: 0, count: 16)),
+            .utf8String("elementIdentifier"): .utf8String("given_name"),
+            .utf8String("elementValue"): .utf8String("Jane"),
+        ]).encode()))
+        let mso: CBOR = .map([.utf8String("docType"): .utf8String("org.iso.18013.5.1.mDL")])
+        let taggedMso: CBOR = .tagged(.encodedCBORDataItem, .byteString(mso.encode()))
+        let issuerAuth: CBOR = .array([
+            .byteString([]), .map([:]), .byteString(taggedMso.encode()), .byteString([UInt8](repeating: 0, count: 64)),
+        ])
+        let bare: CBOR = .map([
+            .utf8String("nameSpaces"): .map([.utf8String("org.iso.18013.5.1"): .array([item])]),
+            .utf8String("issuerAuth"): issuerAuth,
+        ])
+        return Data(bare.encode()).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    /// An encrypted completion's engine entries carry no values; the wallet holds what it decrypted.
+    private func encryptedMdocCompletion(_ h: Harness, raw: String) -> FlowCompleteMessage {
+        h.wallet.lock.lock()
+        h.wallet.decryptedCredentialResponses["flow-1"] = [DecryptedCredentialResponse(credentials: [raw], notificationId: "n-d")]
+        h.wallet.lock.unlock()
+        let obj: [String: Any] = [
+            "type": MessageTypes.flowComplete, "flow_id": "flow-1",
+            "credentials": [["format": "mso_mdoc"]], "credential_response_encrypted": true,
+        ]
+        var msg = try! JSONDecoder().decode(FlowCompleteMessage.self, from: JSONSerialization.data(withJSONObject: obj))
+        msg.startTag = 0
+        return msg
+    }
+
+    func testAnEncryptedMdocWhoseDecryptedCredentialVerifiesIsStored() async {
+        let h = makeHarness()
+        let raw = mdocRaw()
+        // Trusted only when it is evaluated on the decrypted value: an entry without one is not trusted.
+        h.wallet.mdocIssuanceTrustHook = { TrustResult(trusted: $0.credential == raw) }
+        await h.wallet.handleFlowComplete(msg: encryptedMdocCompletion(h, raw: raw))
+
+        let stored = await h.store.getAll()
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored.first?.raw, raw)
+        XCTAssertTrue(h.listener.untrusted.isEmpty)
+        XCTAssertEqual(h.notifier.events.map(\.event), [CredentialNotificationEvent.accepted])
+    }
+
+    func testAnEncryptedCompletionWhoseDecryptedCredentialFailsTrustStoresNothing() async {
+        let h = makeHarness()
+        let raw = mdocRaw()
+        // Untrusted only when evaluated on the decrypted value.
+        h.wallet.mdocIssuanceTrustHook = { TrustResult(trusted: $0.credential != raw, reason: "not in VICAL") }
+        await h.wallet.handleFlowComplete(msg: encryptedMdocCompletion(h, raw: raw))
+
+        let stored = await h.store.getAll()
+        XCTAssertTrue(stored.isEmpty)
+        XCTAssertEqual(h.listener.untrusted.first?.reason, "mdoc issuer is not trusted: not in VICAL")
+        XCTAssertEqual(h.listener.errors, [issuerNotTrustedMessage])
+        XCTAssertEqual(h.notifier.events.map(\.event), [CredentialNotificationEvent.failure])
+        XCTAssertEqual(h.notifier.events.first?.notificationId, "n-d", "the issuer's id from the decrypted body")
+    }
+
+    func testAPlainCompletionStillGoesThroughTheGateOnTheEnginesCredential() async {
+        let h = makeHarness()
+        let seen = LockedFlag()
+        h.wallet.mdocIssuanceTrustHook = { credential in
+            if credential.credential == "not-a-real-mdoc" { seen.set() }
+            return TrustResult(trusted: false)
+        }
+        await h.wallet.handleFlowComplete(msg: flowComplete(credentials: [mdocCredential]))
+        XCTAssertTrue(seen.value, "a plain completion is evaluated on the credentials the engine delivered")
+        let stored = await h.store.getAll()
+        XCTAssertTrue(stored.isEmpty)
+    }
+
     func testATrustedIssuerIsStoredAndAccepted() async {
         let h = makeHarness()
         await h.wallet.handleFlowComplete(msg: flowComplete(credentials: [sdJwtCredential], engineTrusted: true))

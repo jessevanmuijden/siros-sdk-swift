@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Issuer trust is evaluated on a wallet-encrypted completion's DECRYPTED credentials.** Main's issuance trust gate
+  read the engine's entries, which carry no value when the wallet decrypted the response itself, so an encrypted `mso_mdoc`
+  issuance could never verify. The gate now runs after the entries are paired with what the wallet decrypted (the Kotlin
+  SDK's `fillEncryptedCompletion` shape); a plain completion still uses the engine-provided credentials.
 - **A lost socket's cleanup no longer removes the plaintext-downgrade check.** The wallet remembers, per flow, that a
   response key was OFFERED (`offeredResponseKeyFlows`, ported from the Kotlin SDK's offered marker); it outlives the key
   until the flow ends, so a plain `flow_complete` already queued when the socket was lost is still refused (nothing

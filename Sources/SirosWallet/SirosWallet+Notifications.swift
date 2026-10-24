@@ -73,8 +73,29 @@ extension SirosWallet {
         pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
         lock.unlock()
 
+        var credentialsToStore = msg.credentials
+        if msg.credentialResponseEncrypted == true {
+            // Engine-blind issuance: the engine never held the credentials. Entry i of the engine's
+            // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
+            guard let entries = msg.credentials,
+                  let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
+                await rejectDecryptedCompletion(
+                    flowId: msg.flowId, responses: decryptedResponses,
+                    message: "The credentials the issuer sent do not match what the engine reported"
+                )
+                return
+            }
+            credentialsToStore = paired
+        }
+        // The issuer trust gate sees the credentials that will be stored: for a
+        // wallet-encrypted completion the engine's entries carry no values, so
+        // the gate runs on the decrypted ones (same shape as the Kotlin SDK's
+        // `fillEncryptedCompletion` before `issuanceTrustRefusal`).
+        var gateMsg = msg
+        gateMsg.credentials = credentialsToStore
+
         // Fail closed on issuer trust before anything is stored or superseded.
-        if await issuanceTrustGateHandled(msg, offer: offer, epoch: epochAtStart) { return }
+        if await issuanceTrustGateHandled(gateMsg, offer: offer, epoch: epochAtStart) { return }
 
         // Shared across every copy in this response so the UI can group them
         // into one card (see StoredCredential.batchId) - ALWAYS assigned,
@@ -102,20 +123,6 @@ extension SirosWallet {
         // as success - see storeFailureReason below.
         var storedCount = 0
         var storeFailureReason: String?
-        var credentialsToStore = msg.credentials
-        if msg.credentialResponseEncrypted == true {
-            // Engine-blind issuance: the engine never held the credentials. Entry i of the engine's
-            // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
-            guard let entries = msg.credentials,
-                  let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
-                await rejectDecryptedCompletion(
-                    flowId: msg.flowId, responses: decryptedResponses,
-                    message: "The credentials the issuer sent do not match what the engine reported"
-                )
-                return
-            }
-            credentialsToStore = paired
-        }
         if let credentials = credentialsToStore {
             for (index, cred) in credentials.enumerated() {
                 let outcome = await storeIssuedCredential(

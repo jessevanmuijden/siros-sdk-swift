@@ -148,7 +148,9 @@ final class SirosWalletNotificationTests: XCTestCase {
             "refresh_token": "new-rt", "credential_issuer": "https://i.example", "selected_credential_configuration_id": "pid",
         ]
         obj["redirect_uri"] = NSNull()
-        return try! JSONDecoder().decode(FlowCompleteMessage.self, from: try! JSONSerialization.data(withJSONObject: obj))
+        var msg = try! JSONDecoder().decode(FlowCompleteMessage.self, from: try! JSONSerialization.data(withJSONObject: obj))
+        msg.startTag = 0 // the wallet's initial issuance epoch, as in `makeFlowComplete`
+        return msg
     }
 
     /// A plain completion with an entry that has no credential value is refused whole: the old batch and its refresh
