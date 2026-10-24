@@ -60,6 +60,11 @@ public enum EngineErrorCodes {
     /// never come. `error.details` carries `requested_types` (the credential
     /// types the DCQL query asked for) and the wallet's own `no_match_reason`.
     public static let noMatchingCredential = "NO_MATCHING_CREDENTIAL"
+    /// An action or sign response named a flow the engine does not know (finished,
+    /// or from an earlier socket). Not a reply to a `flow_start`.
+    public static let unknownFlow = "UNKNOWN_FLOW"
+    /// The engine's action or sign channel was full. Not a reply to a `flow_start`.
+    public static let tooManyRequests = "TOO_MANY_REQUESTS"
 }
 
 /// Base envelope — every engine message carries at least a type.
@@ -503,6 +508,22 @@ public struct FlowProgressMessage: Codable, Sendable {
     }
 }
 
+/// What the engine reported about the issuer's trust for one issuance flow, from
+/// its `trust_evaluated` progress step (`issuer_trust_evaluated: true`).
+public struct IssuerTrustReport: Sendable, Equatable {
+    public var issuer: String?
+    public var trusted: Bool
+    public var framework: String?
+    public var reason: String?
+
+    public init(issuer: String?, trusted: Bool, framework: String? = nil, reason: String? = nil) {
+        self.issuer = issuer
+        self.trusted = trusted
+        self.framework = framework
+        self.reason = reason
+    }
+}
+
 public struct FlowCompleteMessage: Codable, Sendable {
     public var type: String
     public var flowId: String
@@ -529,6 +550,16 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// `FlowStartMessage.dpopKeyId` on renewal.
     public var dpopKeyId: String?
     public var timestamp: String?
+    /// The engine's own issuer trust evaluation for this flow (the
+    /// `trust_evaluated` progress step), attached by `WalletEngineSession`
+    /// when the flow completes; nil when the engine sent none (its permissive
+    /// no-PDP mode emits none). Not part of the wire message.
+    public var issuerTrust: IssuerTrustReport?
+    /// The tag `WalletEngineSession.startTagProvider` returned when THIS flow's
+    /// `flow_start` was sent (the wallet's issuance epoch then), attached when the
+    /// flow completes; nil if the flow was not started by this session or its
+    /// first progress was never seen. Not part of the wire message.
+    public var startTag: Int?
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp

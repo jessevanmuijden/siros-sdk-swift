@@ -29,6 +29,11 @@ struct PendingAuthorization: Sendable {
     let redirectUri: String?
     let codeVerifier: String?
     let state: String
+    /// The issuance epoch the ORIGINATING flow started under (its start tag), carried
+    /// to the resume instead of re-sampling the current epoch after the browser
+    /// round-trip and the token/connection awaits. Nil when the session could not
+    /// tie the flow to its start: the resume is then refused.
+    let startEpoch: Int?
 }
 
 /// Main entry point for the SIROS Wallet SDK (cross-platform).
@@ -532,6 +537,12 @@ public final class SirosWallet: @unchecked Sendable {
     /// above; guarded by the same `lock`. See `resetIssuanceGuards()` for
     /// why every terminal path must clear it.
     var issuanceInFlight = false
+    /// Changed by every `resetIssuanceGuards()` (cancel, logout, error and
+    /// completion paths). A `flow_complete` reads it before its first await and
+    /// drops itself if it changed: a cancelled flow's completion must not store
+    /// credentials, delete a newer renewal's source batch or clear a newer
+    /// flow's guards. Guarded by `lock`.
+    var issuanceEpoch = 0
     /// Identifies the current issuance start attempt - see
     /// ``IssuanceStartEpoch`` and `SirosWallet+IssuanceStart.swift`.
     let issuanceStartEpoch = IssuanceStartEpoch()
@@ -583,6 +594,17 @@ public final class SirosWallet: @unchecked Sendable {
     // Not `private`: the trust call sites live in several extension files -
     // same cross-file-extension-access reason as `keystore` above.
     let trustDecisionCache: TrustDecisionCache
+
+    /// Test seam: replaces the mdoc `issuerAuth` verification and issuer trust
+    /// evaluation the issuance trust gate runs on each issued mdoc, so a test
+    /// can drive the gate without CryptoKit or a backend. Nil in production.
+    var mdocIssuanceTrustHook: ((CredentialResult) async -> TrustResult?)?
+
+    /// Test seams for `resumeAuthorization`: replace the token step, the reconnect step and the
+    /// final `resumeIssuance` send. Nil in production.
+    var authorizationResumeTokenHook: (() async throws -> String)?
+    var authorizationResumeConnectHook: ((WalletEngineSession) async throws -> Void)?
+    var authorizationResumeSendHook: ((Int) -> Void)?
 
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one

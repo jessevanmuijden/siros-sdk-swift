@@ -143,9 +143,13 @@ final class MdocTrustEvaluationModeTests: XCTestCase {
         XCTAssertFalse(wallet.isRemoteTrustEvaluationUnreachable(
             SirosError.network(message: "Invalid response")))
         XCTAssertTrue(wallet.isRemoteTrustEvaluationUnreachable(
-            SirosError.backendApi(code: 0, message: "no response")))
-        XCTAssertTrue(wallet.isRemoteTrustEvaluationUnreachable(
             SirosError.backendApi(code: 503, message: "upstream down")))
+        // Code 0 is not a status the backend answered with (Kotlin SDK #276).
+        XCTAssertFalse(wallet.isRemoteTrustEvaluationUnreachable(
+            SirosError.backendApi(code: 0, message: "no response")))
+        // A plain 500 is the backend failing, not its upstream being absent.
+        XCTAssertFalse(wallet.isRemoteTrustEvaluationUnreachable(
+            SirosError.backendApi(code: 500, message: "boom", body: "")))
 
         // A 403 on /v1/evaluate means the backend was there and rejected the
         // CALLER, not the trust question. Treating it as unreachable would let
