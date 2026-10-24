@@ -4,6 +4,13 @@ import Foundation
 
 // MARK: - Flow Type Constants
 
+/// The nested flows the orchestrator starts for the wallet (WMP openid4x section 3.1.5): each arrives as
+/// `wmp.flow.start` on a CHILD flow id and is answered with `wmp.flow.complete` on that child flow.
+public enum WmpSubFlowTypes {
+    public static let sign = "sign"
+    public static let match = "match"
+}
+
 public enum OID4FlowTypes {
     public static let oid4vci = "oid4vci"
     public static let oid4vp = "oid4vp"
@@ -33,6 +40,7 @@ public enum VPStep {
     public static let matchingCredentials = "matching_credentials"
     public static let awaitingConsent = "awaiting_consent"
     public static let generatingPresentation = "generating_presentation"
+    public static let evaluatingVerifierTrust = "evaluating_verifier_trust"
 }
 
 // MARK: - Action Constants
@@ -474,6 +482,11 @@ public struct OpenID4xConfig: @unchecked Sendable {
     public var onComplete: ((String, AnyCodable?) async -> Void)?
     public var onError: ((String, String?, String?) async -> Void)?
     public var attestationProvider: ClientAttestationProvider?
+    /// The profile was shut down (the session ended, or failed for good): called synchronously on each shutdown.
+    public var onShutdown: (() -> Void)?
+    /// Delays before the retries of a terminal answer whose send failed, for failures that bring no resume event (a
+    /// failed POST on a healthy stream). After the last one the answer waits for the next resume.
+    public var sendRetryDelaysMs: [Int]
 
     public init(
         onProgress: ((String, String, AnyCodable?) async -> Void)? = nil,
@@ -482,8 +495,12 @@ public struct OpenID4xConfig: @unchecked Sendable {
         onTrustEvaluation: ((String, AnyCodable?) async throws -> TrustResult)? = nil,
         onComplete: ((String, AnyCodable?) async -> Void)? = nil,
         onError: ((String, String?, String?) async -> Void)? = nil,
-        attestationProvider: ClientAttestationProvider? = nil
+        attestationProvider: ClientAttestationProvider? = nil,
+        onShutdown: (() -> Void)? = nil,
+        sendRetryDelaysMs: [Int] = [1_000, 2_000, 4_000, 8_000]
     ) {
+        self.onShutdown = onShutdown
+        self.sendRetryDelaysMs = sendRetryDelaysMs
         self.onProgress = onProgress
         self.onSignRequest = onSignRequest
         self.onMatchRequest = onMatchRequest
@@ -496,22 +513,54 @@ public struct OpenID4xConfig: @unchecked Sendable {
 
 // MARK: - OpenID4x Profile Implementation
 
-private let stepSignRequest = "sign_request"
-private let stepMatchRequest = "match_request"
-private let stepTrustEvaluation = "trust_evaluation_required"
+/// The member the engine sets on a trust progress that wants an answer; its informational progress lacks it.
+private let trustEvaluationRequired = "trust_evaluation_required"
 
 /// OpenID4x WMP profile for OID4VCI and OID4VP flows.
 ///
 /// Handles server-initiated flows: the backend engine starts flows and
 /// the SDK responds to progress events, sign requests, match requests,
 /// and trust evaluations.
-public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Sendable {
+public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfile, WmpResumeProfile, @unchecked Sendable {
     public let name: String = "openid4x"
     public let capabilities: [String] = ["oid4vci", "oid4vp"]
-    public let flowTypes: [String] = [OID4FlowTypes.oid4vci, OID4FlowTypes.oid4vp]
+    public let flowTypes: [String] = [OID4FlowTypes.oid4vci, OID4FlowTypes.oid4vp, WmpSubFlowTypes.sign, WmpSubFlowTypes.match]
 
     private let config: OpenID4xConfig
     private weak var peer: WmpPeerContext?
+    // Running sign / match child flows: the task, and the parent flow it belongs to.
+    private let childLock = NSLock()
+    private var childTasks: [String: (task: Task<Void, Never>, parent: String, token: UUID)] = [:]
+    /// Answers that could not be sent (the connection was down), kept until the session resumes. The handler is
+    /// not run again for them.
+    private var unsentAnswers: [String: (method: String, params: [String: AnyCodable], parent: String)] = [:]
+    /// Children whose queued answer a replay has claimed and is sending: not queued, not running, and not to be
+    /// started again by a redelivered start.
+    private var replaying: [String: String] = [:]
+    /// Bumped at each resume, so an answer queued by a send that began before the resume is retried at once.
+    private var resumeGeneration = 0
+    /// How many timed retries the current run of failures has used; reset by a delivered answer or a resume.
+    private var retryAttempts: [String: Int] = [:]
+    private var cancelledChildren: Set<String> = []
+    // Set by `shutdown()`: no child may be registered or started afterwards, so a start still buffered in the
+    // peer's dispatch loop cannot launch a handler during teardown.
+    private var stopped = false
+    // Parents that ended (cancelled, completed or failed) while their child start may still be on its way: a
+    // start for one of them is dropped. Bounded: only the most recent are remembered.
+    private var endedParents: [String] = []
+    private let maxEndedParents = 256
+    /// Children whose terminal answer was sent: a redelivered start for one runs nothing. Bounded, oldest dropped.
+    private var completedChildren: Set<String> = []
+    private var completedOrder: [String] = []
+    private let maxCompletedChildren = 4096
+
+    private func rememberCompletedLocked(_ childId: String) {
+        guard completedChildren.insert(childId).inserted else { return }
+        completedOrder.append(childId)
+        if completedOrder.count > maxCompletedChildren {
+            completedChildren.remove(completedOrder.removeFirst())
+        }
+    }
 
     public init(config: OpenID4xConfig = OpenID4xConfig()) {
         self.config = config
@@ -526,7 +575,208 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
     // MARK: - WmpFlowHandler
 
     public func startFlow(params: FlowStartParams) async throws -> FlowStartResult {
+        // A sign or match sub-flow is answered when the wallet has an answer (it may wait for the user),
+        // not in the reply to the start request.
+        if params.flowType == WmpSubFlowTypes.sign || params.flowType == WmpSubFlowTypes.match {
+            let parent = params.params?.objectValue?["parent_flow_id"]?.stringValue ?? params.flowId
+            // Registered under the lock the task's own `finishChild` takes, so a fast child cannot finish first.
+            childLock.lock()
+            // Not after shutdown, not for a parent that already ended, and never a second handler for a child that is
+            // already running (a redelivered start must not replace the first task's tracking).
+            // A cancelled child's own id is in the ended list too: its redelivered start does not run it again.
+            let ended = stopped || endedParents.contains(parent) || endedParents.contains(params.flowId)
+                || completedChildren.contains(params.flowId)
+            let tracked = childTasks[params.flowId] != nil || unsentAnswers[params.flowId] != nil || replaying[params.flowId] != nil
+            if !ended, !tracked {
+                let token = UUID()
+                childTasks[params.flowId] = (Task { [self] in await runChildFlow(params: params, token: token) }, parent, token)
+            }
+            childLock.unlock()
+            // A start that is refused for good (its flow ended, or the profile stopped) has no task that would ever
+            // release the route the peer registered for it; a duplicate of a tracked child keeps its own.
+            if ended { peer?.releaseFlow(flowId: params.flowId) }
+        }
         return FlowStartResult(flowId: params.flowId, flowType: params.flowType)
+    }
+
+    /// Run one `sign` / `match` child flow to its answer: `wmp.flow.complete` on the CHILD flow with the
+    /// response as `result`, or `wmp.flow.error` on the child flow with `data.reason` `rejected` when
+    /// the wallet declines or fails. The handler is told the PARENT flow id (`parent_flow_id`), the
+    /// issuance or presentation the request belongs to, which is what the wallet keys its state by.
+    func runChildFlow(params: FlowStartParams, token: UUID = UUID()) async {
+        let childId = params.flowId
+        let payload = params.params
+        let parentId = payload?.objectValue?["parent_flow_id"]?.stringValue ?? childId
+        // Cancelled or shut down before it got going: no handler runs (Swift cancellation does not stop a task
+        // that has not started, and a handler must not begin signing for a flow that has ended).
+        guard !endedBeforeStart(childId, token) else { peer?.releaseFlow(flowId: childId); return }
+        let method: String
+        let answer: [String: AnyCodable]
+        do {
+            let members: [String: AnyCodable]
+            if params.flowType == WmpSubFlowTypes.sign {
+                guard let handler = config.onSignRequest, let payload else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
+                let signParams: SignSubFlowParams
+                do {
+                    signParams = try JSONDecoder().decode(SignSubFlowParams.self, from: try JSONEncoder().encode(payload))
+                } catch {
+                    throw ChildFlowFailure(code: "INVALID_PARAMS")
+                }
+                members = signResponseMembers(try await handler(parentId, signParams))
+            } else {
+                guard let handler = config.onMatchRequest else { throw ChildFlowFailure(code: "INVALID_PARAMS") }
+                members = matchResponseMembers(try await handler(parentId, payload))
+            }
+            method = WmpMethods.flowComplete
+            answer = ["flow_id": .string(childId), "result": .object_(members)]
+        } catch {
+            let fallback = params.flowType == WmpSubFlowTypes.match ? "MATCH_ERROR" : "SIGN_ERROR"
+            let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode ?? fallback
+            method = WmpMethods.flowError
+            answer = [
+                "flow_id": .string(childId), "code": .int(FlowErrorParams.flowErrorCode), "message": .string(code),
+                "data": .object_(["reason": .string("rejected"), "error_code": .string(code)]),
+            ]
+        }
+        // A flow that was cancelled gets no reply, whether its handler ignored the cancellation, threw
+        // `CancellationError` or returned normally. The child stays tracked until its answer is out, so a
+        // redelivered start cannot run a second handler beside it, and only this execution forgets it.
+        guard mayAnswer(childId) else { forgetChild(childId, token); peer?.releaseFlow(flowId: childId); return }
+        childLock.lock(); let sendGeneration = resumeGeneration; childLock.unlock()
+        do {
+            try await peer?.notify(method: method, params: answer)
+        } catch {
+            keepUnsent(childId, method: method, params: answer, parent: parentId, token: token, sendStartedAt: sendGeneration)
+            return
+        }
+        forgetChild(childId, token, completed: true)
+        peer?.releaseFlow(flowId: childId)
+    }
+
+    /// The session came back after a loss: the answers that could not be sent go out now.
+    public func sessionResumed() {
+        childLock.lock(); resumeGeneration += 1; retryAttempts.removeAll(); childLock.unlock()
+        drainUnsent()
+    }
+
+    /// Sends the queued answers. Each is CLAIMED under the lock before its send is awaited, so a second drain (another
+    /// resume while this send is suspended) cannot send it again; a failed send puts it back unless its flow has ended.
+    ///
+    /// - Parameter only: a timed retry drains just its OWNING child (revalidated: still queued, budget not spent by
+    ///   anyone else); only a resume drains the whole queue.
+    /// - Parameter onlyIfGeneration: a timer's resume generation: a timer scheduled before a resume (which reset the
+    ///   budgets and replayed the queue) is stale, and is validated under the same lock that claims the answer.
+    private func drainUnsent(only childId: String? = nil, onlyIfGeneration timerGeneration: Int? = nil) {
+        childLock.lock()
+        let pending = childId.map { unsentAnswers[$0] != nil ? [$0] : [] } ?? Array(unsentAnswers.keys)
+        childLock.unlock()
+        guard !pending.isEmpty else { return }
+        Task { [self] in
+            for childId in pending {
+                childLock.lock()
+                // Revalidated at each step: a parent that ended or a shutdown while an earlier send was suspended has
+                // already dropped the entry (or stopped the profile), and its answer must not go out now.
+                guard !stopped, timerGeneration == nil || timerGeneration == resumeGeneration,
+                      let answer = unsentAnswers.removeValue(forKey: childId) else { childLock.unlock(); continue }
+                replaying[childId] = answer.parent
+                let claimedAt = resumeGeneration
+                childLock.unlock()
+                let sent = (try? await peer?.notify(method: answer.method, params: answer.params)) != nil
+                childLock.lock()
+                replaying.removeValue(forKey: childId)
+                // The cancellation marker of a replaying child lives until its send finishes, independently of the
+                // bounded ended-flow list (which later events can evict).
+                // Removed unconditionally (then tested), so a cancelled replay never leaves its marker behind.
+                let wasCancelled = cancelledChildren.remove(childId) != nil
+                let ended = stopped || endedParents.contains(answer.parent) || endedParents.contains(childId) || wasCancelled
+                if sent || ended { retryAttempts.removeValue(forKey: childId) }
+                if sent { rememberCompletedLocked(childId) }
+                if !sent, !ended { unsentAnswers[childId] = answer }
+                // A resume that happened while this send was suspended found the answer claimed and could not send it.
+                let resumedMeanwhile = !sent && !ended && resumeGeneration != claimedAt
+                childLock.unlock()
+                if sent || ended { peer?.releaseFlow(flowId: childId) }
+                if resumedMeanwhile { drainUnsent(only: childId) } else if !sent, !ended { scheduleRetry(childId) }
+            }
+        }
+    }
+
+    /// The answer could not be sent: keep it for the resume (unless the flow ended or the profile stopped meanwhile).
+    private func keepUnsent(_ childId: String, method: String, params: [String: AnyCodable], parent: String, token: UUID, sendStartedAt generation: Int) {
+        childLock.lock()
+        let ended = stopped || endedParents.contains(parent) || endedParents.contains(childId) || cancelledChildren.contains(childId)
+        if !ended { unsentAnswers[childId] = (method, params, parent) }
+        // The owning task and its cancellation state go in the SAME critical section that queues the answer: a replay
+        // can claim the answer only after this lock is released, and then finds neither a task nor a stale marker
+        // that this execution would clear after a cancel marked the replay.
+        if let entry = childTasks[childId], entry.token == token {
+            childTasks.removeValue(forKey: childId)
+            cancelledChildren.remove(childId)
+        } else if childTasks[childId] == nil {
+            cancelledChildren.remove(childId)
+        }
+        // A resume that happened while this send was suspended has already drained an empty queue: retry now.
+        let resumedMeanwhile = !ended && resumeGeneration != generation
+        childLock.unlock()
+        if ended { peer?.releaseFlow(flowId: childId) }
+        if resumedMeanwhile { drainUnsent(only: childId) } else if !ended { scheduleRetry(childId) }
+    }
+
+    /// A failed send brings no resume event when the connection itself is healthy (a failed POST on a live stream):
+    /// the queue is drained again after a bounded backoff. Cancellation and duplicate suppression are the queue's own.
+    ///
+    /// The budget belongs to the ANSWER (`childId`): one that used its retries up cannot starve the next, and neither a
+    /// cancellation nor another child's success changes it. It is cleared when the answer is sent or ends, and by a resume.
+    private func scheduleRetry(_ childId: String) {
+        childLock.lock()
+        let used = retryAttempts[childId] ?? 0
+        guard !stopped, unsentAnswers[childId] != nil, used < config.sendRetryDelaysMs.count else { childLock.unlock(); return }
+        let delay = config.sendRetryDelaysMs[used]
+        retryAttempts[childId] = used + 1
+        let scheduledAt = resumeGeneration
+        childLock.unlock()
+        Task { [self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(delay, 0)) * 1_000_000)
+            drainUnsent(only: childId, onlyIfGeneration: scheduledAt)
+        }
+    }
+
+    /// Pending cancellation markers (for tests: they must not accumulate).
+    var cancellationMarkerCount: Int { childLock.lock(); defer { childLock.unlock() }; return cancelledChildren.count }
+
+    /// Whether this child was cancelled, or the profile shut down, before its handler was entered. Forgets it if so.
+    private func endedBeforeStart(_ childId: String, _ token: UUID) -> Bool {
+        childLock.lock(); defer { childLock.unlock() }
+        guard stopped || cancelledChildren.contains(childId) else { return false }
+        if childTasks[childId]?.token == token || childTasks[childId] == nil {
+            childTasks.removeValue(forKey: childId)
+            cancelledChildren.remove(childId)
+        }
+        return true
+    }
+
+    /// Whether this child may still answer.
+    private func mayAnswer(_ childId: String) -> Bool {
+        childLock.lock(); defer { childLock.unlock() }
+        return !cancelledChildren.contains(childId)
+    }
+
+    /// Forgets the child, but only the execution that owns the tracking entry may (a direct run owns none).
+    ///
+    /// - Parameter completed: the terminal answer went out. That is recorded in the same critical section as the
+    ///   removal, so no redelivered start can slip between the two and run the handler again.
+    private func forgetChild(_ childId: String, _ token: UUID, completed: Bool = false) {
+        childLock.lock(); defer { childLock.unlock() }
+        if completed { rememberCompletedLocked(childId) }
+        guard let entry = childTasks[childId] else { cancelledChildren.remove(childId); return }
+        guard entry.token == token else { return }
+        childTasks.removeValue(forKey: childId)
+        cancelledChildren.remove(childId)
+    }
+
+    private struct ChildFlowFailure: Error, WmpErrorCodeProviding {
+        let code: String
+        var wmpErrorCode: String? { code }
     }
 
     public func handleProgress(params: FlowProgressParams) async {
@@ -534,14 +784,13 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         let step = params.step
         let payload = params.payload
 
-        switch step {
-        case stepSignRequest, VCIStep.generatingProof:
-            await handleSignRequest(flowId: flowId, payload: payload)
-        case stepMatchRequest, VPStep.matchingCredentials:
-            await handleMatchRequest(flowId: flowId, payload: payload)
-        case stepTrustEvaluation, VCIStep.evaluatingTrust:
+        // Signing and matching arrive as child flows (`startFlow`), not as progress. Trust is the one progress the
+        // wallet answers, and only when the engine marks it: issuer trust is `evaluating_trust`, verifier trust
+        // `evaluating_verifier_trust`, and both also send informational progress under the same step, which must
+        // not be answered (an early answer could satisfy the engine's later wait).
+        if wantsTrustAnswer(payload), step == VCIStep.evaluatingTrust || step == VPStep.evaluatingVerifierTrust {
             await handleTrustEvaluation(flowId: flowId, payload: payload)
-        default:
+        } else {
             await config.onProgress?(flowId, step, payload)
         }
     }
@@ -550,59 +799,80 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         return FlowActionResult(flowId: params.flowId, accepted: true)
     }
 
+    /// Cancels the child flows that belong to `flowId` (or are `flowId`): a flow that has ended gets no more
+    /// answers from handlers still suspended for it.
+    private func cancelChildren(of flowId: String) {
+        childLock.lock()
+        var running: [Task<Void, Never>] = []
+        var ids: [String] = []
+        endedParents.append(flowId)
+        if endedParents.count > maxEndedParents { endedParents.removeFirst(endedParents.count - maxEndedParents) }
+        for (childId, answer) in unsentAnswers where childId == flowId || answer.parent == flowId {
+            unsentAnswers.removeValue(forKey: childId)
+            retryAttempts.removeValue(forKey: childId)
+            ids.append(childId)
+        }
+        // A child whose answer a replay has claimed and is sending: marked, so a failing send is not requeued, and its
+        // route is released with the rest.
+        for (childId, parent) in replaying where childId == flowId || parent == flowId {
+            cancelledChildren.insert(childId)
+            ids.append(childId)
+        }
+        for (childId, child) in childTasks where childId == flowId || child.parent == flowId {
+            cancelledChildren.insert(childId)
+            running.append(child.task)
+            ids.append(childId)
+        }
+        childLock.unlock()
+        for task in running { task.cancel() }
+        // The peer forgets only the flow that ended; its children are released here, without waiting for a
+        // suspended handler to return (which may be never).
+        for id in ids { peer?.releaseFlow(flowId: id) }
+    }
+
+    public func shutdown() {
+        childLock.lock()
+        // Once: a session is shut down by its teardown, its close and its terminal hook, and the application's
+        // callback must not run again after a replacement session has begun.
+        guard !stopped else { childLock.unlock(); return }
+        stopped = true
+        // Children whose answers were queued have no task left to find: their routing entries are released too.
+        var running: [Task<Void, Never>] = []
+        var ids: [String] = Array(unsentAnswers.keys) + Array(replaying.keys)
+        unsentAnswers.removeAll()
+        for (childId, child) in childTasks {
+            cancelledChildren.insert(childId)
+            running.append(child.task)
+            ids.append(childId)
+        }
+        childLock.unlock()
+        for task in running { task.cancel() }
+        for id in ids { peer?.releaseFlow(flowId: id) }
+        // The application hears of it last, once no child can start or answer: what it holds for these flows
+        // (keys, opened responses) goes with them.
+        config.onShutdown?()
+    }
+
     public func handleComplete(params: FlowCompleteParams) async {
+        cancelChildren(of: params.flowId)
         await config.onComplete?(params.flowId, params.result)
     }
 
     public func handleError(params: FlowErrorParams) async {
+        cancelChildren(of: params.flowId)
         await config.onError?(params.flowId, params.code, params.message)
     }
 
     public func handleCancel(params: FlowCancelParams) async {
-        // No-op for now
+        // A cancelled child answers nothing, even if its handler ignores the cancellation.
+        cancelChildren(of: params.flowId)
     }
 
     // MARK: - Sub-flow Handlers
 
-    private func handleSignRequest(flowId: String, payload: AnyCodable?) async {
-        guard let handler = config.onSignRequest else { return }
-
-        guard let payload else {
-            await sendFlowError(flowId: flowId, code: "INVALID_PARAMS", message: "sign_request missing payload")
-            return
-        }
-        let signParams: SignSubFlowParams
-        do {
-            let data = try JSONEncoder().encode(payload)
-            signParams = try JSONDecoder().decode(SignSubFlowParams.self, from: data)
-        } catch {
-            await sendFlowError(flowId: flowId, code: "INVALID_PARAMS", message: "sign_request payload decode failed: \(error.localizedDescription)")
-            return
-        }
-
-        do {
-            let result = try await handler(flowId, signParams)
-            await sendSignResponse(flowId: flowId, result: result)
-        } catch {
-            // An error that names its code is reported with that code and nothing
-            // else: no developer text goes to the peer.
-            if let code = (error as? WmpErrorCodeProviding)?.wmpErrorCode {
-                await sendFlowError(flowId: flowId, code: code, message: code)
-            } else {
-                await sendFlowError(flowId: flowId, code: "SIGN_ERROR", message: error.localizedDescription)
-            }
-        }
-    }
-
-    private func handleMatchRequest(flowId: String, payload: AnyCodable?) async {
-        guard let handler = config.onMatchRequest else { return }
-
-        do {
-            let result = try await handler(flowId, payload)
-            await sendMatchResponse(flowId: flowId, result: result)
-        } catch {
-            await sendFlowError(flowId: flowId, code: "MATCH_ERROR", message: error.localizedDescription)
-        }
+    private func wantsTrustAnswer(_ payload: AnyCodable?) -> Bool {
+        guard case .object_(let members)? = payload, case .bool(true)? = members[trustEvaluationRequired] else { return false }
+        return true
     }
 
     private func handleTrustEvaluation(flowId: String, payload: AnyCodable?) async {
@@ -618,12 +888,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
 
     // MARK: - Response Helpers
 
-    private func sendSignResponse(flowId: String, result: SignSubFlowResult) async {
-        guard let peer else { return }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "action": .string("sign_response"),
-        ]
+    /// The members of a sign answer, under the names the legacy `sign_response` uses, so one backend path
+    /// reads them whichever route they arrive on.
+    private func signResponseMembers(_ result: SignSubFlowResult) -> [String: AnyCodable] {
+        var params: [String: AnyCodable] = [:]
         if let proofs = result.proofs {
             let encoded = proofs.map { proof -> [String: AnyCodable] in
                 var dict: [String: AnyCodable] = ["proof_type": .string(proof.proofType)]
@@ -647,11 +915,10 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
         if let pop = result.clientAttestationPoP { params["client_attestation_pop"] = .string(pop) }
         if let keyId = result.dpopKeyId { params["dpop_key_id"] = .string(keyId) }
         if let proof = result.dpopProof { params["dpop_proof"] = .string(proof) }
-        try? await peer.notify(method: WmpMethods.flowAction, params: params)
+        return params
     }
 
-    private func sendMatchResponse(flowId: String, result: MatchResult) async {
-        guard let peer else { return }
+    private func matchResponseMembers(_ result: MatchResult) -> [String: AnyCodable] {
         let matchArray = result.matches.map { match -> [String: AnyCodable] in
             var dict: [String: AnyCodable] = [
                 "credential_id": .string(match.credentialId),
@@ -662,37 +929,22 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, @unchecked Senda
             if let claims = match.availableClaims { dict["available_claims"] = .array(claims.map { .string($0) }) }
             return dict
         }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "action": .string("match_response"),
-            "matches": .array(matchArray.map { AnyCodable.object_($0) }),
-        ]
+        var params: [String: AnyCodable] = ["matches": .array(matchArray.map { AnyCodable.object_($0) })]
         // Without this an empty match set arrives as a bare "nothing matched"
         // and the reason - the only thing that can tell the user *which*
         // credential they are missing - is lost on this transport.
         if let reason = result.noMatchReason { params["no_match_reason"] = .string(reason) }
-        try? await peer.notify(method: WmpMethods.flowAction, params: params)
+        return params
     }
 
     private func sendTrustResult(flowId: String, result: TrustResult) async {
         guard let peer else { return }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "action": .string("trust_result"),
-            "trusted": .bool(result.trusted),
-        ]
-        if let framework = result.framework { params["framework"] = .string(framework) }
-        if let reason = result.reason { params["reason"] = .string(reason) }
-        try? await peer.notify(method: WmpMethods.flowAction, params: params)
-    }
-
-    private func sendFlowError(flowId: String, code: String, message: String?) async {
-        guard let peer else { return }
-        var params: [String: AnyCodable] = [
-            "flow_id": .string(flowId),
-            "code": .string(code),
-        ]
-        if let message { params["message"] = .string(message) }
-        try? await peer.notify(method: WmpMethods.flowError, params: params)
+        // go-wmp reads the action's members under `params`, not next to `action`.
+        var members: [String: AnyCodable] = ["trusted": .bool(result.trusted)]
+        if let framework = result.framework { members["framework"] = .string(framework) }
+        if let reason = result.reason { members["reason"] = .string(reason) }
+        try? await peer.notify(method: WmpMethods.flowAction, params: [
+            "flow_id": .string(flowId), "action": .string("trust_result"), "params": .object_(members),
+        ])
     }
 }

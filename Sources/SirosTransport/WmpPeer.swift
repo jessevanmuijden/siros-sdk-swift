@@ -84,14 +84,20 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         sender: String? = nil,
         capabilitiesOffered: [String: AnyCodable]? = nil
     ) async throws {
+        // Before `create`: it starts the disconnect monitor, so a loss right after it must find the hooks.
+        installSessionHooks()
         try await session.create(authToken: authToken, sender: sender, capabilitiesOffered: capabilitiesOffered)
         startDispatch()
     }
 
     /// Close the session and stop dispatching.
     public func close(reason: String = "complete") async throws {
+        // Handlers still running for the orchestrator's child flows end with the session, and answer nothing.
+        registry.shutdownProfiles()
+        // The event stream ends whether or not the close notification got through: a consumer must not stay suspended on
+        // a session that is closed.
+        defer { eventContinuation.finish() }
         try await session.close(reason: reason)
-        eventContinuation.finish()
     }
 
     // MARK: - PeerContext (outgoing)
@@ -142,6 +148,12 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
 
     /// Send a flow cancel notification.
     public func cancelFlow(flowId: String, reason: String? = nil) async throws {
+        // A cancel made here stops this side's work for the flow at once and forgets the flow, without waiting
+        // for the peer to echo it: only an INCOMING cancel used to reach the handler.
+        if let handler = registry.flowHandler(for: lookupFlowType(flowId)) {
+            await handler.handleCancel(params: FlowCancelParams(flowId: flowId, reason: reason))
+        }
+        removeFlowType(flowId: flowId)
         let params = try codec.encodeParams(
             FlowCancelParams(wmp: WmpMeta(), flowId: flowId, reason: reason)
         )
@@ -149,6 +161,19 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
     }
 
     // MARK: - Dispatch Loop
+
+    /// Stops the profiles' in-flight work (child flows running application handlers) and keeps them from
+    /// starting more. For session teardown by a caller that cannot wait for `close()`.
+    public func shutdownProfiles() {
+        registry.shutdownProfiles()
+    }
+
+    private func installSessionHooks() {
+        // A session that ends for good (reconnects exhausted, or closed) ends the handlers running for it, whether
+        // or not anyone calls `close()`. A hook, not a reader of `stateStream`: that stream belongs to the host.
+        session.onTerminal = { [weak self] in self?.registry.shutdownProfiles() }
+        session.onResumed = { [weak self] in self?.registry.resumeProfiles() }
+    }
 
     private func startDispatch() {
         Task { [weak self] in
@@ -278,6 +303,10 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         flowTypeLock.lock()
         defer { flowTypeLock.unlock() }
         return flowTypeMap[flowId] ?? "unknown"
+    }
+
+    public func releaseFlow(flowId: String) {
+        removeFlowType(flowId: flowId)
     }
 
     private func removeFlowType(flowId: String) {

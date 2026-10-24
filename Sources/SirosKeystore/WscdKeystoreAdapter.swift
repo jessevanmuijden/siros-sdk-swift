@@ -144,7 +144,6 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         hkdfSalt: Data,
         hkdfInfo: Data
     ) async throws {
-        keyGate.reopen()
         // The WSCD manages its own signing-key protection (no PRF unlock for
         // key material itself), but this adapter's *credentials* (and now
         // `S.wscdCredentials`) are still PRF-protected via
@@ -168,7 +167,6 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         hkdfInfo: Data,
         prfSalt: Data
     ) async throws {
-        keyGate.reopen()
         try await credentialsKeystore.unlock(
             prfOutput: prfOutput,
             encryptedContainer: encryptedContainer,
@@ -189,6 +187,10 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// Deletes every key the retained `signer` holds, except those on an
     /// external authenticator. Continues past a failing key and throws one
     /// error naming each, so the caller can report that key material remains.
+    public func reopenKeyOperations() {
+        keyGate.reopen()
+    }
+
     public func eraseKeyMaterial() async throws {
         // No new key may be created from here on, and one being created now is
         // waited for, so the snapshot below cannot miss it.

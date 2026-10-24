@@ -6,6 +6,7 @@ import SirosAuth
 import SirosCredentials
 import SirosKeystore
 import SirosTransport
+import SwiftCBOR
 @testable import SirosWallet
 
 /// `SirosWallet.deleteAccount` (go-wallet-backend#352): the begin -> assertion
@@ -62,7 +63,18 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         func getCredential(id: Int64) async throws -> String? { nil }
         func getAllCredentials() async throws -> [Int64: String] { [:] }
         func deleteCredential(id: Int64) async throws {}
+        /// When set, `clearCredentials` parks here: the wipe is suspended inside its keystore erase.
+        var clearGate: ConsentGate?
+        /// When set, the proximity signing parks here before returning.
+        var signGate: ConsentGate?
+        func signMdocPresentationForProximity(
+            credentialBytes: Data, disclosedClaims: [String]?, sessionTranscriptBytes: Data, kid: String?
+        ) async throws -> Data {
+            if let signGate { await signGate.park() }
+            return Data([0xA0])
+        }
         func clearCredentials() async throws {
+            if let clearGate { await clearGate.park() }
             if let clearCredentialsError { throw clearCredentialsError }
             clearedCredentials = true
         }
@@ -379,6 +391,7 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             await withCheckedContinuation { releaseContinuation = $0; lock.unlock() }
         }
         var hasEntered: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+        func markEntered() { lock.lock(); entered = true; lock.unlock() }
         func release() {
             lock.lock(); released = true; let c = releaseContinuation; releaseContinuation = nil; lock.unlock()
             c?.resume()
@@ -437,6 +450,150 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         wallet.lock.lock(); let cached = wallet.pendingMatchResultsByFlow.count; wallet.lock.unlock()
         XCTAssertEqual(cached, 0, "no cached match results after the wipe")
         XCTAssertEqual(keystore.savedPresentationRecords, 0)
+    }
+
+    // MARK: - Write admission closes at the START of the wipe
+
+    /// An in-memory store whose `save` can park: a write that resumes only after the wipe has finished.
+    private final class ParkingStore: CredentialStore, @unchecked Sendable {
+        let inner = InMemoryCredentialStore()
+        var saveGate: ConsentGate?
+        func getAll() async -> [StoredCredential] { await inner.getAll() }
+        func getById(_ id: Int64) async -> StoredCredential? { await inner.getById(id) }
+        func save(_ credential: StoredCredential) async {
+            if let saveGate { await saveGate.park() }
+            await inner.save(credential)
+        }
+        func update(_ credential: StoredCredential) async { await inner.update(credential) }
+        func delete(_ id: Int64) async { await inner.delete(id) }
+        func clear() async { await inner.clear() }
+    }
+
+    private func gateWallet(store: CredentialStore, keystore: RecordingKeystore) -> SirosWallet {
+        let wallet = SirosWallet(
+            config: WalletConfig(backendUrl: "https://wallet.example.invalid", credentialStore: store),
+            authProvider: RecordingAuthProvider(), sessionStore: InMemorySessionStore(), keystore: keystore,
+            accountRegistry: .inMemory()
+        )!
+        wallet.credentialConsumptionPolicy = .neverConsume
+        return wallet
+    }
+
+    private func jwtCredential() -> String {
+        let now = Int64(Date().timeIntervalSince1970)
+        let b64 = (try! JSONSerialization.data(withJSONObject: ["exp": now + 3600, "iat": now])).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return "eyJ.\(b64).sig"
+    }
+
+    private func completion(_ credentials: [[String: Any]], flowId: String = "flow-1") -> FlowCompleteMessage {
+        let obj: [String: Any] = ["type": MessageTypes.flowComplete, "flow_id": flowId, "credentials": credentials]
+        var msg = try! JSONDecoder().decode(FlowCompleteMessage.self, from: JSONSerialization.data(withJSONObject: obj))
+        msg.startTag = 0
+        return msg
+    }
+
+    /// A flow completion that STARTS while the wipe is suspended in its keystore erase must not store anything
+    /// once the wipe is over: admission was closed before the wipe's first await.
+    func testACompletionStartingDuringTheEraseStoresNothing() async throws {
+        let store = ParkingStore()
+        let saveGate = ConsentGate()
+        store.saveGate = saveGate
+        let keystore = RecordingKeystore()
+        let eraseGate = ConsentGate()
+        keystore.clearGate = eraseGate
+        let wallet = gateWallet(store: store, keystore: keystore)
+
+        let wiping = Task { await wallet.wipeLocalState() }
+        while !eraseGate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        // The wipe is suspended in the keystore erase; a completion begins now and would park in its save.
+        let completing = Task { await wallet.handleFlowComplete(msg: completion([["format": "vc+sd-jwt", "credential": jwtCredential()]])) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        eraseGate.release()
+        _ = await wiping.value
+        saveGate.release()          // a save that was admitted would land only now, after the wipe
+        await completing.value
+
+        let saved = await store.getAll()
+        XCTAssertTrue(saved.isEmpty, "nothing may be stored by a completion that began during the erase")
+    }
+
+    /// The trust-check variant: the completion would pass the issuer trust gate (its hook answers after the wipe
+    /// ended) and then save; it must have been refused when it started.
+    func testAnMdocCompletionStartingDuringTheEraseNeverReachesTheTrustCheckOrTheStore() async throws {
+        let store = ParkingStore()
+        let saveGate = ConsentGate()
+        store.saveGate = saveGate
+        let keystore = RecordingKeystore()
+        let eraseGate = ConsentGate()
+        keystore.clearGate = eraseGate
+        let wallet = gateWallet(store: store, keystore: keystore)
+        let trustCalled = ConsentGate()
+        wallet.mdocIssuanceTrustHook = { _ in
+            trustCalled.markEntered()
+            return TrustResult(trusted: true)
+        }
+        let item: CBOR = .tagged(.encodedCBORDataItem, .byteString(CBOR.map([
+            .utf8String("digestID"): .unsignedInt(0), .utf8String("random"): .byteString([UInt8](repeating: 0, count: 16)),
+            .utf8String("elementIdentifier"): .utf8String("given_name"), .utf8String("elementValue"): .utf8String("Jane"),
+        ]).encode()))
+        let mso: CBOR = .map([.utf8String("docType"): .utf8String("org.iso.18013.5.1.mDL")])
+        let issuerAuth: CBOR = .array([
+            .byteString([]), .map([:]),
+            .byteString(CBOR.tagged(.encodedCBORDataItem, .byteString(mso.encode())).encode()), .byteString([UInt8](repeating: 0, count: 64)),
+        ])
+        let raw = Data(CBOR.map([
+            .utf8String("nameSpaces"): .map([.utf8String("org.iso.18013.5.1"): .array([item])]),
+            .utf8String("issuerAuth"): issuerAuth,
+        ]).encode()).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+
+        let wiping = Task { await wallet.wipeLocalState() }
+        while !eraseGate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        let completing = Task { await wallet.handleFlowComplete(msg: completion([["format": "mso_mdoc", "credential": raw]])) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        eraseGate.release()
+        _ = await wiping.value
+        saveGate.release()
+        await completing.value
+
+        let saved = await store.getAll()
+        XCTAssertTrue(saved.isEmpty)
+        XCTAssertFalse(trustCalled.hasEntered, "the trust check is never reached by a completion that began during the erase")
+    }
+
+    /// Proximity signing that resumes after the wipe records no presentation and reports the failure.
+    func testProximitySigningResumingAfterTheWipeRecordsNothing() async throws {
+        let store = InMemoryCredentialStore()
+        await store.save(StoredCredential(id: 5, format: "mso_mdoc", raw: "YWJj", kid: "k1", batchId: 5, instanceId: 0))
+        let keystore = RecordingKeystore()
+        keystore.keyIds = ["k1"]
+        let signGate = ConsentGate()
+        keystore.signGate = signGate
+        let wallet = gateWallet(store: store, keystore: keystore)
+
+        let signing = Task { () -> Error? in
+            do { _ = try await wallet.signMdocPresentationForProximity(credentialId: 5, disclosedClaims: nil, sessionTranscriptBytes: Data([1])); return nil } catch { return error }
+        }
+        while !signGate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        _ = await wallet.wipeLocalState()
+        signGate.release()
+        let failure = await signing.value
+
+        XCTAssertNotNil(failure, "the presentation is aborted when it can no longer be recorded")
+        XCTAssertTrue(wallet.presentationHistory.isEmpty)
+        XCTAssertEqual(keystore.savedPresentationRecords, 0)
+    }
+
+    /// Admission stays closed after the wipe and opens only for a new session.
+    func testAdmissionReopensOnlyForANewSession() async throws {
+        let store = InMemoryCredentialStore()
+        let wallet = gateWallet(store: store, keystore: RecordingKeystore())
+        XCTAssertNotNil(wallet.currentTeardownToken())
+        _ = await wallet.wipeLocalState()
+        XCTAssertNil(wallet.currentTeardownToken(), "closed once the wipe has finished, not only while it runs")
+        await wallet.reopenForNewSession()
+        XCTAssertNotNil(wallet.currentTeardownToken())
     }
 
     // MARK: - Authorization-server token cache

@@ -358,15 +358,8 @@ public final class SirosWallet: @unchecked Sendable {
 
     let credentialStore: CredentialStore
 
-    /// Orders credential writes against an account wipe. `storeEpoch` is
-    /// bumped (under `lock`) when a wipe begins; a writer captured the epoch
-    /// before its awaits and may save only while it is unchanged, doing the
-    /// check and the save inside `credentialWriteGate`. The wipe takes the gate
-    /// after bumping, so an in-flight save finishes before it clears and a
-    /// later one is refused: an issuance that was awaiting metadata when the
-    /// account was deleted cannot put its credential back afterwards.
-    let credentialWriteGate = AsyncMutex()
-    var storeEpoch: UInt64 = 0
+    /// Write admission around an account wipe; see `TeardownGate`.
+    let teardownGate = TeardownGate()
 
     /// A BBS credential's holder state vault - `nil` unless `keystore`
     /// conforms to `ExtensionStore`. See `removeBbsHolderStateIfAny`.
@@ -711,15 +704,20 @@ public final class SirosWallet: @unchecked Sendable {
     // Not `private`: `SirosWallet+DCAPI.swift` and `SirosWallet+Engine.swift`
     // need it too - same cross-file-extension-access reason as `keystore`
     // above.
-    /// - Parameter token: when given, the record is applied only while it is
-    ///   current. The check, the in-memory insert and the keystore write are
-    ///   one step under `credentialWriteGate`, which a wipe drains, so a
-    ///   handler that resumed after an account deletion records nothing.
+    /// - Parameter token: captured by the caller before its first `await`. The
+    ///   record is applied only while it is current; the check, the in-memory
+    ///   insert and the keystore write are one admitted write, which a wipe
+    ///   closes and drains, so a handler that resumed after an account deletion
+    ///   records nothing. Returns false when it was refused.
     @discardableResult
-    func recordPresentation(_ record: PresentationRecord, token: TeardownToken? = nil) async -> Bool {
-        let applied: Bool = await credentialWriteGate.withLock { [self] in
+    func recordPresentation(_ record: PresentationRecord, token: TeardownToken) async -> Bool {
+        lock.lock()
+        let current = isCurrentLocked(token)
+        lock.unlock()
+        guard current else { return false }
+        let applied: Bool? = await teardownGate.admit(token.ticket) { [self] in
             lock.lock()
-            if let token, !isCurrentLocked(token) { lock.unlock(); return false }
+            guard isCurrentLocked(token) else { lock.unlock(); return false }
             _presentationHistory.insert(record, at: 0)
             lock.unlock()
             if keystore.isUnlocked,
@@ -728,7 +726,7 @@ public final class SirosWallet: @unchecked Sendable {
             }
             return true
         }
-        guard applied else { return false }
+        guard applied == true else { return false }
         if keystore.isUnlocked { await persistAndSyncKeystore() }
         await checkRenewThresholds(consumedCredentialIds: record.credentialIds)
         return true
@@ -989,6 +987,7 @@ public final class SirosWallet: @unchecked Sendable {
         guard let asClient = authServerClient, let tokens = authTokens else {
             throw SirosError.wallet(message: "AuthServerClient not initialized")
         }
+        await reopenForNewSession()
         setState(.connecting)
         // See logout()'s identical reset: this enrollment gets its own
         // instance key, so any WIA still cached from an earlier account must
@@ -1149,6 +1148,8 @@ public final class SirosWallet: @unchecked Sendable {
         guard let asClient = authServerClient, let tokens = authTokens else {
             throw SirosError.wallet(message: "AuthServerClient not initialized")
         }
+        // A new session: admits writes again if an account wipe had closed them (waits for one still running).
+        await reopenForNewSession()
         setState(.connecting)
         // See logout()'s identical reset: a WIA still cached from another
         // account (or from before a re-enrollment) must not be what identifies
@@ -1345,6 +1346,7 @@ public final class SirosWallet: @unchecked Sendable {
 
     /// Resume a previous session without requiring a new WebAuthn assertion.
     public func resumeSession() async {
+        await reopenForNewSession()
         // Restore the active account ID so the session store reads the right data
         let resumingAccountId = accountRegistry.activeAccountId
         if let resumingAccountId {
