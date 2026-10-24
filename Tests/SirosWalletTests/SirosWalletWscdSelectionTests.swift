@@ -244,6 +244,23 @@ final class SirosWalletWscdSelectionTests: XCTestCase {
         }
         XCTAssertEqual(fidoKeystore.generateKeypairsCallCount, 0)
     }
+
+    func testJweMainKeystoreWithRecordedFido2StateCountsAsOnboarded() async throws {
+        // Enrollment metadata lives only in the JWE main keystore (synced S.wscdCredentials);
+        // the fido2 adapter itself reports nothing. The account IS onboarded.
+        let fidoKeystore = StubKeystoreManager(label: "fido2")
+        fidoKeystore.onboarded = false
+        let jwe = JweKeystore()
+        await jwe.setWscdCredentials(pluginId: "fido2", state: "c3RhdGU")
+        var config = WalletConfig(backendUrl: "https://example.invalid")
+        config.availableKeystores = ["fido2": fidoKeystore]
+        let w = SirosWallet(config: config, authProvider: StubAuthProvider(), keystore: jwe)!
+        w.apiClient = fakeApiClient()
+        w.activeVctm = Vctm(vct: "urn:example:pid", requiredKeyStorage: "iso_18045_high")
+
+        let (result, _) = try await w.requestBackendKeyAttestation(audience: "https://issuer.example.com", nonce: "n", count: 1)
+        XCTAssertEqual(result?.keyIds.first, "fido2-key-0")
+    }
     #endif
 
     func testOnboardedFido2StillGeneratesKeys() async throws {
