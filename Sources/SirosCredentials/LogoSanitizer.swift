@@ -48,6 +48,8 @@ public enum LogoRejection: Error, Sendable, Equatable {
     case dimensionsTooLarge
     /// A remote logo fetch did not finish within `fetchTimeout`.
     case timedOut
+    /// `fetchAndSanitize` was given a timeout that is not finite or not positive.
+    case invalidTimeout
     /// No ImageIO on this platform (Linux): data: logos fail closed.
     case platformUnsupported
 }
@@ -119,6 +121,7 @@ public enum LogoSanitizer {
     public static func fetchAndSanitize(_ url: URL, session: URLSession = .shared,
                                          timeout: TimeInterval = fetchTimeout) async -> Result<DisplayLogo, LogoRejection> {
         guard let url = validatedRemoteUrl(url.absoluteString) else { return .failure(.invalidRemoteUrl) }
+        guard let timeout = effectiveTimeout(timeout) else { return .failure(.invalidTimeout) }
         #if canImport(ImageIO)
         // One wall-clock budget for request AND body: a trickle that keeps
         // URLSession's inactivity timer alive still loses the race.
@@ -165,6 +168,17 @@ public enum LogoSanitizer {
         }
     }
     #endif
+
+    /// Longest budget `fetchAndSanitize` will honour; larger values are clamped to it.
+    public static let maxFetchTimeout: TimeInterval = 120
+
+    /// The budget to use, or nil when it is unusable (NaN, infinite, zero or
+    /// negative). Anything above `maxFetchTimeout` is clamped, so the
+    /// nanosecond conversion can never overflow.
+    static func effectiveTimeout(_ t: TimeInterval) -> TimeInterval? {
+        guard t.isFinite, t > 0 else { return nil }
+        return min(t, maxFetchTimeout)
+    }
 
     /// Wall-clock budget for one remote logo fetch (request and body).
     public static let fetchTimeout: TimeInterval = 15

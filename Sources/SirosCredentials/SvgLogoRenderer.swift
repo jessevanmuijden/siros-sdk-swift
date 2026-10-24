@@ -64,19 +64,36 @@ enum SvgActiveContentGuard {
     private static let lengthPattern = try! NSRegularExpression( // swiftlint:disable:this force_try
         pattern: "^[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?(px|pt|pc|mm|cm|in|em|ex|%)?$")
 
+    /// A CSS/SVG length: number, optional unit, magnitude within `maxSvgNumber`.
+    static func lengthProblem(_ raw: String) -> LogoRejection? {
+        let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let r = NSRange(v.startIndex..., in: v)
+        guard let m = lengthPattern.firstMatch(in: v, range: r) else { return .invalidSvg }
+        // Number = everything before the unit (group 3), so "em"/"ex" are not mistaken for an exponent.
+        let unitStart = m.range(at: 3).location == NSNotFound ? r.length : m.range(at: 3).location
+        let digits = (v as NSString).substring(to: unitStart)
+        guard let d = Double(digits), d.isFinite else { return .invalidSvg }
+        return abs(d) > maxSvgNumber ? .dimensionsTooLarge : nil
+    }
+
     /// nil when width/height/viewBox of an `<svg>` element are safe to hand to SwiftDraw.
+    /// SwiftDraw gives an inline `style="width:..."` precedence over the
+    /// attribute and traps on the same huge values (verified on 0.29.0), so
+    /// width/height declared in a `style` attribute get the same check.
+    /// (Other CSS routes were tried and are safe: width/height on shapes,
+    /// stroke-width, font-size, transform, `<style>` rules.)
     static func dimensionProblem(_ attrs: [String: String]) -> LogoRejection? {
         for (key, raw) in attrs {
             switch localName(key) {
             case "width", "height":
-                let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                let r = NSRange(v.startIndex..., in: v)
-                guard let m = lengthPattern.firstMatch(in: v, range: r) else { return .invalidSvg }
-                // Number = everything before the unit (group 3), so "em"/"ex" are not mistaken for an exponent.
-                let unitStart = m.range(at: 3).location == NSNotFound ? r.length : m.range(at: 3).location
-                let digits = (v as NSString).substring(to: unitStart)
-                guard let d = Double(digits), d.isFinite else { return .invalidSvg }
-                if abs(d) > maxSvgNumber { return .dimensionsTooLarge }
+                if let bad = lengthProblem(raw) { return bad }
+            case "style":
+                for decl in raw.split(separator: ";") {
+                    guard let colon = decl.firstIndex(of: ":") else { continue }
+                    let prop = decl[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    let value = String(decl[decl.index(after: colon)...])
+                    if ["width", "height"].contains(prop), let bad = lengthProblem(value) { return bad }
+                }
             case "viewbox":
                 let parts = raw.split(whereSeparator: { " ,\t\r\n".contains($0) })
                 guard parts.count == 4 else { return .invalidSvg }

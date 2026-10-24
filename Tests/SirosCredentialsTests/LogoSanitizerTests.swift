@@ -40,6 +40,23 @@ final class LogoSanitizerTests: XCTestCase {
         XCTAssertEqual(rejection("https:///l.png"), .invalidRemoteUrl)
     }
 
+    func testEffectiveTimeoutValidatesAndClamps() {
+        for bad in [TimeInterval.nan, .infinity, -.infinity, 0, -1, -0.0001, -.greatestFiniteMagnitude] {
+            XCTAssertNil(LogoSanitizer.effectiveTimeout(bad), "\(bad)")
+        }
+        XCTAssertEqual(LogoSanitizer.effectiveTimeout(0.5), 0.5)
+        XCTAssertEqual(LogoSanitizer.effectiveTimeout(1e300), LogoSanitizer.maxFetchTimeout)
+        XCTAssertEqual(LogoSanitizer.effectiveTimeout(.greatestFiniteMagnitude), LogoSanitizer.maxFetchTimeout)
+        XCTAssertEqual(LogoSanitizer.effectiveTimeout(LogoSanitizer.maxFetchTimeout), LogoSanitizer.maxFetchTimeout)
+    }
+
+    func testFetchRejectsUnusableTimeoutBeforeAnyRequest() async {
+        let url = URL(string: "https://example.org/a.svg")!
+        for bad in [TimeInterval.nan, .infinity, -1, 0] {
+            if case .failure(.invalidTimeout) = await LogoSanitizer.fetchAndSanitize(url, timeout: bad) {} else { XCTFail("\(bad)") }
+        }
+    }
+
     func testPercentEncodedSvgRefused() {
         // Base64 only, like every other data: logo (and like Kotlin).
         XCTAssertEqual(rejection("data:image/svg+xml;utf8,<svg onload='alert(1)'/>"), .malformedDataUri)
@@ -414,6 +431,20 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertEqual(svgRejection(deep), .tooLarge)
         let ok = svg(String(repeating: "<rect width=\"1\" height=\"1\"/>", count: 500))
         guard case .success = LogoSanitizer.sanitize(svgUri(ok)) else { return XCTFail("a few hundred shapes are fine") }
+    }
+
+    // SwiftDraw gives style="width:..." precedence over the attribute and traps on huge values.
+    func testRootStyleDimensionsValidatedLikeAttributes() {
+        XCTAssertNil(SvgActiveContentGuard.dimensionProblem(["width": "8", "style": "fill:red;width:64px;height:8"]))
+        for style in ["width:1e30;height:8;", "width:1e30px", "height:99999999999999999999", "WIDTH : 1e30",
+                      "fill:red; height:1e20mm", "width:calc(1e30px)", "width:inf", "width:"] {
+            XCTAssertNotNil(SvgActiveContentGuard.dimensionProblem(["width": "8", "height": "8", "style": style]), style)
+        }
+        // End to end: refused, not a process crash.
+        let s = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\" style=\"width:1e30;height:8;\"><rect width=\"1\" height=\"1\"/></svg>"
+        XCTAssertNotNil(svgRejection(s))
+        // Unrelated style declarations stay fine.
+        XCTAssertNil(SvgActiveContentGuard.dimensionProblem(["style": "stroke-width:2;font-size:12px;max-width:1e30"]))
     }
 
     func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
