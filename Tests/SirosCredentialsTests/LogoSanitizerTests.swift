@@ -61,7 +61,8 @@ final class LogoSanitizerTests: XCTestCase {
         XCTAssertEqual(rejection("data:image/png;base64"), .malformedDataUri)              // no comma
         XCTAssertEqual(rejection("data:image/png,AAAA"), .malformedDataUri)                // not base64
         XCTAssertEqual(rejection("data:,AAAA"), .malformedDataUri)                         // no type
-        XCTAssertEqual(rejection("data:image/png;charset=x;base64,AAAA"), .malformedDataUri) // extra params
+        XCTAssertEqual(rejection("data:image/png;charset=latin1;base64,AAAA"), .malformedDataUri) // other charset
+        XCTAssertEqual(rejection("data:image/png;foo=bar;base64,AAAA"), .malformedDataUri) // extra params
     }
 
     func testBadBase64Rejected() {
@@ -156,6 +157,11 @@ final class LogoSanitizerImageTests: XCTestCase {
     func testMediaTypeCaseInsensitive() {
         let png = encode(makeImage(width: 4, height: 4), uti: "public.png")
         guard case .success = LogoSanitizer.sanitize("DATA:IMAGE/PNG;BASE64," + png.base64EncodedString()) else { return XCTFail() }
+    }
+
+    func testCharsetParameterAccepted() {
+        let png = encode(makeImage(width: 4, height: 4), uti: "public.png")
+        guard case .success = LogoSanitizer.sanitize("data:image/png;charset=utf-8;base64," + png.base64EncodedString()) else { return XCTFail() }
     }
 
     func testTruncatedImageRejected() {

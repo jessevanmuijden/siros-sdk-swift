@@ -51,7 +51,7 @@ public enum LogoRejection: Error, Sendable, Equatable {
 /// - `data:` URIs must be `data:<media type>;base64,<payload>` (RFC 2397)
 ///   with media type one of `image/png`, `image/jpeg`, `image/webp`,
 ///   `image/gif`. The decoded payload is capped at `maxDecodedBytes`
-///   (256 KiB) and the image at `maxDimension` (1024) pixels per side.
+///   (256 KiB) and the image at `maxDimension` (2048) pixels per side.
 /// - The bytes are decoded with ImageIO, checked to really be the declared
 ///   type, and **re-encoded as a fresh PNG** from the decoded pixels, so
 ///   metadata and trailing/polyglot payloads are dropped. Animated GIFs
@@ -67,7 +67,7 @@ public enum LogoSanitizer {
     /// Cap on the decoded (not base64) payload.
     public static let maxDecodedBytes = 256 * 1024
     /// Cap on width and on height, in pixels.
-    public static let maxDimension = 1024
+    public static let maxDimension = 2048
 
     public static func sanitize(_ uri: String) -> Result<DisplayLogo, LogoRejection> {
         let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,9 +111,10 @@ public enum LogoSanitizer {
         let header = afterScheme[afterScheme.startIndex..<comma].lowercased()
         let payload = afterScheme[afterScheme.index(after: comma)...]
 
-        // Only "<type>;base64" is accepted: no extra parameters, no
-        // percent-encoded (non-base64) form.
-        let parts = header.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+        // Only "<type>[;charset=utf-8|us-ascii];base64" is accepted: no other
+        // parameters, no percent-encoded (non-base64) form.
+        var parts = header.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+        if parts.count == 3, ["charset=utf-8", "charset=us-ascii"].contains(parts[1]) { parts.remove(at: 1) }
         guard parts.count == 2, parts[1] == "base64" else {
             if parts.first == "image/svg+xml" { return .failure(.svgNotSupported) }
             return .failure(.malformedDataUri)

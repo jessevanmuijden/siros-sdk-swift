@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
   returns `.image(pngBytes)`, `.remote(httpsURL)` or a typed `LogoRejection`
   (fail closed). `data:` logos must be `data:<type>;base64,...` with type
-  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 1024 px per side;
+  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 2048 px per side;
   they are decoded with ImageIO, checked to be the declared type, and
   re-encoded as a fresh PNG, so metadata and trailing/polyglot payloads are
   dropped. **SVG is rejected** (script and external references; no safe
@@ -44,6 +44,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Only `https:` remote logos pass (`http:` and other schemes are refused).
   Without ImageIO (Linux) every `data:` logo is refused. Same policy as
   siros-sdk-kotlin.
+- **`PresentationConsentCoordinator`: the ready-made `PresentationConsentHandler` for a host app.** It
+  renders a request into the SDK's approved wording (`PresentationConsentText`) and hands the app one
+  question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
+  answer, declined on timeout (default 120 s), dismissal, supersede and cancellation, and with no UI set. A
+  request the wording does not cover is declined without being shown.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
+- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
+  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
+  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
+  with the four rulebook configs and the API-misuse errors, tested against the
+  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
+  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
+  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
+  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
+  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
+  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
+  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
+  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
+  over-65535-byte fields refused). Platform-neutral (swift-crypto
+  on Linux), no secret is logged or returned by a public API.
+- **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
+  and a registry-driven builder.** The locale-free request a user approves before
+  anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
+  `legacyPseudonym`, per credential, with the verifier label and, for hosts and
+  tests only, the trust framework and `verifier_id_type`). Predicates apply to ANY
+  claim, and the function set is open-ended, so predicate functions are data:
+  `PredicateFunctions` (default: the nymauth `age_check`) declares per function id
+  its claim, value type, param-to-comparison map, an optional minimum span and
+  whether it reads as an age. Consent building, the local pre-check
+  (`precheck`) and the cross-query merge (`combinedBoundsOk`, the strictest
+  declared minimum span per credential and claim) are driven by it; a function not
+  in the registry is refused before consent. The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`, a
+  throw or a timeout is a decline, and with no handler a `circuit_zk` request is
+  refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
+  shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
+  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 18 merge cases, 22
+  pre-check cases). Numbers are compared as exact decimals: a value Decimal would
+  round (over 38 digits) is refused, `in` members are deduplicated by value, the
+  merge span is refused when it cannot be computed exactly, and a pre-check with a
+  different number of lookups than functions is false; float operands must be finite
+  and exact. `requestSigned` is a required argument (the signature result, never
+  defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
+- **Sensible default display for a credential type that publishes none.** What a
+  card draws when the issuer's type metadata has no rendering block, which is
+  every type that comes from someone else's catalog.
+  SDK: `CredentialUtils.buildMetadata` and `buildMdocMetadata` fall back to the
+  offer's `issuerLogoUri` (the issuer's own mark) as the last `logo` fallback, and
+  the new `CredentialUtils.buildFallbackMetadata(_:)` builds metadata for a
+  credential that has none from what the credential itself carries (name from its
+  configuration id, issuer name from the host of its issuer identifier, `vct` /
+  `docType` from the credential); it sets no colours or logo, which are the
+  issuer's to declare.
+  Sample app card: a tint derived from the type identifier (FNV-1a over the
+  UTF-16 code units, 24 hues x 3 tones, fixed lightness per theme; the same type
+  gives the same colour on every device, in the Kotlin sample app too) instead of
+  one accent colour for every type; text colour chosen by contrast ratio, not by
+  a mid-grey threshold, so no background yields text under 4.5:1; the issuer row
+  is left out when the credential names no issuer, the wire format is no longer a
+  text slot of its own, and the type identifier takes its place beneath the name
+  (dropping out when the name already says it). Mirrors siros-sdk-kotlin
+  [#211](https://github.com/sirosfoundation/siros-sdk-kotlin/pull/211). Not
+  ported: Kotlin's `hydration` marker on `CredentialMetadata` (Swift has no
+  hydration pass).
 - **Issuance start is visible at once.** `startIssuance(offerUri:)` and
   `startIssuanceByOffer(_:)` now publish `WalletState.flowActive` synchronously,
   before any network work, with `flowType` `"issuance"`, a placeholder `flowId`
@@ -298,6 +377,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unchanged.
 
 ### Fixed
+- **Presentation consent: nothing is approved that is not shown.** A host predicate renderer that returns no sentences
+  (or only blank ones) is refused with `PresentationConsentTextError` instead of dropping the predicate from the screen.
+  Age bounds of one credential that meet at a single day (`ge` == `le`, in one predicate or split across two) identify
+  the exact birth date: the "not shared" age wording is dropped for them and every comparison is worded generically.
+- **ConsentPrompt: an expired question is never shown.** A zero-duration timeout (a negative one is normalised to it) is
+  declined before the question is installed, so a host that answers synchronously from `onChange` cannot approve it.
+  The tests wait for the host to be told before they resolve a question, removing a scheduling race.
+- **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
+  components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
+  and the label lookup. Age bounds that meet at a single day (one predicate, two predicates or two queries) identify the exact
+  birth date, so the "not shared" age wording is dropped for them. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
+  and `["SE", "FI"]` no longer read alike.
 - **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
   engine keeps one session per (tenant, user) and closes the older socket when a
   second connects. The session used to open several at once: `forceReconnect`
