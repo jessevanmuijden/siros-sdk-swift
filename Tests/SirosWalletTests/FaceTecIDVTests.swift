@@ -265,10 +265,9 @@ final class FaceTecSessionOutcomeTests: XCTestCase {
         }
     }
 
-    /// Every code facetec-api v0.16.0 returns to clients, and the typed error each
-    /// becomes. siros-sdk-kotlin's `refusalToException` is the same except for
-    /// `chip_untrusted`, `document_expired` and `session_expired`, which it does
-    /// not give dedicated errors yet.
+    /// Every code facetec-api returns to clients (v0.16.0, plus
+    /// `chip_photo_mismatch` from sirosfoundation/facetec-api#78), and the typed
+    /// error each becomes. siros-sdk-kotlin's `refusalToException` is the same.
     func testEveryFacetecApiCodeMapsToATypedError() {
         let expected: [(code: String, errorCode: String)] = [
             ("liveness_failed", "idv_liveness_failed"),
@@ -281,6 +280,7 @@ final class FaceTecSessionOutcomeTests: XCTestCase {
             ("nfc_chip_read_failed", "idv_nfc_chip_read_failed"),
             ("nfc_not_authenticated", "idv_nfc_not_authenticated"),
             ("chip_untrusted", "idv_chip_untrusted"),
+            ("chip_photo_mismatch", "idv_chip_photo_mismatch"),
             ("document_expired", "idv_document_expired"),
             ("session_expired", "idv_session_expired"),
             ("issuance_failed", "idv_provider_issuance_failed"),
