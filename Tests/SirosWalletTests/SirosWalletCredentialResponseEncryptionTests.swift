@@ -173,7 +173,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
     private func installKey(_ w: SirosWallet, flowId: String) throws {
         let d = try XCTUnwrap(CredentialResponseJwe.decode(Self.recipientD))
         let key = CredentialResponseKey(params: pair, privateKey: try P256.KeyAgreement.PrivateKey(rawRepresentation: d))
-        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.lock.unlock()
+        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.offeredResponseKeyFlows.insert(flowId); w.lock.unlock()
     }
 
     private func decryptMessage(flowId: String, jwe: String, deferred: Bool = false) throws -> SignRequestMessage {
@@ -215,7 +215,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
 
     private func installOwnKey(_ w: SirosWallet, flowId: String) throws -> CredentialResponseKey {
         let key = try XCTUnwrap(CredentialResponseKey(params: CredentialResponseEncryptionParams(alg: "ECDH-ES", enc: "A128GCM")))
-        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.lock.unlock()
+        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.offeredResponseKeyFlows.insert(flowId); w.lock.unlock()
         return key
     }
 
