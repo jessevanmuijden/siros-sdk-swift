@@ -197,7 +197,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
     private func installKey(_ w: SirosWallet, flowId: String) throws {
         let d = try XCTUnwrap(CredentialResponseJwe.decode(Self.recipientD))
         let key = CredentialResponseKey(params: pair, privateKey: try P256.KeyAgreement.PrivateKey(rawRepresentation: d))
-        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.lock.unlock()
+        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.offeredResponseKeyFlows.insert(flowId); w.lock.unlock()
     }
 
     private func decryptMessage(flowId: String, jwe: String, deferred: Bool = false) throws -> SignRequestMessage {
@@ -239,7 +239,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
 
     private func installOwnKey(_ w: SirosWallet, flowId: String) throws -> CredentialResponseKey {
         let key = try XCTUnwrap(CredentialResponseKey(params: CredentialResponseEncryptionParams(alg: "ECDH-ES", enc: "A128GCM")))
-        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.lock.unlock()
+        w.lock.lock(); w.credentialResponseKeys[flowId] = key; w.offeredResponseKeyFlows.insert(flowId); w.lock.unlock()
         return key
     }
 
@@ -1127,6 +1127,35 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertNil(w.credentialResponseKeys["old"], "the departed socket's key is cleaned up")
         XCTAssertNotNil(w.credentialResponseKeys["new"], "the replacement socket's key is not")
         w.lock.unlock()
+        engine.disconnect()
+    }
+
+    /// The plaintext-downgrade check survives a lost socket's cleanup: the cleanup removes the response key, but the fact
+    /// that a key was OFFERED stays until the flow ends, so a plain `flow_complete` that was already queued is refused
+    /// rather than processed as an ordinary plaintext issuance.
+    func testAQueuedPlainCompletionIsStillRefusedAfterTheLostSocketsCleanup() async throws {
+        let store = InMemoryCredentialStore()
+        let w = wallet(store: store)
+        let listener = Listener()
+        w.eventListener = listener
+        let engine = idleEngine()
+        w.engineSession = engine
+        engine.connect(appToken: "t")
+        var offer = try keyOnlyProofMessage(flowId: "dg")
+        offer.socketGeneration = engine.socketGeneration
+        offer.requestEpoch = engine.requestEpoch
+        try await w.answerGenerateProof(engine: engine, msg: offer)                  // the key is offered
+        engine.forceReconnect(appToken: "t2")                                        // the socket is replaced ...
+        w.cleanupAfterSocketReplacement(of: engine)                                  // ... and its cleanup removes the key
+        w.lock.lock(); XCTAssertNil(w.credentialResponseKeys["dg"], "the cleanup removed the key"); w.lock.unlock()
+        let now = Int64(Date().timeIntervalSince1970)
+        let jwt = "eyJ.\(Data(#"{"exp":\#(now + 3600),"iat":\#(now)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).sig"
+        let object: [String: Any] = ["type": "flow_complete", "flow_id": "dg", "credentials": [["format": "vc+sd-jwt", "credential": jwt]]]
+        await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+        let stored = await store.getAll()
+        XCTAssertTrue(stored.isEmpty, "the queued plaintext completion is a downgrade, not an issuance")
+        XCTAssertEqual(listener.errors.count, 1)
+        XCTAssertTrue(listener.completed.isEmpty)
         engine.disconnect()
     }
 

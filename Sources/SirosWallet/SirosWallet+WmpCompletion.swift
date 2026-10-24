@@ -10,7 +10,7 @@ extension SirosWallet {
     /// is refused whole, as on the WebSocket, rather than reported as a success.
     func handleWmpFlowComplete(flowId: String, result: AnyCodable?) async {
         if flowAlreadyEnded(flowId) { return }          // a late completion does not revive a failed or cancelled flow
-        lock.lock(); let offeredKey = credentialResponseKeys[flowId] != nil; lock.unlock()
+        lock.lock(); let offeredKey = offeredResponseKeyFlows.contains(flowId); lock.unlock()
         if offeredKey, !Self.claimsEncryptedResponse(result) {
             let ids = result?.objectValue?["credentials"]?.arrayValue?.compactMap { $0.objectValue?["notification_id"]?.stringValue } ?? []
             await refusePlainCompletion(flowId: flowId, notificationIds: ids)

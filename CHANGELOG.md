@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A lost socket's cleanup no longer removes the plaintext-downgrade check.** The wallet remembers, per flow, that a
+  response key was OFFERED (`offeredResponseKeyFlows`, ported from the Kotlin SDK's offered marker); it outlives the key
+  until the flow ends, so a plain `flow_complete` already queued when the socket was lost is still refused (nothing
+  stored, `credential_failure` per notification id) instead of being processed as an ordinary plaintext issuance.
+
+### Fixed
 - **Blind issuance: socket replacement without the wallet lock, scoped cleanup, and unpairable completions.**
   `onSocketReplaced` no longer cleans up inside the callback (the issuance start replaces the socket while holding the
   wallet lock, which deadlocked): it schedules a cleanup scoped to the reporting engine and to the response keys that

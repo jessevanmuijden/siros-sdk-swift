@@ -1319,6 +1319,7 @@ extension SirosWallet {
         legacyFlowSnapshots.removeValue(forKey: flowId)
         credentialResponseKeys.removeValue(forKey: flowId)
         decryptedCredentialResponses.removeValue(forKey: flowId)
+        offeredResponseKeyFlows.remove(flowId)
         lock.unlock()
         if notifyError { listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil) }
 
@@ -1350,6 +1351,7 @@ extension SirosWallet {
         // The flow's response key and anything decrypted with it end with the flow.
         credentialResponseKeys.removeValue(forKey: flowId)
         decryptedCredentialResponses.removeValue(forKey: flowId)
+        offeredResponseKeyFlows.remove(flowId)
         lock.unlock()
         for entry in doomed.values { entry.cancel() }
     }
