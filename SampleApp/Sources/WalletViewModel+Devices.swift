@@ -77,6 +77,8 @@ extension WalletViewModel {
                 addPasskeyError = L10n.string("devices.deleteNotLoggedIn")
             case .sessionChanged:
                 addPasskeyError = L10n.string("devices.addPasskeySessionChanged")
+            case .localCommitFailed:
+                addPasskeyError = L10n.string("devices.addPasskeyLocalCommitFailed")
             case let .authorizerUnavailable(message):
                 addPasskeyError = L10n.string("devices.addPasskeyAuthorizationAborted", message ?? "")
             case let .passkeyCreationUnavailable(message):
