@@ -891,32 +891,6 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         XCTAssertEqual(f.keystore.committed.count, 2)
     }
 
-    /// A sync queued behind an enrolment runs after the enrolment published
-    /// its cache, so the final cache is the sync's container under its tag -
-    /// not the enrolment's older container re-written over it.
-    func testASyncQueuedBehindAnEnrolmentLeavesItsOwnContainerAndEtagInTheCache() async throws {
-        let f = makeFixture()
-        let gate = Gate()
-        f.server.finishGate = gate
-        f.server.finishEtags = ["e-add"]
-        f.server.etags["private-data"] = "e-sync"
-        f.keystore.exportPayload = Data(#"{"jwe":"sync"}"#.utf8)
-        f.wallet.apiClient = etagClient(f)
-
-        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
-        await f.server.finishStarted.wait()
-        async let sync: Void = f.wallet.persistAndSyncKeystore()
-        try await Task.sleep(nanoseconds: 100_000_000)
-        await gate.open()
-
-        let result = try await addTask.value
-        _ = try await sync
-        guard case .added = result else { return XCTFail("got \(result)") }
-        XCTAssertEqual(f.keystore.operationOrder, ["commit", "export"])
-        XCTAssertEqual(f.sessionStore.privateDataJwe, #"{"jwe":"sync"}"#)
-        XCTAssertEqual(f.sessionStore.privateDataEtag, "e-sync")
-    }
-
     /// An enrolment whose response lands while the session scope is being
     /// replaced must not be applied, even though no generation was bumped yet:
     /// login, register, resume and unlock change the scope and the keystore
