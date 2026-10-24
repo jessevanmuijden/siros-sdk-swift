@@ -7,8 +7,8 @@ import Foundation
 /// Key-producing operations run inside `run`, which refuses them once an
 /// erase has begun; `beginErase()` stops new ones and waits for the ones
 /// already admitted, so the erase's snapshot of the key list cannot miss a
-/// key that is still being created. `reopen()` (the next unlock) admits
-/// operations again.
+/// key that is still being created. `reopen()` (the wallet's next
+/// session, never an unlock) admits operations again.
 final class KeyOperationGate: @unchecked Sendable {
     private let lock = NSLock()
     private var erasing = false

@@ -56,6 +56,10 @@ extension SirosWallet {
         let request = try DCAPIRequestParser.parse(rawRequestJson)
         // The account this request belongs to is fixed BEFORE the first await (trust evaluation, credential load).
         let accountGeneration = currentAccountGeneration()
+        // And the teardown token, for the same reason: a signing that resumes after an account deletion records nothing.
+        guard let teardownToken = currentTeardownToken() else {
+            throw SirosError.wallet(message: "The account was deleted")
+        }
         // EC TS12: a request carrying `transaction_data` must never be
         // answered as if it did not. Unless TS12 handling is in effect (flag
         // on and a consent handler registered) it is refused before anything
@@ -135,7 +139,7 @@ extension SirosWallet {
         var seenClaims = Set<String>()
         let requestedClaims = matchResults.flatMap { $0.requestedClaims.flatMap { $0 } }.filter { seenClaims.insert($0).inserted }
 
-        await recordPresentation(PresentationRecord(
+        let recorded = await recordPresentation(PresentationRecord(
             id: randomUint32Id(),
             flowId: "dc-api-\(UUID().uuidString)",
             verifierName: trustResult.entityName,
@@ -144,7 +148,8 @@ extension SirosWallet {
             requestedClaims: requestedClaims,
             timestamp: Int64(Date().timeIntervalSince1970 * 1000),
             zkProof: selectedIds.contains(where: { selection.zkRequestedIds.contains($0) })
-        ))
+        ), token: teardownToken)
+        guard recorded else { throw SirosError.wallet(message: "The account was deleted while the presentation was being signed") }
 
         return DCAPIPresentationResult(responseJson: finalResponseJson, credentialIds: selectedIds)
     }

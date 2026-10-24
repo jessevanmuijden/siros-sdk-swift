@@ -1024,7 +1024,7 @@ extension SirosWallet {
     ) async {
         // Captured before the first await: the consent listener can return
         // after the account was deleted, and nothing below may then be applied.
-        let token = currentTeardownToken()
+        guard let token = currentTeardownToken() else { return }   // a wipe has closed the gate
         do {
             let dcqlQuery = payload?["dcql_query"]?.objectValue.map { anyCodableDictToAny($0) }
 
@@ -1109,7 +1109,7 @@ extension SirosWallet {
     }
 
     func handleMatchRequest(engine: WalletEngineSession, msg: MatchRequestMessage) async {
-        let token = currentTeardownToken()  // see `handleCredentialSelection`
+        guard let token = currentTeardownToken() else { return }   // see `handleCredentialSelection`
         let allCreds = await credentialStore.getAll()
         lock.lock()
         // Read only - do NOT remove. The later `sign_presentation` step

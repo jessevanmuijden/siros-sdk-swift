@@ -27,10 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   external authenticator are left alone) before locking. `ASAuthorizationAuthProvider` passes the requested
   `userVerification` to both assertion requests, and `LocalAuthProvider` assertions carry the UV flag (the key is gated
   by `.userPresence`).
-  Late completions are fenced too: a credential-selection consent that returns after the wipe records no presentation
-  and caches no matches, a batch overtaken by the wipe is dropped whole (the epoch is read once per completion), and
-  `WscdKeystoreAdapter` admits key creation through a gate that the erase closes and drains, so a key being created
-  during the erase is erased with the rest.
+  Write admission is one gate (`TeardownGate`): the wipe closes it synchronously before its first await, drains the
+  admitted writes, and it reopens only when a new session starts (login, register, resume). Credential saves,
+  presentation history writes (engine, DC API, proximity), flow completions and consent handlers all hold a ticket taken
+  before their first await and write through the gate; `WscdKeystoreAdapter` key creation is closed by the erase and
+  reopened by the new `KeystoreManager.reopenKeyOperations()`, not by an unlock.
+- **WMP: a retry timer scheduled before a resume does nothing after it, and the event stream ends when a close fails.** A
+  timed retry carries the resume generation it was scheduled in and is validated under the lock that claims the answer,
+  so a resume (which resets the budgets and replays the queue) cannot be followed by stale retries. `WmpPeer.close`
+  finishes `flowEvents()` whether or not the close notification got through. A catch-up after a resume drains only its own
+  child, so an answer that exhausted its retries is not resent by another child's catch-up.
 - **Host-resolution timeouts fire on their own queue.** `hostResolvesToOnlyPublicAddresses` raced its lookup against a
   timer on the same global queue, so a timer could wait behind lookups blocked in `getaddrinfo` (13 s against a 0.2 s
   bound on a CI iOS simulator, failing `testResolutionGivesUpAfterHostResolutionTimeout`). The timer now has a dedicated
@@ -577,6 +583,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sign's), and `Signer` gains `authenticationCapability(keyId:)` and
   `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
   provider is gone.
+
+### Fixed
+- **WMP: a timed retry resends only its own answer, and a session closes locally whatever the close notification does.**
+  A retry timer drains just the child that scheduled it (a resume still drains the whole queue), so an answer that spent
+  its budget is not resent by another child's retry. `WmpSession.close` disconnects the transport, ends the session and
+  fires the terminal hook even when the `wmp.session.close` notification fails, then reports the failure.
+- **WMP child answers: the retry budget is per answer, and cancelled replays leave no marker.** The timed-retry budget
+  belongs to each queued answer (cleared when it is sent, ends, or the session resumes), so an answer that used its
+  retries up cannot starve the next. A replay's cancellation marker is removed when its send finishes whether or not its
+  parent is still in the bounded ended-flow list, so markers cannot accumulate over a long session.
+- **WMP child answers: failed sends are retried, and the queue handoff is atomic.** A send that fails on a healthy
+  connection (a failed POST on a live stream) brings no resume event; the queued answer is now retried after a bounded
+  backoff (`OpenID4xConfig.sendRetryDelaysMs`, default 1/2/4/8 s), then waits for the next resume. The task and
+  cancellation state of a child whose answer is queued are removed in the same critical section that queues it.
+- **WMP child flows: completed children are remembered, and a replaying child is cancelled like any other.** A start
+  redelivered after the child's answer was sent (original send or replay) runs nothing. A parent ending while a replay
+  send is suspended releases the claimed child's route at once, and the child's cancellation marker lives until that
+  send finishes (not in the bounded ended-flow list), so a failing send is never requeued for a cancelled child.
+- **WMP child flows, further review follow-ups.** A child cancelled while its replay send is suspended is not requeued
+  when that send fails; a second resume during a suspended replay that then fails triggers another drain; a redelivered
+  start for a cancelled child does not run its handler again; a child start refused for good (its flow ended, or the
+  profile stopped) releases the route the peer registered for it.
+- **WMP child flows and session end, review follow-ups.** Shutdown is one-shot, so a retired session's close
+  cannot run the application's cleanup again after a replacement session has begun. A session created without a
+  `resumption_token` now ends at once when its connection is lost (terminal hook, pending requests failed)
+  instead of staying marked active, and the terminal hook is installed before `create`. A sign payload that does
+  not decode is `INVALID_PARAMS`, not a sign failure. A child stays tracked until its terminal answer is sent, so
+  a redelivered start cannot run a second handler; an answer that could not be sent (connection down) is kept and
+  sent when the session resumes (`WmpSession.onResumed`, `WmpResumeProfile`), without running the handler again.
+- **WMP: flow actions and trust answers now match go-wmp, and the old sign/match progress route is gone
+  (no shim).** `trust_result` put `trusted`, `framework` and `reason` next to `action`; go-wmp's
+  `FlowActionParams` reads them under `params`, so the engine saw an empty payload. They are sent under
+  `params`. A trust progress is answered only when the engine marks it `trust_evaluation_required`
+  (issuer `evaluating_trust`, verifier `evaluating_verifier_trust`, new `VPStep.evaluatingVerifierTrust`);
+  the informational progress under the same step is passed to `onProgress` instead of being answered.
+  `sign_request` / `match_request` / `generating_proof` / `matching_credentials` progress no longer runs
+  the sign or match handler: the engine starts those as child flows. Verified against go-wmp and the Kotlin
+  SDK's equivalent change only, not a live engine.
+- **WMP: the wallet answered the orchestrator's `sign` and `match` requests on a route the orchestrator
+  never reads.** The orchestrator (go-wallet-backend, WMP openid4x section 3.1.5) starts them as CHILD
+  flows (`wmp.flow.start`, `flow_type` `sign` or `match`, the issuance or presentation in
+  `parent_flow_id`) and waits for `wmp.flow.complete` ON THE CHILD flow id with the response JSON as
+  `result`; a refusal is `wmp.flow.error` on the child flow with `data.reason` `rejected`. The profile
+  registered only `oid4vci` and `oid4vp`, ignored the child `wmp.flow.start`, and answered a
+  `wmp.flow.progress` step with `wmp.flow.action` `sign_response` on the parent, which the orchestrator
+  parks until its sign timeout. `OpenID4xProfile` now registers `sign` and `match`, runs each child
+  flow (the handler is given the PARENT flow id, which is what the wallet keys its state by) and
+  answers as above, without holding the start request while the user decides. A child that is
+  cancelled, whose parent is cancelled, completes or fails, or whose session closes (`WmpPeer.close`) is
+  cancelled, released from the peer's tracking at once (not when its handler returns) and answers nothing,
+  even if its handler returns normally; after `shutdown()` no child is started and a queued child never enters its handler; a cancel made locally (`WmpPeer.cancelFlow`) stops the flow here at once; a failing match child reports `MATCH_ERROR`; a child start for a parent that already ended, and a redelivered start for a child already running, are dropped; `shutdown()` also calls the application's `onShutdown`, and a finished child is released from the peer's tracking. The old progress-step route no longer runs sign or match handlers (see the entry below; no shim). **`wmp.flow.error` now carries the protocol's numeric code (-31006)**: go-wmp reads
+  `code` as an int, so the string codes the profile sent made the whole notification undecodable and
+  the refusal was lost; the application code moves to `data.error_code` and the text to `message`.
+  An integer `code` from the peer now decodes (it was a decode failure).
 
 ### Deprecated
 - **`FaceTecCaptureDelegate`.** It is written against the FaceTec 9 API

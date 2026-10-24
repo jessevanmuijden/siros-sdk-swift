@@ -121,6 +121,12 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// cannot be erased from here and are left alone.
     func eraseKeyMaterial() async throws
 
+    /// Admits key creation again after `eraseKeyMaterial()` closed it. Called by
+    /// the wallet when a NEW session starts, never by an unlock: an unlock that
+    /// raced the erase must not let a key be created behind its key-list
+    /// snapshot. The default does nothing.
+    func reopenKeyOperations()
+
     /// Generate a new keypair and return the key ID.
     func generateKey(algorithm: String) async throws -> String
 
@@ -409,6 +415,7 @@ public protocol KeystoreManager: AnyObject, Sendable {
 /// Default implementation for optional methods.
 public extension KeystoreManager {
     func eraseKeyMaterial() async throws {}
+    func reopenKeyOperations() {}
 
     /// Default: freshKey=false for backward compatibility.
     func generateProof(audience: String, nonce: String) async throws -> String {

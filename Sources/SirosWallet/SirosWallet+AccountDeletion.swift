@@ -74,22 +74,33 @@ extension SirosWallet {
     }
 
     /// What a long-running handler captures before its first `await`: the
-    /// session generation and the wipe epoch. If either has moved when the
-    /// handler resumes (the account was deleted, the session ended), its
-    /// results must not be applied.
+    /// session generation and an admission ticket from the `TeardownGate`. If
+    /// either has moved when the handler resumes (the account was deleted, the
+    /// session ended), its results must not be applied. Nil while a wipe has
+    /// closed the gate: such a handler must not start.
     struct TeardownToken: Equatable {
         let generation: Int
-        let epoch: UInt64
+        let ticket: TeardownGate.Ticket
     }
 
-    func currentTeardownToken() -> TeardownToken {
+    func currentTeardownToken() -> TeardownToken? {
         lock.lock(); defer { lock.unlock() }
-        return TeardownToken(generation: sessionGeneration, epoch: storeEpoch)
+        guard let ticket = teardownGate.ticket() else { return nil }
+        return TeardownToken(generation: sessionGeneration, ticket: ticket)
     }
 
     /// The caller holds `lock`.
     func isCurrentLocked(_ token: TeardownToken) -> Bool {
-        sessionGeneration == token.generation && storeEpoch == token.epoch
+        sessionGeneration == token.generation && teardownGate.isValid(token.ticket)
+    }
+
+    /// Admits writes again for a new session (login, register, resume): after a
+    /// wipe, also reopens key creation in the keystores it closed. Waits for a
+    /// wipe still in progress.
+    func reopenForNewSession() async {
+        if await teardownGate.reopen() {
+            for (_, store) in distinctKeystores() { store.reopenKeyOperations() }
+        }
     }
 
     private func currentApiClient() -> BackendApiClient? {
@@ -99,7 +110,7 @@ extension SirosWallet {
 
     /// The default keystore, then each other registered one once, labelled for
     /// the report. The default keeps the historical "keystore" label.
-    private func distinctKeystores() -> [(label: String, store: KeystoreManager)] {
+    func distinctKeystores() -> [(label: String, store: KeystoreManager)] {
         var result: [(label: String, store: KeystoreManager)] = [("keystore", keystore)]
         var seen: Set<ObjectIdentifier> = [ObjectIdentifier(keystore)]
         for (pluginId, store) in (config.availableKeystores ?? [:]).sorted(by: { $0.key < $1.key })
@@ -163,10 +174,12 @@ extension SirosWallet {
             }
         }
 
-        // Refuse credential writes that started before this point, then wait
-        // for the one that may be saving right now (see `credentialWriteGate`).
-        lock.lock(); storeEpoch &+= 1; lock.unlock()
-        await credentialWriteGate.withLock {}
+        // Close write admission FIRST - synchronously, before any await of the
+        // teardown - then wait for the writes already admitted. It reopens only
+        // when a new session starts (`reopenForNewSession`).
+        lock.lock(); teardownGate.close(); lock.unlock()
+        defer { teardownGate.endWipe() }
+        await teardownGate.drain()
 
         // Every distinct keystore, not only the default one: holder keys can
         // be generated in any store registered in `availableKeystores`. A

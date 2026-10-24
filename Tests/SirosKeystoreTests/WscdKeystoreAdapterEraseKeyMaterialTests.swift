@@ -98,6 +98,35 @@ final class WscdKeystoreAdapterEraseKeyMaterialTests: XCTestCase {
         XCTAssertTrue(remaining.isEmpty, "the key created during the erase must not survive it: \(remaining)")
     }
 
+    /// An unlock that races the erase must not admit key creation: the key would finish behind the erase's
+    /// key-list snapshot and survive it. Only the wallet's new-session `reopenKeyOperations()` admits again.
+    func testAnUnlockDuringTheEraseDoesNotAdmitKeyCreation() async throws {
+        let signer = KeyedSigner(keys: [])
+        signer.parkNextGeneration()
+        let adapter = WscdKeystoreAdapter(signer: signer)
+        try await adapter.unlock(prfOutput: Data(), encryptedContainer: Data(), hkdfSalt: Data(), hkdfInfo: Data())
+        let creating = Task { try await adapter.generateKey(algorithm: "ES256") }
+        while !signer.generationEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        let erasing = Task { try await adapter.eraseKeyMaterial() }
+        try await Task.sleep(nanoseconds: 100_000_000)       // the erase is draining the admitted creation
+
+        try await adapter.unlock(prfOutput: Data(), encryptedContainer: Data(), hkdfSalt: Data(), hkdfInfo: Data())
+        do {
+            _ = try await adapter.generateKey(algorithm: "ES256")
+            XCTFail("an unlock must not reopen key creation while the erase is under way")
+        } catch KeystoreError.locked {}
+
+        signer.releaseGeneration()
+        _ = try await creating.value
+        try await erasing.value
+        let remaining = try await signer.listKeys()
+        XCTAssertTrue(remaining.isEmpty, "\(remaining)")
+
+        adapter.reopenKeyOperations()
+        let again = try await adapter.generateKey(algorithm: "ES256")
+        XCTAssertEqual(again, "created", "a new session admits key creation again")
+    }
+
     func testAFailingKeyIsReportedAndTheRestAreStillDeleted() async {
         let signer = KeyedSigner(keys: [
             SignerKeyInfo(keyId: "a", algorithm: "ES256", pluginId: "softkey"),

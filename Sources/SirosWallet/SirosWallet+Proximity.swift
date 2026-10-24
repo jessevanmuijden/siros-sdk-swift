@@ -25,6 +25,10 @@ extension SirosWallet {
         disclosedClaims: [String]?,
         sessionTranscriptBytes: Data
     ) async throws -> Data {
+        // Before the first await: a signing that resumes after an account deletion must not record anything.
+        guard let token = currentTeardownToken() else {
+            throw SirosError.wallet(message: "The account was deleted")
+        }
         guard let credential = await credentialStore.getById(credentialId) else {
             throw SirosError.wallet(message: "Credential not found: \(credentialId)")
         }
@@ -42,14 +46,15 @@ extension SirosWallet {
             sessionTranscriptBytes: sessionTranscriptBytes,
             kid: credential.kid
         )
-        await recordPresentation(PresentationRecord(
+        let recorded = await recordPresentation(PresentationRecord(
             id: randomUint32Id(),
             flowId: "proximity-\(UUID().uuidString)",
             credentialIds: [credentialId],
             credentialNames: [credential.metadata?.name].compactMap { $0 },
             requestedClaims: disclosedClaims ?? [],
             timestamp: Int64(Date().timeIntervalSince1970 * 1000)
-        ))
+        ), token: token)
+        guard recorded else { throw SirosError.wallet(message: "The account was deleted while the presentation was being signed") }
         return response
     }
 }
