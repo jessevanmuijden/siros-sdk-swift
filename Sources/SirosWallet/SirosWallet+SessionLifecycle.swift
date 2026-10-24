@@ -181,6 +181,10 @@ extension SirosWallet {
         // completion in flight must not be acted on with the next account's engine,
         // tokens or trust-gate state.
         issuanceEpoch &+= 1
+        // A start still preparing (metadata fetches, token refresh) belongs to the
+        // ended session too: it must unwind at its next epoch-checked step instead of
+        // committing its old offer or dispatching under the next account.
+        issuanceStartEpoch.invalidate()
         return sessionGeneration
     }
 

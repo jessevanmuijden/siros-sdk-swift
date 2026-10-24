@@ -60,6 +60,11 @@ public enum EngineErrorCodes {
     /// never come. `error.details` carries `requested_types` (the credential
     /// types the DCQL query asked for) and the wallet's own `no_match_reason`.
     public static let noMatchingCredential = "NO_MATCHING_CREDENTIAL"
+    /// An action or sign response named a flow the engine does not know (finished,
+    /// or from an earlier socket). Not a reply to a `flow_start`.
+    public static let unknownFlow = "UNKNOWN_FLOW"
+    /// The engine's action or sign channel was full. Not a reply to a `flow_start`.
+    public static let tooManyRequests = "TOO_MANY_REQUESTS"
 }
 
 /// Base envelope — every engine message carries at least a type.

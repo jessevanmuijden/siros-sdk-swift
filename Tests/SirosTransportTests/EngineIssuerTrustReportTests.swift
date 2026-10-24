@@ -174,6 +174,36 @@ final class EngineIssuerTrustReportTests: XCTestCase {
         XCTAssertNil(t.take(flowId: "B"), "B must not take C's tag because A's late error ate its slot")
     }
 
+    /// Copilot: after a socket reset clears `seen`, an unknown_flow error for an OLD flow id
+    /// must not be taken for the reply to a pending start.
+    func testAnUnknownFlowErrorForAnOldFlowAfterAResetIsNotAReplyToAPendingStart() {
+        let t = StartTagTracker()
+        t.reset()                                  // the socket was replaced
+        t.enqueue(1)                               // B started
+        t.discard(flowId: "A", answersStart: false) // UNKNOWN_FLOW for an action on old flow A
+        t.enqueue(2)                               // C started before B replied
+        t.firstProgress(flowId: "B")
+        XCTAssertNil(t.take(flowId: "B"), "A's error must not have consumed B's slot: B cannot take C's tag")
+    }
+
+    func testTheSessionClassifiesUnknownFlowAndOverloadErrorsAsNonStartErrors() async {
+        let session = WalletEngineSession(baseUrl: "https://wallet.example.com", tenantId: "t")
+        session.startTags.enqueue(1)                               // B
+        await session.handleMessage(#"{"type":"flow_error","flow_id":"A","error":{"code":"UNKNOWN_FLOW","message":"m"}}"#)
+        session.startTags.enqueue(2)                               // C
+        await session.handleMessage(progress(flowId: "B", trusted: true))
+        await session.handleMessage(complete(flowId: "B"))
+        let msg = await nextComplete(session)
+        XCTAssertNil(msg?.startTag, "two starts are outstanding for B's reply; the error did not answer either")
+        // An error that IS a start's reply (any other code) still answers it.
+        let t = StartTagTracker()
+        t.enqueue(1)
+        t.discard(flowId: "X", answersStart: true)
+        t.enqueue(2)
+        t.firstProgress(flowId: "Y")
+        XCTAssertEqual(t.take(flowId: "Y"), 2)
+    }
+
     func testRetiringTheSocketClearsPoison() {
         let t = StartTagTracker()
         t.enqueue(0); t.enqueue(1)

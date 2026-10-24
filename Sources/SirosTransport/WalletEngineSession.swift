@@ -655,8 +655,9 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         return copy
     }
 
-    private func discardIssuerTrustReport(flowId: String?) {
-        startTags.discard(flowId: flowId)
+    private func discardIssuerTrustReport(flowId: String?, code: String? = nil) {
+        let answersStart = code != EngineErrorCodes.unknownFlow && code != EngineErrorCodes.tooManyRequests
+        startTags.discard(flowId: flowId, answersStart: answersStart)
         guard let flowId else { return }
         issuerTrustLock.lock(); defer { issuerTrustLock.unlock() }
         issuerTrustReports.removeValue(forKey: flowId)
@@ -690,7 +691,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             }
         case MessageTypes.flowError:
             if let msg = try? decoder.decode(FlowErrorMessage.self, from: data) {
-                discardIssuerTrustReport(flowId: msg.flowId)
+                discardIssuerTrustReport(flowId: msg.flowId, code: msg.error.code)
                 flowErrorContinuation.yield(msg)
             }
         case MessageTypes.signRequest:

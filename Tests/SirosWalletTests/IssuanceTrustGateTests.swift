@@ -499,6 +499,32 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertEqual(stored.count, 1, "B's own completion still works")
     }
 
+    func testACancelledRenewalNeitherAssignsASourceBatchNorSendsItsStart() {
+        let h = makeHarness()
+        let wallet = h.wallet
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        wallet.cancelCurrentFlow()                       // A is cancelled ...
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let bEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        var sent: [Int] = []
+        // ... and B's commit lands first; then A's late commit.
+        XCTAssertTrue(wallet.commitRenewalStart(epoch: bEpoch, batchId: 200) { sent.append($0) })
+        XCTAssertFalse(wallet.commitRenewalStart(epoch: aEpoch, batchId: 100) { sent.append($0) })
+        XCTAssertEqual(sent, [bEpoch], "A's cancelled start was not sent")
+        XCTAssertEqual(wallet.pendingRenewalSourceBatchId, 200, "A did not overwrite B's source batch")
+    }
+
+    func testAStartPreparingAcrossAnAccountReplacementUnwindsInsteadOfDispatching() throws {
+        let h = makeHarness()
+        let wallet = h.wallet
+        let epoch = try wallet.admitIssuanceStart()      // A is preparing (metadata fetches, token refresh)
+        _ = wallet.bumpSessionGeneration()               // logout / login as B
+        XCTAssertThrowsError(try wallet.advanceIssuanceStart(epoch, "preparing_issuance"),
+                             "A must unwind, not commit its old offer under the new session") { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertThrowsError(try wallet.dispatchIssuanceStart(epoch: epoch) { XCTFail("must not dispatch") })
+    }
+
     func testAnAuthorizationThatCannotBeTiedToItsIssuanceIsRefused() {
         let h = makeHarness()
         let wallet = h.wallet

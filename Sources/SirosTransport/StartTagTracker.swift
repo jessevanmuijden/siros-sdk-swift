@@ -71,10 +71,18 @@ final class StartTagTracker: @unchecked Sendable {
     /// message if none was seen). An error naming NO flow cannot be tied to a start
     /// (the engine also emits one when its sign-response channel is full), so it
     /// answers nothing: the outstanding starts stay counted.
-    func discard(flowId: String?) {
+    /// - Parameter answersStart: false for an error that is not a reply to a `flow_start`
+    ///   (`unknown_flow`, an overloaded channel): it names a flow the engine does not
+    ///   know, possibly one of a socket that was since replaced, and must never be
+    ///   paired with a pending start. The id is remembered so it is never paired later.
+    func discard(flowId: String?, answersStart: Bool = true) {
         lock.lock(); defer { lock.unlock() }
         guard let flowId else { return }
-        pairLocked(flowId)
+        if answersStart {
+            pairLocked(flowId)
+        } else {
+            seen.insert(flowId)
+        }
         byFlow.removeValue(forKey: flowId)
     }
 

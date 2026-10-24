@@ -159,16 +159,20 @@ extension SirosWallet {
                 logger.warning("Failed to refresh issuer metadata for renewal display; card will show raw format: \(error.localizedDescription)")
                 #endif
             }
-            guard startStillOwned(startEpoch) else { return }
-            lock.lock(); pendingRenewalSourceBatchId = batchId; lock.unlock()
-            engine.startRenewal(
-                refreshToken: candidate.refreshToken,
-                credentialIssuer: candidate.credentialIssuerIdentifier,
-                selectedCredentialConfigurationId: candidate.credentialConfigurationId,
-                dpopJwk: candidate.dpopJwk,
-                dpopKeyId: candidate.dpopKeyId,
-                startTag: startEpoch
-            )
+            // Ownership check, source-batch assignment and send are ONE critical section
+            // (like `dispatchIssuanceStart`): a cancel plus a newer renewal cannot land
+            // between them, so this one can neither overwrite the newer renewal's source
+            // batch nor send its cancelled start.
+            commitRenewalStart(epoch: startEpoch, batchId: batchId) {
+                engine.startRenewal(
+                    refreshToken: candidate.refreshToken,
+                    credentialIssuer: candidate.credentialIssuerIdentifier,
+                    selectedCredentialConfigurationId: candidate.credentialConfigurationId,
+                    dpopJwk: candidate.dpopJwk,
+                    dpopKeyId: candidate.dpopKeyId,
+                    startTag: $0
+                )
+            }
         } catch {
             // Same rationale as `startIssuance`'s catch block: a synchronous
             // failure here (e.g. no refresh_token on file for this batch)
