@@ -219,7 +219,8 @@ final class WalletViewModel: ObservableObject {
     var transactionLogLoadFinished: (() -> Void)?
     /// Test hook: called after each wallet state update has been applied (the first is the initial `.disconnected`).
     var walletStateApplied: (() -> Void)?
-    var transactionConsentBox: TransactionConsentContinuationBox?
+    /// The SDK prompt behind `pendingTransactionConsent` (TS12); its `onChange` is wired in `init`.
+    let transactionConsent = ConsentPrompt<TransactionConsentRequest, Bool>(decline: false)
     private lazy var transactionConsentBridge = TransactionConsentBridge(viewModel: self)
     /// Non-nil while a FIDO2 ClientPin prompt (see `SampleAppAuthProvider.requestPin`)
     /// is awaiting the user's PIN - drives `Fido2PinEntryView` via
@@ -357,9 +358,8 @@ final class WalletViewModel: ObservableObject {
     /// Internal, not private: `WalletViewModel+Wscd.swift` is the other half
     /// of this type and a Swift extension in another file cannot see `private`.
     var lifecycleContextId: String?
-    /// The continuation box backing the CURRENTLY shown `pendingWscdChoice`,
-    /// if any - see `requestWscdChoice`'s doc comment.
-    private var wscdChoiceContinuationBox: WscdChoiceContinuationBox?
+    /// The SDK prompt behind `pendingWscdChoice`; its `onChange` is wired in `init`.
+    let wscdChoice = ConsentPrompt<WscdChoiceQuestion, WscdChoiceResult>(decline: .cancelled)
     /// Offered at most once per process - a user who dismisses it isn't
     /// re-nagged every time `.ready` re-emits (e.g. after a token refresh),
     /// and one who accepts doesn't need it again once `enrollWscd()` runs.
@@ -412,6 +412,14 @@ final class WalletViewModel: ObservableObject {
         #if DEBUG
         applyFixtureCredentialsIfRequested()
         #endif
+
+        // The SDK prompts publish their current question; read it on the main actor so the order is the truth.
+        transactionConsent.onChange = { [weak self] _ in
+            Task { @MainActor in self?.pendingTransactionConsent = self?.transactionConsent.current }
+        }
+        wscdChoice.onChange = { [weak self] _ in
+            Task { @MainActor in self?.pendingWscdChoice = self?.wscdChoice.current }
+        }
     }
 
     // MARK: - Public actions
@@ -656,52 +664,14 @@ final class WalletViewModel: ObservableObject {
         wscdDefaultMapping.removeValue(forKey: key)
     }
 
-    /// Bridges `RequestWscdChoice`'s async callback (see `WalletConfig.requestWscdChoice`)
-    /// to `WscdChoiceSheet`: suspends the caller until the user taps a
-    /// plugin or Cancel. Mirrors `ProximityEngagementContent.requestConsent`'s
-    /// identical bridge for `RequestProximityConsent`.
+    /// `WalletConfig.requestWscdChoice`: puts the choice to the user through the SDK's `ConsentPrompt` (one
+    /// answer; cancelled on dismiss, supersede and task cancellation) and shows it in `WscdChoiceSheet`.
     nonisolated func requestWscdChoice(
         issuer: String,
         credentialType: String,
         eligiblePluginIds: [String]
     ) async -> WscdChoiceResult {
-        await withCheckedContinuation { (continuation: CheckedContinuation<WscdChoiceResult, Never>) in
-            let box = WscdChoiceContinuationBox()
-            box.set(continuation)
-            Task { @MainActor in
-                self.wscdChoiceContinuationBox = box
-                self.pendingWscdChoice = PendingWscdChoice(
-                    issuer: issuer,
-                    credentialType: credentialType,
-                    eligiblePluginIds: eligiblePluginIds,
-                    respond: { chosenPluginId, rememberScope in
-                        // Triggers `.sheet(item:onDismiss:)`'s onDismiss too
-                        // (setting the bound item to nil dismisses the
-                        // sheet) - that's fine: `box.resumeOnce` below
-                        // already wins the race, so onDismiss's own
-                        // `dismissWscdChoice` call is a harmless no-op by
-                        // the time it runs. See `ProximityEngagementContent
-                        // .requestConsent`'s identical comment.
-                        self.pendingWscdChoice = nil
-                        let result = chosenPluginId.map { WscdChoiceResult.chosen(pluginId: $0, rememberScope: rememberScope) } ?? .cancelled
-                        box.resumeOnce(result)
-                    }
-                )
-            }
-        }
-    }
-
-    /// Resolves `pendingWscdChoice` as `.cancelled` if the sheet is
-    /// dismissed without the user tapping a plugin or Cancel (e.g. swiping
-    /// it away) - the genuine Swift equivalent of the gap
-    /// `ProximityEngagementContent`'s own `onDismiss` handles for
-    /// `RequestProximityConsent`; without it this continuation would
-    /// otherwise hang forever. `resumeOnce` is a no-op if the user already
-    /// tapped a plugin/Cancel (`respond` already resumed it).
-    func dismissWscdChoice() {
-        pendingWscdChoice = nil
-        wscdChoiceContinuationBox?.resumeOnce(.cancelled)
-        wscdChoiceContinuationBox = nil
+        await wscdChoice.ask(WscdChoiceQuestion(issuer: issuer, credentialType: credentialType, eligiblePluginIds: eligiblePluginIds))
     }
 
     /// Resolves `pendingFido2PinEntry` as cancelled if the sheet is

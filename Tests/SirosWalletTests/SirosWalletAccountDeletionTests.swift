@@ -40,6 +40,12 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         private(set) var clearedCredentials = false
         private(set) var clearedPresentationRecords = false
         private(set) var locked = false
+        var eraseKeyMaterialError: Error?
+        private(set) var erasedKeyMaterial = false
+        func eraseKeyMaterial() async throws {
+            erasedKeyMaterial = true
+            if let eraseKeyMaterialError { throw eraseKeyMaterialError }
+        }
         func unlock(prfOutput: Data, encryptedContainer: Data, hkdfSalt: Data, hkdfInfo: Data) async throws {}
         func lock() { locked = true; isUnlocked = false }
         func generateKey(algorithm: String) async throws -> String { "key" }
@@ -70,7 +76,12 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         func save(_ credential: StoredCredential) async {}
         func update(_ credential: StoredCredential) async {}
         func delete(_ id: Int64) async {}
+        var eraseError: Error?
         func clear() async { cleared = true }
+        func eraseAll() async throws {
+            if let eraseError { throw eraseError }
+            cleared = true
+        }
     }
 
     private final class Server: @unchecked Sendable {
@@ -352,6 +363,40 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertTrue(f.auth.options.isEmpty)
     }
 
+    // MARK: - Authorization-server token cache
+
+    private final class MintCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+    }
+
+    /// `AuthServerClient` caches minted tokens on its own; a wipe must drop
+    /// them, or the next request would be served the deleted account's token.
+    func testTheWipeClearsTheAuthServerTokenCache() async throws {
+        let f = await makeFixture()
+        let minted = MintCounter()
+        let client = AuthServerClient(baseUrl: "https://as.example.invalid", tenantId: "default") { _, _, _, _ in
+            minted.bump()
+            let claims = #"{"sub":"u","aud":"wallet-backend","tenant_id":"default","tac":"rwlid","exp":4102444800}"#
+            let b64 = Data(claims.utf8).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+            return Data(#"{"access_token":"e30.\#(b64).sig","token_type":"Bearer","expires_in":3600}"#.utf8)
+        }
+        f.wallet.authServerClient = client
+        _ = try await client.requestAccessToken(aud: "wallet-backend", tac: "rwlid")
+        _ = try await client.requestAccessToken(aud: "wallet-backend", tac: "rwlid")
+        XCTAssertEqual(minted.count, 1, "warm cache")
+
+        _ = await f.wallet.deleteAccount(confirmation: "DELETE")
+
+        _ = try await client.requestAccessToken(aud: "wallet-backend", tac: "rwlid")
+        XCTAssertEqual(minted.count, 2, "the wipe dropped the cached token")
+    }
+
     // MARK: - Wipe error collection
 
     func testAFailingWipeStepIsReportedAndTheRestStillRuns() async {
@@ -369,6 +414,62 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertTrue(f.registry.listAccounts().isEmpty)
         XCTAssertNil(f.wallet.apiClient)
         XCTAssertNil(f.sessionStore.appToken)
+    }
+
+    /// The three stores whose plain clear cannot report: a failing erase must
+    /// reach the caller's report while the remaining steps still run.
+    func testFailingStoreErasuresAreReported() async {
+        struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
+        let auth = RecordingAuthProvider()
+        let credentials = RecordingCredentialStore()
+        credentials.eraseError = Boom()
+        let sessionStore = InMemorySessionStore()
+        sessionStore.eraseFailure = Boom()
+        let storage = InMemoryAccountRegistryStorage()
+        storage.eraseFailure = Boom()
+        let registry = AccountRegistry(storage: storage)
+        let wallet = SirosWallet(
+            config: WalletConfig(backendUrl: "https://wallet.example.invalid", credentialStore: credentials),
+            authProvider: auth, sessionStore: sessionStore, keystore: RecordingKeystore(), accountRegistry: registry
+        )!
+        let report = await wallet.wipeLocalState()
+        XCTAssertEqual(Set(report.failures.map(\.component)), ["credential store", "session store", "account registry"])
+        XCTAssertFalse(report.isComplete)
+    }
+
+    /// Holder keys can be generated in any registered keystore: each distinct
+    /// one is cleared, has its signing keys erased and is locked, the default
+    /// is not handled twice, and a failure names the store it came from.
+    func testEveryDistinctRegisteredKeystoreIsWiped() async {
+        struct Boom: Error, LocalizedError { var errorDescription: String? { "boom" } }
+        let primary = RecordingKeystore()
+        let secondary = RecordingKeystore()
+        secondary.eraseKeyMaterialError = Boom()
+        let server = Server()
+        let wallet = SirosWallet(
+            config: WalletConfig(
+                backendUrl: "https://wallet.example.invalid",
+                credentialStore: RecordingCredentialStore(),
+                availableKeystores: ["softkey": primary, "fido2": secondary]
+            ),
+            authProvider: RecordingAuthProvider(), sessionStore: InMemorySessionStore(),
+            keystore: primary, accountRegistry: .inMemory()
+        )!
+        let client = BackendApiClient(baseUrl: "https://wallet.example.invalid", httpFn: server.httpFn)
+        client.setAppToken("t")
+        wallet.apiClient = client
+
+        let result = await wallet.deleteAccount(confirmation: "DELETE")
+
+        XCTAssertEqual(result, .deleted(localWipe: LocalWipeReport(failures: [
+            LocalWipeFailure(component: "keystore fido2 signing keys", message: "boom"),
+        ])))
+        for store in [primary, secondary] {
+            XCTAssertTrue(store.clearedCredentials)
+            XCTAssertTrue(store.clearedPresentationRecords)
+            XCTAssertTrue(store.erasedKeyMaterial)
+            XCTAssertTrue(store.locked)
+        }
     }
 
     func testALockedKeystoreIsSkippedNotReportedAsAFailure() async {

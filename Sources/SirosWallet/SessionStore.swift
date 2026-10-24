@@ -86,6 +86,14 @@ public protocol SessionStoreProtocol: AnyObject, Sendable {
     func clearAll()
     /// Legacy alias for ``clearAccount()``.
     func clear()
+    /// ``clearAll()`` that reports a failure instead of swallowing it, so an
+    /// account wipe can tell the host that secrets may remain. The default
+    /// calls ``clearAll()``.
+    func eraseAll() throws
+}
+
+public extension SessionStoreProtocol {
+    func eraseAll() throws { clearAll() }
 }
 
 /// Account-keyed in-memory session store for testing and Linux.
@@ -160,4 +168,12 @@ public final class InMemorySessionStore: SessionStoreProtocol, @unchecked Sendab
     }
 
     public func clear() { clearAccount() }
+
+    /// Test seam: make ``eraseAll()`` fail the way a Keychain store can.
+    var eraseFailure: Error?
+
+    public func eraseAll() throws {
+        if let eraseFailure { throw eraseFailure }
+        clearAll()
+    }
 }

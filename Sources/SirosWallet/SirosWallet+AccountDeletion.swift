@@ -40,7 +40,7 @@ extension SirosWallet {
             let options = AuthenticateOptions(
                 rpId: challenge.rpId,
                 challenge: challenge.challenge,
-                allowCredentials: challenge.allowCredentials.isEmpty ? nil : challenge.allowCredentials,
+                allowCredentials: challenge.allowCredentials,
                 userVerification: challenge.userVerification
             )
             assertion = try await (stepUp ?? { [authProvider] in try await authProvider.authenticate(options: $0) })(options)
@@ -76,6 +76,18 @@ extension SirosWallet {
     private func currentApiClient() -> BackendApiClient? {
         lock.lock(); defer { lock.unlock() }
         return apiClient
+    }
+
+    /// The default keystore, then each other registered one once, labelled for
+    /// the report. The default keeps the historical "keystore" label.
+    private func distinctKeystores() -> [(label: String, store: KeystoreManager)] {
+        var result: [(label: String, store: KeystoreManager)] = [("keystore", keystore)]
+        var seen: Set<ObjectIdentifier> = [ObjectIdentifier(keystore)]
+        for (pluginId, store) in (config.availableKeystores ?? [:]).sorted(by: { $0.key < $1.key })
+        where seen.insert(ObjectIdentifier(store)).inserted {
+            result.append(("keystore \(pluginId)", store))
+        }
+        return result
     }
 
     private func dropInMemoryHolderState() {
@@ -132,20 +144,35 @@ extension SirosWallet {
             }
         }
 
-        // The keystore container is only writable while unlocked; when locked
+        // Refuse credential writes that started before this point, then wait
+        // for the one that may be saving right now (see `credentialWriteGate`).
+        lock.lock(); storeEpoch &+= 1; lock.unlock()
+        await credentialWriteGate.withLock {}
+
+        // Every distinct keystore, not only the default one: holder keys can
+        // be generated in any store registered in `availableKeystores`. A
+        // keystore container is only writable while unlocked; when locked
         // there is nothing in memory and its persisted form is in the session
-        // store, removed below.
-        if keystore.isUnlocked {
-            await step("keystore credentials") { try await keystore.clearCredentials() }
-            await step("keystore presentation records") { try await keystore.clearPresentationRecords() }
+        // store, removed below. Signing keys are erased before the lock.
+        for (label, store) in distinctKeystores() {
+            if store.isUnlocked {
+                await step("\(label) credentials") { try await store.clearCredentials() }
+                await step("\(label) presentation records") { try await store.clearPresentationRecords() }
+            }
+            await step("\(label) signing keys") { try await store.eraseKeyMaterial() }
+            store.lock()
         }
-        await step("credential store") { await credentialStore.clear() }
+        await step("credential store") { try await credentialStore.eraseAll() }
         // Scoped to the active account's storage, so before the session ends.
         wscdSelectionPolicy.clearAll()
 
         endSessionLocally()
-        sessionStore.clearAll()
-        accountRegistry.clear()
+        // `AuthServerClient` keeps its own token cache beside `AuthTokens`;
+        // left warm, a token for the deleted account would be served to the
+        // next request. Awaited before the disconnected state is published.
+        await authServerClient?.clearTokenCache()
+        await step("session store") { try sessionStore.eraseAll() }
+        await step("account registry") { try accountRegistry.eraseAll() }
         trustDecisionCache.clear()
         await clearCredentialStatusCachesAwaited()
         dropInMemoryHolderState()

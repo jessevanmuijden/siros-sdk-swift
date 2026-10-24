@@ -61,12 +61,18 @@ public struct AccountDeletionChallenge: Sendable {
         guard let challengeB64 = publicKey["challenge"] as? String else { throw malformed("challenge") }
         let challenge = WebAuthnAuthClient.base64UrlDecode(challengeB64)
         guard !challenge.isEmpty else { throw malformed("challenge") }
-        let allowed = (publicKey["allowCredentials"] as? [[String: Any]] ?? []).compactMap { entry -> AllowCredential? in
-            guard let id = entry["id"] as? String else { return nil }
-            return AllowCredential(
-                id: WebAuthnAuthClient.base64UrlDecode(id),
-                type: entry["type"] as? String ?? "public-key"
-            )
+        // The backend answers either a non-empty passkey list or NO_PASSKEY.
+        // A missing, empty or partly malformed list must not degrade into a
+        // discoverable-credential prompt, so refuse it outright.
+        guard let rawAllowed = publicKey["allowCredentials"] as? [[String: Any]], !rawAllowed.isEmpty else {
+            throw malformed("allowCredentials")
+        }
+        var allowed: [AllowCredential] = []
+        for entry in rawAllowed {
+            guard let id = entry["id"] as? String else { throw malformed("allowCredentials") }
+            let decoded = WebAuthnAuthClient.base64UrlDecode(id)
+            guard !decoded.isEmpty else { throw malformed("allowCredentials") }
+            allowed.append(AllowCredential(id: decoded, type: entry["type"] as? String ?? "public-key"))
         }
         self.init(
             challengeId: challengeId,
@@ -123,7 +129,7 @@ public enum AccountDeletionResponse: Sendable, Equatable {
         case (401, errorStepUpRequired): self = .stepUpRequired
         case (401, errorStepUpFailed): self = .stepUpFailed
         case (401, _): self = .sessionRejected
-        case (410, _): self = .stepUpExpired
+        case (410, errorStepUpExpired): self = .stepUpExpired
         case (400, errorConfirmationRequired): self = .confirmationRequired
         case (409, errorDeletionIncomplete): self = .incomplete(message: error.serverMessage)
         case (404, _): self = .accountNotFound

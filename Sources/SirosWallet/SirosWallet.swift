@@ -370,6 +370,16 @@ public final class SirosWallet: @unchecked Sendable {
 
     let credentialStore: CredentialStore
 
+    /// Orders credential writes against an account wipe. `storeEpoch` is
+    /// bumped (under `lock`) when a wipe begins; a writer captured the epoch
+    /// before its awaits and may save only while it is unchanged, doing the
+    /// check and the save inside `credentialWriteGate`. The wipe takes the gate
+    /// after bumping, so an in-flight save finishes before it clears and a
+    /// later one is refused: an issuance that was awaiting metadata when the
+    /// account was deleted cannot put its credential back afterwards.
+    let credentialWriteGate = AsyncMutex()
+    var storeEpoch: UInt64 = 0
+
     /// A BBS credential's holder state vault - `nil` unless `keystore`
     /// conforms to `ExtensionStore`. See `removeBbsHolderStateIfAny`.
     let bbsHolderStateVault: BbsHolderStateVault?

@@ -79,7 +79,29 @@ final class CredentialStackInteractionUITests: XCTestCase {
     /// would tap. dy 0.15 is comfortably inside that uncovered top band
     /// regardless of how many cards are stacked above or below.
     private func cardPoint(_ batchId: Int, dy: CGFloat = 0.15) -> XCUICoordinate {
-        card(batchId).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: dy))
+        waitForDeckToSettle()
+        return card(batchId).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: dy))
+    }
+
+    /// Waits until the deck has stopped moving: the frames of all three cards are identical in two samples
+    /// taken a quarter of a second apart (or `timeout` passes, and the test goes on as it always did).
+    ///
+    /// Every gesture below is computed from a card's frame at the moment the coordinate is taken, and the deck
+    /// animates (a reorder springs, a launch lays the cards out). On a slow, cold CI simulator a coordinate
+    /// taken mid-animation lands on a different card than the one asserted on, which showed up as a different
+    /// one of the drag and long-press tests failing in different CI runs, and passing on re-run. A warm local
+    /// simulator, also under CPU load, never reproduced it; waiting for the deck to be still removes the
+    /// dependence on how fast the machine animates.
+    private func waitForDeckToSettle(timeout: TimeInterval = 5) {
+        func frames() -> [CGRect] { (1...3).map { card($0).exists ? card($0).frame : .zero } }
+        let deadline = Date().addingTimeInterval(timeout)
+        var previous = frames()
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.25)
+            let current = frames()
+            if current == previous, !current.contains(.zero) { return }
+            previous = current
+        }
     }
 
     /// This app's i18n JSON loading (`L10n.swift`) does not resolve under

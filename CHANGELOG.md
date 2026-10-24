@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Account deletion: review fixes (#196).** The delete-begin response must carry a non-empty, well-formed
+  `allowCredentials` list (no silent fall-back to a discoverable prompt), and only `410 STEP_UP_EXPIRED` reads as an
+  expired step-up. The wipe now clears `AuthServerClient`'s token cache, reports failures of the credential store, the
+  Keychain session store and the account registry (new members `CredentialStore.eraseAll()`,
+  `SessionStoreProtocol.eraseAll()`, `AccountRegistry.eraseAll()`, with default implementations), refuses credential
+  writes from an issuance that was in flight when it began, and covers every distinct registered keystore, erasing the
+  signing keys held by `WscdKeystoreAdapter` (new `KeystoreManager.eraseKeyMaterial()`, default no-op; keys on an
+  external authenticator are left alone) before locking. `ASAuthorizationAuthProvider` passes the requested
+  `userVerification` to both assertion requests, and `LocalAuthProvider` assertions carry the UV flag (the key is gated
+  by `.userPresence`).
+- **Host-resolution timeouts fire on their own queue.** `hostResolvesToOnlyPublicAddresses` raced its lookup against a
+  timer on the same global queue, so a timer could wait behind lookups blocked in `getaddrinfo` (13 s against a 0.2 s
+  bound on a CI iOS simulator, failing `testResolutionGivesUpAfterHostResolutionTimeout`). The timer now has a dedicated
+  queue.
+
 ### Changed
 - **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
   `Generated/siros_dc_matcher_ffi.swift` from the v0.11.0 tag (keeping the
@@ -82,6 +98,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AccountDeletionResponse` per backend outcome, and by
   `WscdSelectionPolicy.clearAll()`. The sample app's Devices screen offers it
   with a typed confirmation.
+- **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
+  `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
+  not match the photo stored on the document's chip
+  (sirosfoundation/facetec-api#77). Until now the code would have reached the
+  app as `providerError`. Both `FaceTecIDVProvider` and `RemoteIDVClient` map
+  it, the same as siros-sdk-kotlin's `IDVException.ChipPhotoMismatch`. Adding a
+  case breaks exhaustive `switch`es over `IDVError`. The sample app has a
+  message for it in English and Swedish.
+- **CI: the SwiftPM unit tests run on an iOS Simulator (`Test (iOS Simulator)`).** Until now nothing
+  ran the `#if os(iOS)` code or tests: `Test (macOS)` compiles them out and `Build (iOS)` only
+  compiles. Ten tests that fail only on iOS are skipped by name and tracked in
+  https://github.com/sirosfoundation/siros-sdk-swift/issues/213, so a new iOS failure fails the job. The card-stack
+  UI tests wait for the deck to be still before each gesture (they failed in different CI runs and passed
+  on re-run).
+- **The `nymauth-*` proving seam: `NymAuthNativeProver`, its registry and typed errors,
+  with a refusing default.** One narrow async call (verified circuit bytes and the
+  already-assembled inputs in, proof and pseudonym out; the circuit authors' ABI,
+  mirrored from the Kotlin SDK). No native binding is shipped, so
+  `NymAuthNativeProverRegistry` hands out `RefusingNymAuthNativeProver`, which refuses
+  every request with `NymAuthNativeError(.noNativeProver)`; nothing is substituted.
+  Binding failures map to coarse kinds (and, for a refusal, a coarse reason) and carry
+  no message; the request (it holds the delivered seed) and response redact their
+  description, debug description and mirror. The request mirrors the Kotlin ABI: `circuitId` is the catalog circuit id the presentation states as `system_id`, `artifactHash` the catalog hash of the verified circuit, `time` the PROVER-supplied `proof_time` (rulebook v0.4, exactly 20 bytes), `verifierInput` the SHA-256 of the PREFIXED verifier id. Not wired into the wallet.
+- **`PresentationConsentCoordinator`: the ready-made `PresentationConsentHandler` for a host app.** It
+  renders a request into the SDK's approved wording (`PresentationConsentText`) and hands the app one
+  question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
+  answer, declined on timeout (default 120 s), dismissal, supersede and cancellation, and with no UI set. A
+  request the wording does not cover is declined without being shown.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
+- **`nym_auth` derived secrets: `NymPseudonym`, `SecretSeedCommitment`, and the
+  `private_seed` derivation (v2, per issuer).** `NymPseudonym.derive` is the rulebook's
+  `pseudonym-v1-sha256` (`SHA256(DST || seed || prover_input || verifier_input)`),
+  with the four rulebook configs and the API-misuse errors, tested against the
+  shared `nym-pseudonym-vectors.json`. `SecretSeedCommitment` reads `ssc` from an
+  mdoc (the credential's own doctype namespace only) or an SD-JWT VC (bound to the
+  signed `_sd`), checks `SHA256(seed) == ssc` in constant time and parses a
+  delivered seed (32 lowercase hex). The internal `PrivateSeed` derives
+  `HKDF-SHA256(mainKey, info = "org.siros.private_seed/v2" || lp(type) || lp(issuer))[:16]` and its
+  `psc`; the keystore binding to `mainKey` follows separately. The nym vector
+  files are byte-for-byte copies from siros-sdk-kotlin (PR 266 ed9f7e65, rulebook v0.4: function `pseudonym`, the PREFIXED verifier_id, the archive reference value `155f4337...aad1` reproduced), `derived-secrets.json` from
+  privatedata-spec 1b796d2 (SPEC 2.7: per issuer, injective `lp` encoding, empty or
+  over-65535-byte fields refused). Platform-neutral (swift-crypto
+  on Linux), no secret is logged or returned by a public API.
+- **`circuit_zk` consent model: `PresentationConsentHandler`, the consent request
+  and a registry-driven builder.** The locale-free request a user approves before
+  anything is signed or proved (items `pseudonym`, `predicate`, `claim`,
+  `legacyPseudonym`, per credential, with the verifier label and, for hosts and
+  tests only, the trust framework and `verifier_id_type`). Predicates apply to ANY
+  claim, and the function set is open-ended, so predicate functions are data:
+  `PredicateFunctions` (default: the nymauth `age_check`) declares per function id
+  its claim, value type, param-to-comparison map, an optional minimum span and
+  whether it reads as an age. Consent building, the local pre-check
+  (`precheck`) and the cross-query merge (`combinedBoundsOk`, the strictest
+  declared minimum span per credential and claim) are driven by it; a function not
+  in the registry is refused before consent. The handler is a sibling of
+  `TransactionConsentHandler`, not tied to the transaction-data flag: `false`, a
+  throw or a timeout is a decline, and with no handler a `circuit_zk` request is
+  refused. `PresentationConsentRequest.shortened(verifierId:)` is the display
+  shortening. Tested against the shared `circuit-zk-consent-vectors.json` (copied
+  byte-for-byte from siros-sdk-kotlin: 62 consent cases, 18 merge cases, 22
+  pre-check cases). Numbers are compared as exact decimals: a value Decimal would
+  round (over 38 digits) is refused, `in` members are deduplicated by value, the
+  merge span is refused when it cannot be computed exactly, and a pre-check with a
+  different number of lookups than functions is false; float operands must be finite
+  and exact. `requestSigned` is a required argument (the signature result, never
+  defaulted) and an empty query list is refused. A query may name the credential's namespace (labels come from `[namespace, element]` metadata only) and an item's `source` param is accepted when it names the function's own claim. The pseudonym function is `pseudonym` (rulebook v0.4; `ver` and `prf` params, not judged by consent), vectors from siros-sdk-kotlin PR 275 de6f1317. String operands are compared and deduplicated by their exact UTF-8 bytes (U+00E9 and U+0065 U+0301 are different, as in the other SDKs). A merge span whose bounds differ in scale by more than 4096 digits (`1` and `1e999999999`) is refused, never computed. `PresentationConsentText` renders a request into the approved wording (en, sv, fi, el, pt; other locales read English), generated from the Kotlin SDK's string resources so both SDKs say the same; date claims get date-specific sentences, numbers and strings the generic ones, an age keeps the age wording, and an unsupported pseudonym scope throws rather than being left out of the consent. Not wired into the wallet yet.
+- **`ConsentPrompt<Request, Answer>`: the SDK's one bridge from a question that needs a person to the host's UI.**
+  The SDK side calls `ask(_:)`; the host sets `onChange` to show the question and calls `answer(_:)` /
+  `decline()` on the `Pending` it is given (and `dismiss()` when its UI goes away). Guarantees: exactly one
+  answer however the user, a timeout, a dismissal, a newer question and task cancellation race; decline by
+  default (no UI set, dismissed, expired, superseded, cancelled); one question at a time; an outgoing
+  question can never answer or clear a newer one. The sample app's three copied continuation boxes
+  (proximity consent, TS12 transaction consent, WSCD choice) are replaced by it. Platform-neutral
+  (SirosCredentials), tested on Linux.
 - **Sensible default display for a credential type that publishes none.** What a
   card draws when the issuer's type metadata has no rendering block, which is
   every type that comes from someone else's catalog.
@@ -366,6 +463,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unchanged.
 
 ### Fixed
+- **Presentation consent: nothing is approved that is not shown.** A host predicate renderer that returns no sentences
+  (or only blank ones) is refused with `PresentationConsentTextError` instead of dropping the predicate from the screen.
+  Age bounds of one credential that meet at a single day (`ge` == `le`, in one predicate or split across two) identify
+  the exact birth date: the "not shared" age wording is dropped for them and every comparison is worded generically.
+- **ConsentPrompt: an expired question is never shown.** A zero-duration timeout (a negative one is normalised to it) is
+  declined before the question is installed, so a host that answers synchronously from `onChange` cannot approve it.
+  The tests wait for the host to be told before they resolve a question, removing a scheduling race.
+- **circuit_zk consent: claim paths and string operands.** Claim paths are compared by the UTF-8 bytes of their
+  components (`ClaimPathKey`), so `caf\u{e9}` and `cafe\u{301}` are two claims for the `source` check, the bound merge
+  and the label lookup. Age bounds that meet at a single day (one predicate, two predicates or two queries) identify the exact
+  birth date, so the "not shared" age wording is dropped for them. String operands in the consent wording are double-quoted and escaped, so the sets `["SE, FI"]`
+  and `["SE", "FI"]` no longer read alike.
 - **Transport: `WalletEngineSession` keeps one engine socket at a time.** The
   engine keeps one session per (tenant, user) and closes the older socket when a
   second connects. The session used to open several at once: `forceReconnect`
