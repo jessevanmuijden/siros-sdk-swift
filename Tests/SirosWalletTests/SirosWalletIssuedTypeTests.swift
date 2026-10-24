@@ -333,6 +333,42 @@ final class SirosWalletIssuedTypeTests: XCTestCase {
         XCTAssertTrue(saved.isEmpty, "the credential must not reappear after the wipe")
     }
 
+    /// The same wipe landing while the FIRST credential of a batch awaits its
+    /// metadata: the whole completion is dropped, not just that credential, so
+    /// the second one (which would capture the post-wipe epoch) is not stored.
+    func testABatchOvertakenByAWipeStoresNoCredentialAtAll() async throws {
+        let store = InMemoryCredentialStore()
+        let w = SirosWallet(
+            config: WalletConfig(backendUrl: "https://example.invalid", credentialStore: store),
+            authProvider: StubAuthProvider(), keystore: StubKeystoreManager(), accountRegistry: .inMemory()
+        )!
+        let issuers = displayDocument("urn:eudi:pid:1", displayName: "PID")
+        let staleDocument = displayDocument("urn:eudi:pid:1", displayName: "PID (old)")
+        let parked = FetchPause()
+        w.vctmFetcher = VctmFetcher(httpGet: { @Sendable _ in
+            await parked.pause()
+            return issuers.raw
+        })
+        w.activeOffer = offer(vct: "urn:eudi:pid:1")
+        w.activeVctm = staleDocument.vctm
+        w.activeVctmDocument = staleDocument
+        let raw = sdJwt(vct: "urn:eudi:pid:1", integrity: digest(of: issuers.raw))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "flow-1",
+            "credentials": [["format": "dc+sd-jwt", "credential": raw], ["format": "dc+sd-jwt", "credential": raw]],
+        ]
+        let msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: JSONSerialization.data(withJSONObject: object))
+
+        let completion = Task { await w.handleFlowComplete(msg: msg) }
+        await parked.waitUntilParked()
+        _ = await w.wipeLocalState()
+        await parked.resume()
+        await completion.value
+
+        let saved = await store.getAll()
+        XCTAssertTrue(saved.isEmpty, "neither credential of the batch may reappear after the wipe")
+    }
+
     private actor FetchPause {
         private var parkedContinuation: CheckedContinuation<Void, Never>?
         private var isParked = false

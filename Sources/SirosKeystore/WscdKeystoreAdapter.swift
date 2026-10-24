@@ -63,6 +63,9 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// introduced by this change.
     private let credentialsKeystore = JweKeystore()
 
+    /// Admits key creation only while no erase is under way; see `KeyOperationGate`.
+    private let keyGate = KeyOperationGate()
+
     /// Non-nil only when `signer` is itself WSCD-backed (i.e. a
     /// `UniFFISigner`) - a plain software `Signer` has no lifecycle or
     /// plugin-registration concept.
@@ -141,6 +144,7 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         hkdfSalt: Data,
         hkdfInfo: Data
     ) async throws {
+        keyGate.reopen()
         // The WSCD manages its own signing-key protection (no PRF unlock for
         // key material itself), but this adapter's *credentials* (and now
         // `S.wscdCredentials`) are still PRF-protected via
@@ -164,6 +168,7 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         hkdfInfo: Data,
         prfSalt: Data
     ) async throws {
+        keyGate.reopen()
         try await credentialsKeystore.unlock(
             prfOutput: prfOutput,
             encryptedContainer: encryptedContainer,
@@ -185,6 +190,9 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// external authenticator. Continues past a failing key and throws one
     /// error naming each, so the caller can report that key material remains.
     public func eraseKeyMaterial() async throws {
+        // No new key may be created from here on, and one being created now is
+        // waited for, so the snapshot below cannot miss it.
+        await keyGate.beginErase()
         let keys = try await signer.listKeys()
         var failures: [String] = []
         for key in keys where key.pluginId != Self.externalAuthenticatorPluginId {
@@ -267,7 +275,11 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
 
     public func generateKey(algorithm: String) async throws -> String {
         try checkUnlocked()
-        return try await signer.generateKey(algorithm: algorithm)
+        return try await keyGate.run {
+            // Re-checked inside the gate: a lock() that landed meanwhile must not be followed by a new key.
+            try checkUnlocked()
+            return try await signer.generateKey(algorithm: algorithm)
+        }
     }
 
     public func sign(keyId: String, payload: Data, algorithm: String) async throws -> Data {
@@ -290,7 +302,10 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         var keys = try await signer.listKeys()
         if keys.isEmpty || freshKey {
             // Auto-generate a key for VCI proof-of-possession
-            let newKeyId = try await signer.generateKey(algorithm: "ES256")
+            let newKeyId = try await keyGate.run {
+                try checkUnlocked()
+                return try await signer.generateKey(algorithm: "ES256")
+            }
             keys = try await signer.listKeys()
             if freshKey {
                 keys = keys.filter { $0.keyId == newKeyId }
