@@ -224,6 +224,28 @@ final class SirosWalletWscdSelectionTests: XCTestCase {
         XCTAssertEqual(result?.keyIds.first, "fido2-key-0")
     }
 
+    #if canImport(CryptoKit)
+    func testDefaultJweMainKeystoreDoesNotVouchForNonOnboardedFido2() async throws {
+        // The default main store (JweKeystore) has no onboarding knowledge: it must NOT
+        // make a non-onboarded fido2 adapter look onboarded via the main-keystore fallback.
+        let fidoKeystore = StubKeystoreManager(label: "fido2")
+        fidoKeystore.onboarded = false
+        var config = WalletConfig(backendUrl: "https://example.invalid")
+        config.availableKeystores = ["fido2": fidoKeystore]
+        let w = SirosWallet(config: config, authProvider: StubAuthProvider(), keystore: JweKeystore())!
+        w.apiClient = fakeApiClient()
+        w.activeVctm = Vctm(vct: "urn:example:pid", requiredKeyStorage: "iso_18045_high")
+
+        do {
+            _ = try await w.requestBackendKeyAttestation(audience: "https://issuer.example.com", nonce: "n", count: 1)
+            XCTFail("expected WscdSelectionError.wscdNotOnboarded")
+        } catch WscdSelectionError.wscdNotOnboarded(_, _, _, let notOnboarded) {
+            XCTAssertEqual(notOnboarded, ["fido2"])
+        }
+        XCTAssertEqual(fidoKeystore.generateKeypairsCallCount, 0)
+    }
+    #endif
+
     func testOnboardedFido2StillGeneratesKeys() async throws {
         let defaultKeystore = StubKeystoreManager(label: "softkey")
         let fidoKeystore = StubKeystoreManager(label: "fido2")

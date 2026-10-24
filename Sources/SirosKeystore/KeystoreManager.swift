@@ -25,8 +25,8 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// Checked by `WscdSelectionPolicy` BEFORE any key generation, so a user with no
     /// onboarded token of the required assurance fails up front with a clear error
     /// instead of being asked for a PIN that nothing could use. Side-effect free.
-    /// A genuine protocol requirement (defaulted to `true` below: software keystores
-    /// need no onboarding) so it dispatches dynamically through the existential.
+    /// A genuine protocol requirement (defaulted below to `true` except for
+    /// onboarding-required plugins, which a keystore must vouch for itself) so it dispatches dynamically through the existential.
     func isWscdPluginOnboarded(pluginId: String) async -> Bool
 
     /// Unlock the keystore using PRF-derived key material.
@@ -553,7 +553,13 @@ extension KeystoreError: LocalizedError {
 extension KeystoreManager {
     public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { nil }
 
-    public func isWscdPluginOnboarded(pluginId: String) async -> Bool { true }
+    /// Fails closed for plugins with an enrollment step: a keystore that does not
+    /// itself implement the check (e.g. the default `JweKeystore`) has no knowledge of
+    /// an enrolled token, so it must not vouch for one. Plugins without onboarding
+    /// (software keys) are always fine.
+    public func isWscdPluginOnboarded(pluginId: String) async -> Bool {
+        !WscdPluginCapabilities.onboardingRequiredPluginIds.contains(pluginId)
+    }
 
     public func signVpToken(
         credential: String,
