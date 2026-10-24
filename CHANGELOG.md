@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Host-resolution timeouts fire on their own queue.** `hostResolvesToOnlyPublicAddresses` raced its lookup against a
+  timer on the same global queue, so a timer could wait behind lookups blocked in `getaddrinfo` (13 s against a 0.2 s
+  bound on a CI iOS simulator, failing `testResolutionGivesUpAfterHostResolutionTimeout`). The timer now has a dedicated
+  queue.
+
 ### Changed
 - **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
   `Generated/siros_dc_matcher_ffi.swift` from the v0.11.0 tag (keeping the
@@ -40,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, the same as siros-sdk-kotlin's `IDVException.ChipPhotoMismatch`. Adding a
   case breaks exhaustive `switch`es over `IDVError`. The sample app has a
   message for it in English and Swedish.
+- **CI: the SwiftPM unit tests run on an iOS Simulator (`Test (iOS Simulator)`).** Until now nothing
+  ran the `#if os(iOS)` code or tests: `Test (macOS)` compiles them out and `Build (iOS)` only
+  compiles. Ten tests that fail only on iOS are skipped by name and tracked in
+  https://github.com/sirosfoundation/siros-sdk-swift/issues/213, so a new iOS failure fails the job. The card-stack
+  UI tests wait for the deck to be still before each gesture (they failed in different CI runs and passed
+  on re-run).
 - **The `nymauth-*` proving seam: `NymAuthNativeProver`, its registry and typed errors,
   with a refusing default.** One narrow async call (verified circuit bytes and the
   already-assembled inputs in, proof and pseudonym out; the circuit authors' ABI,
