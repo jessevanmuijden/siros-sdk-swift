@@ -50,6 +50,12 @@ public enum IDVError: Error, Sendable {
     /// `chip_untrusted`, from its trust PDP). Retrying with the same document
     /// will not help; the user needs another one.
     case chipUntrusted(message: String)
+    /// The backend refused to issue because the face did not match the photo
+    /// stored on the document's chip (facetec-api's `chip_photo_mismatch`, from
+    /// FaceTec's `matchLevelNFCToFaceMap`), or could not be compared with it.
+    /// Matching the photo printed on the document is not enough: only the chip
+    /// photo ties the chip, and so the identity, to the person scanned.
+    case chipPhotoMismatch(message: String)
     /// The backend refused to issue because the document has expired or its
     /// expiry date could not be read as unexpired (facetec-api's
     /// `document_expired`). The user needs a valid document.
@@ -71,6 +77,7 @@ public enum IDVError: Error, Sendable {
         case .networkError: return "idv_network_error"
         case .documentChipNotVerified(let reason, _): return "idv_\(reason)"
         case .chipUntrusted: return "idv_chip_untrusted"
+        case .chipPhotoMismatch: return "idv_chip_photo_mismatch"
         case .documentExpired: return "idv_document_expired"
         case .sessionExpired: return "idv_session_expired"
         case .providerError(let code, _): return "idv_provider_\(code)"
@@ -88,6 +95,7 @@ extension IDVError: LocalizedError {
         case .networkError(let underlying): return "Network error during IDV: \(underlying.localizedDescription)"
         case .documentChipNotVerified(_, let message): return message
         case .chipUntrusted(let message): return message
+        case .chipPhotoMismatch(let message): return message
         case .documentExpired(let message): return message
         case .sessionExpired(let message): return message
         case .providerError(let code, let message): return "[\(code)] \(message)"
@@ -150,14 +158,13 @@ public protocol IdentityVerificationProvider: AnyObject, Sendable {
 extension IDVError {
     /// Maps a refusal code from facetec-api (`credentialIssueErrorCode` from
     /// `/process-request`, or `error_code` of a legacy `/v1` 422) to an
-    /// ``IDVError``. siros-sdk-kotlin maps the
-    /// same way except that it does not yet have dedicated errors for
-    /// `chip_untrusted`, `document_expired` and `session_expired`.
+    /// ``IDVError``. siros-sdk-kotlin maps the same way (`idvExceptionForCode`).
     ///
     /// - `nfc_*`: the document's chip was not read and authenticated
     ///   (``documentChipNotVerified(reason:message:)``).
-    /// - `chip_untrusted`, `document_expired`, `session_expired`:
-    ///   ``chipUntrusted(message:)``, ``documentExpired(message:)``,
+    /// - `chip_untrusted`, `chip_photo_mismatch`, `document_expired`,
+    ///   `session_expired`: ``chipUntrusted(message:)``,
+    ///   ``chipPhotoMismatch(message:)``, ``documentExpired(message:)``,
     ///   ``sessionExpired(message:)``.
     /// - `liveness_failed`: ``livenessFailed(message:)``.
     /// - `match_failed`, `policy_rejected`, `document_unreadable`:
@@ -173,6 +180,8 @@ extension IDVError {
             self = .documentChipNotVerified(reason: code, message: text)
         case "chip_untrusted":
             self = .chipUntrusted(message: text)
+        case "chip_photo_mismatch":
+            self = .chipPhotoMismatch(message: text)
         case "document_expired":
             self = .documentExpired(message: text)
         case "session_expired":

@@ -749,7 +749,7 @@ extension SirosWallet {
             // The send is the epoch-checked commit: a cancel after the last
             // check can no longer be followed by `flow_start`.
             try dispatchIssuanceStart(epoch: epoch) {
-                engine.startIssuance(offer: offerJson, redirectUri: redirectUri, authorizationDetails: details)
+                engine.startIssuance(offer: offerJson, redirectUri: redirectUri, authorizationDetails: details, startTag: issuanceEpoch)
             }
         } catch {
             // A start failure here means the flow was never registered
@@ -857,11 +857,11 @@ extension SirosWallet {
             switch IssuanceStart.resolve(offerUri: offerUri) {
             case .offer(let offer):
                 try dispatchIssuanceStart(epoch: epoch) {
-                    engine.startIssuance(offer: offer, authorizationDetails: details)
+                    engine.startIssuance(offer: offer, authorizationDetails: details, startTag: issuanceEpoch)
                 }
             case .credentialOfferUri(let uri):
                 try dispatchIssuanceStart(epoch: epoch) {
-                    engine.startIssuance(credentialOfferUri: uri, authorizationDetails: details)
+                    engine.startIssuance(credentialOfferUri: uri, authorizationDetails: details, startTag: issuanceEpoch)
                 }
             }
         } catch {
