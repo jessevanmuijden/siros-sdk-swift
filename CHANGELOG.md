@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a resume (which resets the budgets and replays the queue) cannot be followed by stale retries. `WmpPeer.close`
   finishes `flowEvents()` whether or not the close notification got through. A catch-up after a resume drains only its own
   child, so an answer that exhausted its retries is not resent by another child's catch-up.
+- **Host-resolution timeouts fire on their own queue.** `hostResolvesToOnlyPublicAddresses` raced its lookup against a
+  timer on the same global queue, so a timer could wait behind lookups blocked in `getaddrinfo` (13 s against a 0.2 s
+  bound on a CI iOS simulator, failing `testResolutionGivesUpAfterHostResolutionTimeout`). The timer now has a dedicated
+  queue.
 
 ### Changed
 - **Dependency: siros-dc-matcher XCFramework 0.6.2 -> 0.11.0.** Regenerated
@@ -39,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     needed before release.
 
 ### Added
+- **CI: the SwiftPM unit tests run on an iOS Simulator (`Test (iOS Simulator)`).** Until now nothing
+  ran the `#if os(iOS)` code or tests: `Test (macOS)` compiles them out and `Build (iOS)` only
+  compiles. Ten tests that fail only on iOS are skipped by name and tracked in
+  https://github.com/sirosfoundation/siros-sdk-swift/issues/213, so a new iOS failure fails the job. The card-stack
+  UI tests wait for the deck to be still before each gesture (they failed in different CI runs and passed
+  on re-run).
+- **The `nymauth-*` proving seam: `NymAuthNativeProver`, its registry and typed errors,
+  with a refusing default.** One narrow async call (verified circuit bytes and the
+  already-assembled inputs in, proof and pseudonym out; the circuit authors' ABI,
+  mirrored from the Kotlin SDK). No native binding is shipped, so
+  `NymAuthNativeProverRegistry` hands out `RefusingNymAuthNativeProver`, which refuses
+  every request with `NymAuthNativeError(.noNativeProver)`; nothing is substituted.
+  Binding failures map to coarse kinds (and, for a refusal, a coarse reason) and carry
+  no message; the request (it holds the delivered seed) and response redact their
+  description, debug description and mirror. The request mirrors the Kotlin ABI: `circuitId` is the catalog circuit id the presentation states as `system_id`, `artifactHash` the catalog hash of the verified circuit, `time` the PROVER-supplied `proof_time` (rulebook v0.4, exactly 20 bytes), `verifierInput` the SHA-256 of the PREFIXED verifier id. Not wired into the wallet.
 - **`PresentationConsentCoordinator`: the ready-made `PresentationConsentHandler` for a host app.** It
   renders a request into the SDK's approved wording (`PresentationConsentText`) and hands the app one
   question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
