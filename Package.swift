@@ -53,6 +53,10 @@ let package = Package(
         // rather than hand-rolling extended-Euclidean-algorithm code in a
         // cryptographic path.
         .package(url: "https://github.com/attaswift/BigInt.git", from: "5.3.0"),
+        // SVG logo rasterization (pure Swift, zlib licence). Exact pin: it
+        // parses untrusted issuer-supplied SVG, so upgrades are deliberate.
+        // The refusal guard in SvgLogoRenderer.swift runs BEFORE it.
+        .package(url: "https://github.com/swhitty/SwiftDraw.git", exact: "0.29.0"),
     ],
     targets: [
         // --- zk-cred-longfellow UniFFI bindings (XCFramework) ---
@@ -110,6 +114,7 @@ let package = Package(
             name: "SirosCredentials",
             dependencies: [
                 .product(name: "SwiftCBOR", package: "SwiftCBOR"),
+                .product(name: "SwiftDraw", package: "SwiftDraw"),
                 // AnyCodable (for ZkCircuitDescriptor.params' generic
                 // map[string]any) already exists in SirosTransport - reused
                 // here rather than duplicated. SirosTransport has no

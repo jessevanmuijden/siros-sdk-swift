@@ -155,14 +155,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
   returns `.image(pngBytes)`, `.remote(httpsURL)` or a typed `LogoRejection`
   (fail closed). `data:` logos must be `data:<type>;base64,...` with type
-  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 2048 px per side;
-  they are decoded with ImageIO, checked to be the declared type, and
+  `image/png|jpeg|webp|gif|svg+xml`, at most 256 KiB decoded and 2048 px per
+  side; rasters are decoded with ImageIO, checked to be the declared type, and
   re-encoded as a fresh PNG, so metadata and trailing/polyglot payloads are
-  dropped. **SVG is rejected** (script and external references; no safe
-  renderer is available, and it is not rendered via WKWebView or hand-sanitised).
-  Only `https:` remote logos pass (`http:` and other schemes are refused).
-  Without ImageIO (Linux) every `data:` logo is refused. Same policy as
-  siros-sdk-kotlin.
+  dropped. **SVG** is first run through an XMLParser-based refusal guard
+  (script, foreignObject, use, a, image, animation, iframe/object/embed, `on*`
+  attributes, non-fragment href, external `url()`/`@import`, DOCTYPE/entities
+  are refused, never repaired), then rasterized by
+  [SwiftDraw](https://github.com/swhitty/SwiftDraw) (pinned exactly, 0.29.0,
+  zlib licence) to at most 512 px and re-encoded like any raster. Same policy
+  as siros-sdk-kotlin. `LogoSanitizer.fetchAndSanitize` and `LogoCache` fetch
+  and sanitize `https` SVG logos the same way. Only `https:` remote logos pass
+  (`http:` and other schemes are refused). Without ImageIO (Linux) every
+  `data:` logo is refused. `LogoCache` sanitizes off the main actor and caches
+  by URI; the sample app shows the issuer initial until ready or on failure.
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
   `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
   not match the photo stored on the document's chip

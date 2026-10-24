@@ -40,15 +40,10 @@ final class LogoSanitizerTests: XCTestCase {
         XCTAssertEqual(rejection("https:///l.png"), .invalidRemoteUrl)
     }
 
-    func testSvgDataUriRejectedEvenWhenBenign() {
-        let svg = Data("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>".utf8)
-        XCTAssertEqual(rejection(uri("image/svg+xml", svg)), .svgNotSupported)
-        XCTAssertEqual(rejection("data:image/svg+xml;utf8,<svg onload='alert(1)'/>"), .svgNotSupported)
-        XCTAssertEqual(rejection("data:image/svg+xml,%3Csvg%3E"), .svgNotSupported)
-        XCTAssertEqual(rejection("DATA:IMAGE/SVG+XML;BASE64,PHN2Zy8+"), .svgNotSupported)
-        if case .failure(.svgNotSupported) = LogoSanitizer.sanitize(imageData: svg, declaredMediaType: "image/svg+xml") {} else {
-            XCTFail("sanitize(imageData:) must reject SVG")
-        }
+    func testPercentEncodedSvgRefused() {
+        // Base64 only, like every other data: logo (and like Kotlin).
+        XCTAssertEqual(rejection("data:image/svg+xml;utf8,<svg onload='alert(1)'/>"), .malformedDataUri)
+        XCTAssertEqual(rejection("data:image/svg+xml,%3Csvg%3E"), .malformedDataUri)
     }
 
     func testWrongMediaTypeRejected() {
@@ -88,6 +83,10 @@ final class LogoSanitizerTests: XCTestCase {
     }
 
     #if !canImport(ImageIO)
+    func testLinuxSvgFailsClosed() {
+        let svg = Data("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'/>".utf8)
+        XCTAssertEqual(rejection(uri("image/svg+xml", svg)), .platformUnsupported)
+    }
     /// Linux: no ImageIO, so every data: logo is refused (fail closed).
     func testLinuxDataLogoFailsClosed() {
         // 1x1 PNG
@@ -267,6 +266,127 @@ final class LogoSanitizerImageTests: XCTestCase {
         }
     }
 
+    // MARK: - SVG
+
+    private func svg(_ body: String, attrs: String = "width=\"64\" height=\"32\" viewBox=\"0 0 64 32\"") -> String {
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" \(attrs)>\(body)</svg>"
+    }
+
+    private func svgUri(_ s: String) -> String { uri("image/svg+xml", Data(s.utf8)) }
+
+    private func svgRejection(_ s: String, file: StaticString = #filePath, line: UInt = #line) -> LogoRejection? {
+        if case .failure(let r) = LogoSanitizer.sanitize(svgUri(s)) { return r }
+        XCTFail("expected rejection", file: file, line: line)
+        return nil
+    }
+
+    private func pixel(_ data: Data, x: Int, y: Int) -> [UInt8] {
+        let src = CGImageSourceCreateWithData(data as CFData, nil)!
+        let img = CGImageSourceCreateImageAtIndex(src, 0, nil)!
+        let ctx = CGContext(data: nil, width: img.width, height: img.height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: img.width, height: img.height))
+        let p = ctx.data!.bindMemory(to: UInt8.self, capacity: img.height * ctx.bytesPerRow)
+        // Bitmap memory is top-row-first.
+        let off = y * ctx.bytesPerRow + x * 4
+        return [p[off], p[off + 1], p[off + 2], p[off + 3]]
+    }
+
+    func testCleanSvgRasterizedToPng() {
+        guard case .success(let logo) = LogoSanitizer.sanitize(svgUri(svg("<rect width=\"64\" height=\"32\" fill=\"#ff0000\"/>"))),
+              case .image(let data) = logo else { return XCTFail() }
+        let src = CGImageSourceCreateWithData(data as CFData, nil)!
+        XCTAssertEqual(CGImageSourceGetType(src) as String?, "public.png")
+        let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as! [CFString: Any]
+        XCTAssertEqual(p[kCGImagePropertyPixelWidth] as? Int, LogoSanitizer.svgRenderEdge)
+        XCTAssertEqual(p[kCGImagePropertyPixelHeight] as? Int, LogoSanitizer.svgRenderEdge / 2)
+        let px = pixel(data, x: 10, y: 10)
+        XCTAssertEqual(px[0], 255); XCTAssertEqual(px[1], 0); XCTAssertEqual(px[3], 255)
+    }
+
+    func testSvgOrientationIsUpright() {
+        // Red square in the bottom-right corner only.
+        let s = svg("<rect x=\"32\" y=\"16\" width=\"32\" height=\"16\" fill=\"#ff0000\"/>")
+        guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
+        let w = LogoSanitizer.svgRenderEdge, h = LogoSanitizer.svgRenderEdge / 2
+        XCTAssertEqual(pixel(data, x: w - 10, y: h - 10)[3], 255, "bottom-right drawn")
+        XCTAssertEqual(pixel(data, x: 10, y: 10)[3], 0, "top-left transparent")
+    }
+
+    func testSvgWithoutViewBoxKeepsArtwork() {
+        let s = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1024\" height=\"1024\"><rect x=\"768\" y=\"768\" width=\"200\" height=\"200\" fill=\"#ff0000\"/></svg>"
+        guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
+        let e = LogoSanitizer.svgRenderEdge
+        XCTAssertEqual(pixel(data, x: Int(Double(e) * 0.8), y: Int(Double(e) * 0.8))[0], 255)
+    }
+
+    func testHugeViewBoxIsScaledToBoundedBitmap() {
+        let s = svg("<rect width=\"1\" height=\"1\"/>", attrs: "width=\"1000000\" height=\"1000000\" viewBox=\"0 0 1000000 1000000\"")
+        guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
+        let src = CGImageSourceCreateWithData(data as CFData, nil)!
+        let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as! [CFString: Any]
+        XCTAssertLessThanOrEqual(p[kCGImagePropertyPixelWidth] as! Int, LogoSanitizer.maxDimension)
+        XCTAssertLessThanOrEqual(p[kCGImagePropertyPixelHeight] as! Int, LogoSanitizer.maxDimension)
+        // Extreme aspect ratio still yields a valid >=1px bitmap.
+        let thin = svg("<rect width=\"1\" height=\"1\"/>", attrs: "width=\"100000\" height=\"1\" viewBox=\"0 0 100000 1\"")
+        guard case .success = LogoSanitizer.sanitize(svgUri(thin)) else { return XCTFail() }
+    }
+
+    func testSvgActiveContentRefused() {
+        let evil: [String: String] = [
+            "script": svg("<script>alert(1)</script><rect width=\"1\" height=\"1\"/>"),
+            "scriptNs": svg("<svg:script xmlns:svg=\"http://www.w3.org/2000/svg\">alert(1)</svg:script>"),
+            "foreignObject": svg("<foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\">x</div></foreignObject>"),
+            "use": svg("<defs><rect id=\"a\" width=\"1\" height=\"1\"/></defs><use href=\"#a\"/>"),
+            "a": svg("<a href=\"#x\"><rect width=\"1\" height=\"1\"/></a>"),
+            "imageDataPayload": svg("<image width=\"8\" height=\"8\" href=\"data:image/png;base64,iVBORw0KGgo=\"/>"),
+            "imageExternal": svg("<image href=\"https://evil.example/x.png\" width=\"8\" height=\"8\"/>"),
+            "animate": svg("<rect width=\"1\" height=\"1\"><animate attributeName=\"x\" from=\"0\" to=\"9\" dur=\"1s\"/></rect>"),
+            "set": svg("<rect width=\"1\" height=\"1\"><set attributeName=\"onclick\" to=\"alert(1)\"/></rect>"),
+            "iframe": svg("<iframe src=\"https://evil.example\"/>"),
+            "onload": svg("<rect width=\"1\" height=\"1\"/>", attrs: "width=\"4\" height=\"4\" onload=\"alert(1)\""),
+            "onclick": svg("<rect width=\"1\" height=\"1\" onclick=\"alert(1)\"/>"),
+            "javascriptHref": svg("<rect width=\"1\" height=\"1\" fill=\"javascript:alert(1)\"/>"),
+            "externalHrefOnGradient": svg("<linearGradient id=\"g\" xlink:href=\"https://evil.example/g.svg#x\"/>"),
+            "externalUrlFill": svg("<rect width=\"1\" height=\"1\" fill=\"url(https://evil.example/p.svg#a)\"/>"),
+            "styleImport": svg("<style>@import url(https://evil.example/a.css);</style>"),
+            "styleExternalUrl": svg("<style>rect{fill:url(https://evil.example/x)}</style>"),
+            "styleAttrExternalUrl": svg("<rect width=\"1\" height=\"1\" style=\"fill:url('http://evil.example/x')\"/>"),
+            "doctypeEntity": "<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"boom\">]>" + svg("<text>&x;</text>"),
+            "doctypeBare": "<!DOCTYPE svg>" + svg(""),
+            "entityBomb": "<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY a \"aaaaaaaaaa\"><!ENTITY b \"&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;\"><!ENTITY c \"&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;\">]>" + svg("<text>&c;</text>"),
+        ]
+        for (name, s) in evil {
+            XCTAssertEqual(svgRejection(s), .activeContent, name)
+        }
+    }
+
+    func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
+        let s = svg("<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs><rect width=\"64\" height=\"32\" fill=\"url(#g)\"/>")
+        guard case .success(.image) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
+    }
+
+    func testMalformedOrNonSvgXmlRefused() {
+        XCTAssertEqual(svgRejection("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect></svg>"), .invalidSvg)
+        XCTAssertEqual(svgRejection("<html><body/></html>"), .invalidSvg)
+        XCTAssertEqual(svgRejection("not xml at all"), .invalidSvg)
+        XCTAssertEqual(svgRejection(svg("<text>&undefined;</text>")), .invalidSvg)
+        XCTAssertEqual(svgRejection(" "), .invalidSvg)
+    }
+
+    func testSvgSizeCapAppliesToPayload() {
+        let big = svg("<!--" + String(repeating: "a", count: LogoSanitizer.maxDecodedBytes) + "--><rect/>")
+        XCTAssertEqual(svgRejection(big), .tooLarge)
+    }
+
+    func testSvgImageDataPathUsesSameGuard() {
+        let evil = Data(svg("<script>alert(1)</script>").utf8)
+        if case .failure(.activeContent) = LogoSanitizer.sanitize(imageData: evil, declaredMediaType: "image/svg+xml") {} else {
+            XCTFail("fetched SVG must go through the guard")
+        }
+    }
+
     func testSanitizeImageDataForFetchedRemoteLogo() {
         let png = encode(makeImage(width: 8, height: 8), uti: "public.png")
         guard case .success(let logo) = LogoSanitizer.sanitize(imageData: png, declaredMediaType: "image/png") else { return XCTFail() }
@@ -300,3 +420,58 @@ final class LogoCacheTests: XCTestCase {
         XCTAssertEqual(count, 6)
     }
 }
+
+#if canImport(ImageIO)
+/// https SVG logos are fetched, guarded and rendered (stubbed network).
+final class LogoRemoteSvgTests: XCTestCase {
+    final class StubProtocol: URLProtocol {
+        nonisolated(unsafe) static var body = Data()
+        nonisolated(unsafe) static var type = "image/svg+xml"
+        nonisolated(unsafe) static var status = 200
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let r = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil,
+                                    headerFields: ["Content-Type": Self.type])!
+            client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Self.body)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
+    private var session: URLSession {
+        let c = URLSessionConfiguration.ephemeral
+        c.protocolClasses = [StubProtocol.self]
+        return URLSession(configuration: c)
+    }
+
+    func testRemoteSvgGoesThroughGuardAndRender() async {
+        StubProtocol.status = 200; StubProtocol.type = "image/svg+xml"
+        StubProtocol.body = Data("<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>".utf8)
+        let url = URL(string: "https://example.org/logo.svg")!
+        guard case .success(.image) = await LogoSanitizer.fetchAndSanitize(url, session: session) else { return XCTFail() }
+        let cache = LogoCache(session: session)
+        let viaCache = await cache.resolve("https://example.org/logo.svg")
+        guard case .image? = viaCache else { return XCTFail("cache must resolve remote svg to an image") }
+    }
+
+    func testRemoteMaliciousSvgRefused() async {
+        StubProtocol.status = 200; StubProtocol.type = "image/svg+xml"
+        StubProtocol.body = Data("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>".utf8)
+        let url = URL(string: "https://example.org/logo.svg")!
+        if case .failure(.activeContent) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail() }
+        let cache = LogoCache(session: session)
+        let viaCache = await cache.resolve("https://example.org/logo.svg")
+        XCTAssertNil(viaCache)
+    }
+
+    func testRemoteHttpErrorOrHtmlRefused() async {
+        let url = URL(string: "https://example.org/logo.svg")!
+        StubProtocol.status = 404; StubProtocol.type = "image/svg+xml"; StubProtocol.body = Data("<svg/>".utf8)
+        if case .failure = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("404") }
+        StubProtocol.status = 200; StubProtocol.type = "text/html"
+        if case .failure(.unsupportedMediaType) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("html") }
+    }
+}
+#endif

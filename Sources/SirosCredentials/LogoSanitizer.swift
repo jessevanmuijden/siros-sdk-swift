@@ -1,6 +1,9 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(ImageIO)
 import ImageIO
 import CoreGraphics
@@ -31,8 +34,12 @@ public enum LogoRejection: Error, Sendable, Equatable {
     case malformedDataUri
     /// Media type outside `LogoSanitizer.allowedMediaTypes`.
     case unsupportedMediaType
-    /// `image/svg+xml`: refused on purpose, see `LogoSanitizer`.
-    case svgNotSupported
+    /// SVG containing script, foreignObject, <use>/<image>/animation, event
+    /// handlers, external references, DOCTYPE/entities or similar.
+    case activeContent
+    /// SVG that is not well-formed, not an `<svg>` document, or that the
+    /// renderer refused.
+    case invalidSvg
     case invalidBase64
     case tooLarge
     /// The bytes do not decode as the declared image type (including
@@ -56,18 +63,24 @@ public enum LogoRejection: Error, Sendable, Equatable {
 ///   type, and **re-encoded as a fresh PNG** from the decoded pixels, so
 ///   metadata and trailing/polyglot payloads are dropped. Animated GIFs
 ///   keep their first frame.
-/// - **SVG is rejected.** SVG is XML that can carry script, external
-///   references and `<foreignObject>`; Apple platforms have no renderer in
-///   the SDK's reach that parses it without that risk, and rendering via
-///   WKWebView or hand-sanitising the XML are both out. Issuers that need a
-///   vector logo should supply a raster `data:` URI or an `https:` URL.
+/// - **SVG** (`image/svg+xml`, base64 like the rest; percent-encoded SVG is
+///   refused, as in Kotlin) is never passed on as XML. An XMLParser-based
+///   guard first refuses (never repairs) script, foreignObject, use, a,
+///   image, animation, iframe/object/embed, `on*` attributes, non-fragment
+///   href/src, external `url()` / `@import`, DOCTYPE and entities, and
+///   anything not well-formed. What remains is rasterized by SwiftDraw (no
+///   script engine, no network or file access) to at most `svgRenderEdge`
+///   pixels and then re-encoded like any raster. Without ImageIO (Linux)
+///   SVG is refused as `platformUnsupported`.
 /// - Fail closed: any doubt is a `LogoRejection`.
 public enum LogoSanitizer {
-    public static let allowedMediaTypes: Set<String> = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+    public static let allowedMediaTypes: Set<String> = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"]
     /// Cap on the decoded (not base64) payload.
     public static let maxDecodedBytes = 256 * 1024
     /// Cap on width and on height, in pixels.
     public static let maxDimension = 2048
+    /// Longest edge an SVG is rasterized to, in pixels (same as Kotlin).
+    public static let svgRenderEdge = 512
 
     public static func sanitize(_ uri: String) -> Result<DisplayLogo, LogoRejection> {
         let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -86,12 +99,31 @@ public enum LogoSanitizer {
         var declared: String?
         if let declaredMediaType {
             let t = declaredMediaType.lowercased()
-            if t == "image/svg+xml" { return .failure(.svgNotSupported) }
             guard allowedMediaTypes.contains(t) else { return .failure(.unsupportedMediaType) }
             declared = t
         }
         guard imageData.count <= maxDecodedBytes else { return .failure(.tooLarge) }
+        if declared == "image/svg+xml" { return sanitizeSvg(imageData) }
         return reencode(imageData, declaredMediaType: declared)
+    }
+
+    /// Downloads an `https` logo and sanitizes the bytes (SVG and raster alike)
+    /// with the same guard, render and caps as a `data:` logo. Fails closed: a
+    /// non-2xx answer, wrong content type, or more than `maxDecodedBytes`
+    /// is a rejection. Only `image/svg+xml` and allowlisted raster types pass.
+    public static func fetchAndSanitize(_ url: URL, session: URLSession = .shared) async -> Result<DisplayLogo, LogoRejection> {
+        guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
+            return .failure(.invalidRemoteUrl)
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("image/svg+xml,image/png,image/jpeg,image/webp,image/gif", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode)
+        else { return .failure(.undecodable) }
+        let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
+            .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+        return sanitize(imageData: data, declaredMediaType: type.isEmpty ? nil : type)
     }
 
     private static func sanitizeRemote(_ s: String) -> Result<DisplayLogo, LogoRejection> {
@@ -116,11 +148,9 @@ public enum LogoSanitizer {
         var parts = header.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
         if parts.count == 3, ["charset=utf-8", "charset=us-ascii"].contains(parts[1]) { parts.remove(at: 1) }
         guard parts.count == 2, parts[1] == "base64" else {
-            if parts.first == "image/svg+xml" { return .failure(.svgNotSupported) }
             return .failure(.malformedDataUri)
         }
         let mediaType = parts[0]
-        if mediaType == "image/svg+xml" { return .failure(.svgNotSupported) }
         guard allowedMediaTypes.contains(mediaType) else { return .failure(.unsupportedMediaType) }
 
         // Bound the work before decoding: base64 is 4 chars per 3 bytes.
@@ -131,7 +161,20 @@ public enum LogoSanitizer {
             return .failure(.invalidBase64)
         }
         guard bytes.count <= maxDecodedBytes else { return .failure(.tooLarge) }
+        if mediaType == "image/svg+xml" { return sanitizeSvg(bytes) }
         return reencode(bytes, declaredMediaType: mediaType)
+    }
+
+    /// SVG: refusal guard first, then rasterize, then the PNG goes through the
+    /// same decode/cap/re-encode path as any raster logo.
+    private static func sanitizeSvg(_ bytes: Data) -> Result<DisplayLogo, LogoRejection> {
+        #if canImport(ImageIO)
+        if let refusal = SvgActiveContentGuard.check(bytes) { return .failure(refusal) }
+        guard let png = SvgLogoRasterizer.rasterize(bytes) else { return .failure(.invalidSvg) }
+        return reencode(png, declaredMediaType: "image/png")
+        #else
+        return .failure(.platformUnsupported)
+        #endif
     }
 
     private static func reencode(_ bytes: Data, declaredMediaType: String?) -> Result<DisplayLogo, LogoRejection> {
@@ -274,14 +317,26 @@ public actor LogoCache {
     /// Number of times the sanitizer actually ran (for tests).
     public private(set) var sanitizeCount = 0
 
-    public init(capacity: Int = 64) { self.capacity = max(1, capacity) }
+    private let session: URLSession
+
+    public init(capacity: Int = 64, session: URLSession = .shared) {
+        self.capacity = max(1, capacity)
+        self.session = session
+    }
 
     /// The sanitized logo, or nil when the URI was rejected (show the issuer initial).
-    public func resolve(_ uri: String) -> DisplayLogo? {
+    public func resolve(_ uri: String) async -> DisplayLogo? {
         if let hit = entries[uri] { return hit }
         sanitizeCount += 1
         var result: DisplayLogo?
         if case .success(let logo) = LogoSanitizer.sanitize(uri) { result = logo }
+        // https SVG cannot be drawn by AsyncImage: fetch it and run the same
+        // guard + rasterize path as a data: SVG.
+        if case .remote(let url)? = result, url.path.lowercased().hasSuffix(".svg") {
+            result = nil
+            let fetched = await LogoSanitizer.fetchAndSanitize(url, session: session)
+            if case .success(let logo) = fetched { result = logo }
+        }
         if entries.count >= capacity { entries.removeAll() }
         entries[uri] = .some(result)
         return result
