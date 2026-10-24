@@ -588,7 +588,10 @@ func hostResolvesToOnlyPublicAddresses(_ host: String) async -> Bool {
         DispatchQueue.global(qos: .utility).async {
             gate.resume(with: resolveHostBlocking(host), continuation)
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+        // On its OWN queue: the lookups above block global-queue threads for as long as `getaddrinfo` takes (tens of
+        // seconds on a slow resolver, measured on a CI iOS simulator: 13 s against a 0.2 s bound), and a timer that has to
+        // wait for one of those threads is not a bound at all.
+        hostResolutionTimeoutQueue.asyncAfter(deadline: .now() + timeout) {
             // Treated as BLOCKED, not allowed (review finding - this is
             // deliberately NOT the same answer a clean, fast resolution
             // failure gets): a lookup that is merely slow might still
@@ -650,6 +653,9 @@ func hostResolvesToOnlyPublicAddressesBlocking(_ host: String) -> Bool {
     guard semaphore.wait(timeout: .now() + hostResolutionTimeout) == .success else { return false }
     return box.value
 }
+
+/// Fires the resolution timeouts; nothing else runs on it, so a pile of blocked lookups cannot delay a timeout.
+private let hostResolutionTimeoutQueue = DispatchQueue(label: "org.siros.host-resolution-timeout", qos: .userInitiated)
 
 /// How long ``hostResolvesToOnlyPublicAddresses(_:)`` and its blocking
 /// sibling wait for a DNS answer before giving up - see their shared doc
