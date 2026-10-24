@@ -55,6 +55,10 @@ enum SvgActiveContentGuard {
     /// Largest magnitude accepted for width/height/viewBox numbers. SwiftDraw
     /// 0.29.0 traps (Float to Int) on values like `1e30`, before any size
     /// check of ours could run, so everything is validated first.
+    /// Bounds on document complexity (the byte cap alone allows ~25k elements).
+    static let maxElements = 5000
+    static let maxDepth = 64
+
     static let maxSvgNumber = 1_000_000.0
 
     private static let lengthPattern = try! NSRegularExpression( // swiftlint:disable:this force_try
@@ -100,6 +104,8 @@ enum SvgActiveContentGuard {
         var refusal: LogoRejection?
         var sawSvgRoot = false
         private var inStyle = false
+        private var elementCount = 0
+        private var depth = 0
         private var style = ""
 
         private func refuse(_ parser: XMLParser, _ r: LogoRejection) {
@@ -113,6 +119,15 @@ enum SvgActiveContentGuard {
             if !sawSvgRoot {
                 if name != "svg" { return refuse(parser, .invalidSvg) }
                 sawSvgRoot = true
+            } else if name == "svg" {
+                // SwiftDraw 0.29.0 processes nested <svg> children twice per
+                // level: 20 levels (735 bytes) took 55 s to parse (verified).
+                return refuse(parser, .activeContent)
+            }
+            elementCount += 1
+            depth += 1
+            if elementCount > SvgActiveContentGuard.maxElements || depth > SvgActiveContentGuard.maxDepth {
+                return refuse(parser, .tooLarge)
             }
             if forbiddenElements.contains(name) { return refuse(parser, .activeContent) }
             if name == "svg", let bad = SvgActiveContentGuard.dimensionProblem(attributeDict) {
@@ -133,6 +148,7 @@ enum SvgActiveContentGuard {
         }
 
         func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+            depth -= 1
             if inStyle, cssIsUnsafe(style) { return refuse(parser, .activeContent) }
             inStyle = false
         }

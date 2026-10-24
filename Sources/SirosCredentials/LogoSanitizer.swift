@@ -46,6 +46,8 @@ public enum LogoRejection: Error, Sendable, Equatable {
     /// truncated images, and content whose real type differs from the label).
     case undecodable
     case dimensionsTooLarge
+    /// A remote logo fetch did not finish within `fetchTimeout`.
+    case timedOut
     /// No ImageIO on this platform (Linux): data: logos fail closed.
     case platformUnsupported
 }
@@ -114,49 +116,90 @@ public enum LogoSanitizer {
     /// the same way; a non-2xx answer, wrong content type, or more than
     /// `maxDecodedBytes` (checked on Content-Length and while streaming, so
     /// the body is never buffered past the cap) is a rejection.
-    public static func fetchAndSanitize(_ url: URL, session: URLSession = .shared) async -> Result<DisplayLogo, LogoRejection> {
+    public static func fetchAndSanitize(_ url: URL, session: URLSession = .shared,
+                                         timeout: TimeInterval = fetchTimeout) async -> Result<DisplayLogo, LogoRejection> {
         guard let url = validatedRemoteUrl(url.absoluteString) else { return .failure(.invalidRemoteUrl) }
         #if canImport(ImageIO)
-        var request = URLRequest(url: url)
-        request.timeoutInterval = fetchTimeout
-        request.setValue("image/svg+xml,image/png,image/jpeg,image/webp,image/gif", forHTTPHeaderField: "Accept")
-        do {
-            // The per-task delegate applies whichever session the caller passes.
-            let (stream, response) = try await session.bytes(for: request, delegate: RedirectPolicy())
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return .failure(.undecodable)
+        // One wall-clock budget for request AND body: a trickle that keeps
+        // URLSession's inactivity timer alive still loses the race.
+        return await withTaskGroup(of: Result<DisplayLogo, LogoRejection>.self) { group in
+            let policy = RedirectPolicy()
+            group.addTask { await fetchBody(url, session: session, policy: policy, timeout: timeout) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                policy.cancel() // stop the download itself, not just our wait
+                return .failure(Task.isCancelled ? .undecodable : .timedOut)
             }
-            if http.expectedContentLength > Int64(maxDecodedBytes) { return .failure(.tooLarge) }
-            guard let data = try await collect(stream, limit: maxDecodedBytes, deadline: Date().addingTimeInterval(fetchTimeout))
-            else { return .failure(.tooLarge) }
-            let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
-                .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
-            return sanitize(imageData: data, declaredMediaType: type.isEmpty ? nil : type)
-        } catch {
-            return .failure(.undecodable)
+            let first = await group.next() ?? .failure(.undecodable)
+            group.cancelAll()
+            policy.cancel()
+            return first
         }
         #else
         return .failure(.platformUnsupported)
         #endif
     }
 
-    static let fetchTimeout: TimeInterval = 15
+    #if canImport(ImageIO)
+    private static func fetchBody(_ url: URL, session: URLSession, policy: RedirectPolicy,
+                                  timeout: TimeInterval) async -> Result<DisplayLogo, LogoRejection> {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        request.setValue("image/svg+xml,image/png,image/jpeg,image/webp,image/gif", forHTTPHeaderField: "Accept")
+        // Every early return below leaves the download running unless the
+        // URLSessionTask is cancelled explicitly (dropping the byte stream
+        // does not do it).
+        defer { policy.cancel() }
+        do {
+            let (stream, response) = try await session.bytes(for: request, delegate: policy)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return .failure(.undecodable)
+            }
+            if http.expectedContentLength > Int64(maxDecodedBytes) { return .failure(.tooLarge) }
+            guard let data = try await collect(stream, limit: maxDecodedBytes) else { return .failure(.tooLarge) }
+            let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
+                .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+            return sanitize(imageData: data, declaredMediaType: type.isEmpty ? nil : type)
+        } catch {
+            return .failure(.undecodable)
+        }
+    }
+    #endif
+
+    /// Wall-clock budget for one remote logo fetch (request and body).
+    public static let fetchTimeout: TimeInterval = 15
 
     /// Reads at most `limit` bytes; nil as soon as one more would arrive (the
-    /// rest of the body is not read). Throws when the deadline passes.
-    static func collect<S: AsyncSequence>(_ bytes: S, limit: Int, deadline: Date) async throws -> Data?
+    /// rest of the body is not read).
+    static func collect<S: AsyncSequence>(_ bytes: S, limit: Int) async throws -> Data?
     where S.Element == UInt8 {
         var out = Data()
         for try await b in bytes {
             if out.count >= limit { return nil }
             out.append(b)
-            if out.count % 4096 == 0, Date() > deadline { throw URLError(.timedOut) }
         }
         return out
     }
 
     /// Redirects are followed only to URLs that pass the same policy as the original.
     final class RedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionTask?
+        private var cancelled = false
+
+        func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+            lock.lock(); defer { lock.unlock() }
+            self.task = task
+            if cancelled { task.cancel() }
+        }
+
+        /// Cancels the underlying download (now, or as soon as it exists).
+        func cancel() {
+            lock.lock(); defer { lock.unlock() }
+            cancelled = true
+            task?.cancel()
+        }
+
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
             completionHandler(request.url.flatMap { LogoSanitizer.validatedRemoteUrl($0.absoluteString) } == nil ? nil : request)
@@ -361,6 +404,15 @@ public actor LogoCache {
 
     private let session: URLSession
 
+    /// One download + rasterization per URI, shared by every concurrent caller.
+    private struct Flight {
+        let id: Int
+        let task: Task<DisplayLogo?, Never>
+        var waiters: Int
+    }
+    private var flights: [String: Flight] = [:]
+    private var nextFlightId = 0
+
     public init(capacity: Int = 64, session: URLSession = .shared) {
         self.capacity = max(1, capacity)
         self.session = session
@@ -369,21 +421,65 @@ public actor LogoCache {
     /// The sanitized logo, or nil when the URI was rejected (show the issuer initial).
     public func resolve(_ uri: String) async -> DisplayLogo? {
         if let hit = entries[uri] { return hit }
+        if flights[uri] != nil { return await join(uri) }
         sanitizeCount += 1
         var result: DisplayLogo?
         if case .success(let logo) = LogoSanitizer.sanitize(uri) { result = logo }
         // https SVG cannot be drawn by AsyncImage: fetch it and run the same
-        // guard + rasterize path as a data: SVG.
+        // guard + rasterize path as a data: SVG, once, however many callers ask.
         if case .remote(let url)? = result, url.path.lowercased().hasSuffix(".svg") {
-            result = nil
-            let fetched = await LogoSanitizer.fetchAndSanitize(url, session: session)
-            // A cancelled fetch (card scrolled away) is not a verdict about the
-            // logo: do not cache it, so the next resolve retries.
-            if Task.isCancelled { return nil }
-            if case .success(let logo) = fetched { result = logo }
+            nextFlightId += 1
+            let id = nextFlightId
+            let session = self.session
+            let task = Task { () -> DisplayLogo? in
+                let fetched = await LogoSanitizer.fetchAndSanitize(url, session: session)
+                if Task.isCancelled { await self.finish(uri, id: id, result: nil, cache: false); return nil }
+                var logo: DisplayLogo?
+                if case .success(let l) = fetched { logo = l }
+                await self.finish(uri, id: id, result: logo, cache: true)
+                return logo
+            }
+            flights[uri] = Flight(id: id, task: task, waiters: 0)
+            return await join(uri)
         }
+        store(uri, result)
+        return result
+    }
+
+    /// Waits for the shared flight. A cancelled waiter leaves; when the last
+    /// one leaves the download is cancelled and nothing is cached.
+    private func join(_ uri: String) async -> DisplayLogo? {
+        guard var flight = flights[uri] else { return entries[uri] ?? nil }
+        flight.waiters += 1
+        flights[uri] = flight
+        let id = flight.id
+        let value = await withTaskCancellationHandler {
+            await flight.task.value
+        } onCancel: {
+            Task { await self.leave(uri, id: id) }
+        }
+        return Task.isCancelled ? nil : value
+    }
+
+    private func leave(_ uri: String, id: Int) {
+        guard var flight = flights[uri], flight.id == id else { return }
+        flight.waiters -= 1
+        if flight.waiters <= 0 {
+            flight.task.cancel()
+            flights[uri] = nil
+        } else {
+            flights[uri] = flight
+        }
+    }
+
+    private func finish(_ uri: String, id: Int, result: DisplayLogo?, cache: Bool) {
+        guard flights[uri]?.id == id else { return } // everyone left already
+        flights[uri] = nil
+        if cache { store(uri, result) }
+    }
+
+    private func store(_ uri: String, _ result: DisplayLogo?) {
         if entries.count >= capacity { entries.removeAll() }
         entries[uri] = .some(result)
-        return result
     }
 }

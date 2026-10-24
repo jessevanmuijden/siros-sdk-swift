@@ -178,7 +178,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target (https, no userinfo) and stop reading at the 256 KiB cap. SVG `pattern`
   and `mask` are refused (SwiftDraw 0.29.0 overflows the stack on self-referencing
   ones), and width/height/viewBox are range-checked before SwiftDraw sees them
-  (it traps on values like `1e30`).
+  (it traps on values like `1e30`). Nested `<svg>` is refused (SwiftDraw re-processes
+  nested children at every level: 20 levels took 55 s), and element count (5000) and
+  depth (64) are capped. Remote fetches have one 15 s wall-clock budget for request
+  and body, and concurrent resolves of one URI share a single download.
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
   `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
   not match the photo stored on the document's chip

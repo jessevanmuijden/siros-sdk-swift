@@ -394,6 +394,28 @@ final class LogoSanitizerImageTests: XCTestCase {
         }
     }
 
+    // SwiftDraw 0.29.0 re-processes nested <svg> children at every level (exponential: 20 levels = 55 s).
+    func testNestedSvgElementsRefused() {
+        var s = ""
+        for _ in 0..<20 { s += "<svg width=\"8\" height=\"8\">" }
+        s += "<rect width=\"1\" height=\"1\"/>"
+        for _ in 0..<20 { s += "</svg>" }
+        let t0 = Date()
+        XCTAssertEqual(svgRejection(svg(s)), .activeContent)
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 2)
+        XCTAssertEqual(svgRejection(svg("<svg width=\"8\" height=\"8\"/>")), .activeContent) // even one
+    }
+
+    func testElementCountAndDepthCapped() {
+        let many = svg(String(repeating: "<rect width=\"1\" height=\"1\"/>", count: SvgActiveContentGuard.maxElements + 1))
+        XCTAssertLessThan(many.utf8.count, LogoSanitizer.maxDecodedBytes)
+        XCTAssertEqual(svgRejection(many), .tooLarge)
+        let deep = svg(String(repeating: "<g>", count: SvgActiveContentGuard.maxDepth + 1) + String(repeating: "</g>", count: SvgActiveContentGuard.maxDepth + 1))
+        XCTAssertEqual(svgRejection(deep), .tooLarge)
+        let ok = svg(String(repeating: "<rect width=\"1\" height=\"1\"/>", count: 500))
+        guard case .success = LogoSanitizer.sanitize(svgUri(ok)) else { return XCTFail("a few hundred shapes are fine") }
+    }
+
     func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
         let s = svg("<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs><rect width=\"64\" height=\"32\" fill=\"url(#g)\"/>")
         guard case .success(.image) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
@@ -464,10 +486,16 @@ final class LogoRemoteSvgTests: XCTestCase {
         nonisolated(unsafe) static var delay: TimeInterval = 0
         nonisolated(unsafe) static var redirects: [String: String] = [:]
         nonisolated(unsafe) static var requested: [String] = []
+        /// >0: send the body as this many 1-byte chunks, `trickleInterval` apart.
+        nonisolated(unsafe) static var trickleChunks = 0
+        nonisolated(unsafe) static var trickleInterval: TimeInterval = 0.05
+        nonisolated(unsafe) static var chunksSent = 0
+        nonisolated(unsafe) static var stopLoadingCalls = 0
 
         static func reset() {
             body = Data(); type = "image/svg+xml"; status = 200; declaredLength = nil
             delay = 0; redirects = [:]; requested = []
+            trickleChunks = 0; trickleInterval = 0.05; chunksSent = 0; stopLoadingCalls = 0
         }
 
         override class func canInit(with request: URLRequest) -> Bool { true }
@@ -492,6 +520,7 @@ final class LogoRemoteSvgTests: XCTestCase {
                 if let n = Self.declaredLength { headers["Content-Length"] = String(n) }
                 let r = HTTPURLResponse(url: url, statusCode: Self.status, httpVersion: nil, headerFields: headers)!
                 client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+                if Self.trickleChunks > 0 { self.trickle(remaining: Self.trickleChunks); return }
                 client?.urlProtocol(self, didLoad: Self.body)
                 client?.urlProtocolDidFinishLoading(self)
             }
@@ -500,7 +529,19 @@ final class LogoRemoteSvgTests: XCTestCase {
             } else { work() }
         }
         nonisolated(unsafe) private var stopped = false
-        override func stopLoading() { stopped = true }
+        override func stopLoading() { stopped = true; Self.stopLoadingCalls += 1 }
+
+        private func trickle(remaining: Int) {
+            guard !stopped, remaining > 0 else {
+                if !stopped { client?.urlProtocolDidFinishLoading(self) }
+                return
+            }
+            client?.urlProtocol(self, didLoad: Data([0x41]))
+            Self.chunksSent += 1
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.trickleInterval) { [self] in
+                trickle(remaining: remaining - 1)
+            }
+        }
     }
 
     override func setUp() { StubProtocol.reset() }
@@ -581,21 +622,99 @@ final class LogoRemoteSvgTests: XCTestCase {
         if case .failure(.tooLarge) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail() }
     }
 
+    /// Demand-driven: counts how many bytes the consumer actually pulled.
+    struct CountingBytes: AsyncSequence {
+        typealias Element = UInt8
+        final class Counter: @unchecked Sendable { var pulled = 0 }
+        let total: Int
+        let counter: Counter
+        struct Iterator: AsyncIteratorProtocol {
+            let total: Int
+            let counter: Counter
+            mutating func next() async -> UInt8? {
+                guard counter.pulled < total else { return nil }
+                counter.pulled += 1
+                return 0x41
+            }
+        }
+        func makeAsyncIterator() -> Iterator { Iterator(total: total, counter: counter) }
+    }
+
     func testCollectStopsReadingAtTheCap() async throws {
-        final class Counter: @unchecked Sendable { var n = 0 }
-        let c = Counter()
-        let endless = AsyncStream<UInt8> { cont in
-            for _ in 0..<(LogoSanitizer.maxDecodedBytes * 4) { cont.yield(0x41) }
-            cont.finish()
-        }
-        let counted = AsyncStream<UInt8> { cont in
-            Task { for await b in endless { c.n += 1; cont.yield(b) }; cont.finish() }
-        }
-        let got = try await LogoSanitizer.collect(counted, limit: LogoSanitizer.maxDecodedBytes, deadline: .distantFuture)
+        let limit = LogoSanitizer.maxDecodedBytes
+        let counter = CountingBytes.Counter()
+        let got = try await LogoSanitizer.collect(CountingBytes(total: limit * 20, counter: counter), limit: limit)
         XCTAssertNil(got)
-        XCTAssertLessThan(c.n, LogoSanitizer.maxDecodedBytes * 2, "must stop pulling bytes soon after the cap")
-        let small = try await LogoSanitizer.collect(AsyncStream<UInt8> { $0.yield(1); $0.finish() }, limit: 4, deadline: .distantFuture)
-        XCTAssertEqual(small, Data([1]))
+        XCTAssertLessThanOrEqual(counter.pulled, limit + 1, "must pull at most one byte past the cap")
+        let small = try await LogoSanitizer.collect(CountingBytes(total: 3, counter: .init()), limit: 4)
+        XCTAssertEqual(small, Data([0x41, 0x41, 0x41]))
+    }
+
+    // (2) early exits cancel the download itself
+    func testOversizedContentLengthCancelsTheDownload() async {
+        StubProtocol.body = okSvg
+        StubProtocol.declaredLength = 10_000_000
+        StubProtocol.trickleChunks = 200 // 10 s of body if nobody cancels
+        if case .failure(.tooLarge) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail() }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0, "URLSessionTask must be cancelled")
+        XCTAssertLessThan(StubProtocol.chunksSent, 100, "body must stop flowing")
+    }
+
+    func testNon2xxCancelsTheDownload() async {
+        StubProtocol.status = 500
+        StubProtocol.trickleChunks = 200
+        if case .failure = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail() }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0)
+        XCTAssertLessThan(StubProtocol.chunksSent, 100)
+    }
+
+    // (3) wall-clock budget covers a trickle that keeps the inactivity timer alive
+    func testSlowTrickleHitsWallClockTimeout() async {
+        StubProtocol.trickleChunks = 400 // 20 s at 50 ms; each byte resets URLSession's idle timer
+        let t0 = Date()
+        let r = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session, timeout: 0.6)
+        let elapsed = Date().timeIntervalSince(t0)
+        if case .failure(.timedOut) = r {} else { XCTFail("expected timedOut, got \(r)") }
+        XCTAssertLessThan(elapsed, 3, "deadline must fire while awaiting the next byte")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0, "timeout must cancel the download")
+    }
+
+    // (4) one in-flight fetch per URI
+    func testConcurrentResolvesShareOneDownload() async {
+        StubProtocol.body = okSvg
+        StubProtocol.delay = 0.4
+        let cache = LogoCache(session: session)
+        let uri = "https://example.org/shared.svg"
+        let results = await withTaskGroup(of: DisplayLogo?.self) { g in
+            for _ in 0..<6 { g.addTask { await cache.resolve(uri) } }
+            var out: [DisplayLogo?] = []
+            for await r in g { out.append(r) }
+            return out
+        }
+        XCTAssertEqual(results.count, 6)
+        for r in results { guard case .image? = r else { return XCTFail("every caller gets the image") } }
+        XCTAssertEqual(StubProtocol.requested.count, 1, "one download for six callers")
+    }
+
+    func testCancelledWaiterDoesNotPoisonSharedFlight() async {
+        StubProtocol.body = okSvg
+        StubProtocol.delay = 0.5
+        let cache = LogoCache(session: session)
+        let uri = "https://example.org/shared.svg"
+        let a = Task { await cache.resolve(uri) }
+        let b = Task { await cache.resolve(uri) }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        a.cancel()
+        let bv = await b.value
+        guard case .image? = bv else { return XCTFail("the surviving waiter must still get the image") }
+        _ = await a.value
+        XCTAssertEqual(StubProtocol.requested.count, 1)
+        let again = await cache.resolve(uri)
+        guard case .image? = again else { return XCTFail() }
+        XCTAssertEqual(StubProtocol.requested.count, 1, "result was cached")
     }
 
     // (7) a cancelled resolve is not cached as a rejection
@@ -609,6 +728,9 @@ final class LogoRemoteSvgTests: XCTestCase {
         task.cancel()
         let cancelled = await task.value
         XCTAssertNil(cancelled)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        // The slow response is still 0.4 s away: only a cancel can have stopped the load by now.
+        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0, "last waiter leaving must cancel the download")
         StubProtocol.delay = 0
         let fresh = await cache.resolve(uri)
         guard case .image? = fresh else { return XCTFail("retry after cancel must fetch again, not hit a cached nil") }
