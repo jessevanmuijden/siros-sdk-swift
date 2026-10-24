@@ -1321,6 +1321,7 @@ extension SirosWallet {
         credentialResponseKeys.removeValue(forKey: flowId)
         decryptedCredentialResponses.removeValue(forKey: flowId)
         offeredResponseKeyFlows.remove(flowId)
+        wmpFlowIssuanceEpochs.removeValue(forKey: flowId)
         lock.unlock()
         if notifyError { listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil) }
 
@@ -1353,6 +1354,7 @@ extension SirosWallet {
         credentialResponseKeys.removeValue(forKey: flowId)
         decryptedCredentialResponses.removeValue(forKey: flowId)
         offeredResponseKeyFlows.remove(flowId)
+        wmpFlowIssuanceEpochs.removeValue(forKey: flowId)
         lock.unlock()
         for entry in doomed.values { entry.cancel() }
     }

@@ -24,7 +24,20 @@ extension SirosWallet {
                 await rejectDecryptedCompletion(flowId: flowId, responses: decrypted, message: "The completion could not be read")
                 return
             }
-            await handleFlowComplete(msg: message)
+            // A WMP completion has no wire start tag: it is processed under the issuance epoch captured when its
+            // flow first asked for the response key. Without one the issuance cannot be established, and the
+            // gate would drop the completion silently AFTER the decrypted responses are gone - so refuse it here.
+            lock.lock(); let epoch = wmpFlowIssuanceEpochs.removeValue(forKey: flowId); lock.unlock()
+            guard let epoch else {
+                let decrypted = takeDecryptedCredentialResponses(flowId: flowId)
+                await rejectDecryptedCompletion(
+                    flowId: flowId, responses: decrypted, message: "The completion's issuance could not be established"
+                )
+                return
+            }
+            var tagged = message
+            tagged.startTag = epoch
+            await handleFlowComplete(msg: tagged)
             return
         }
         if let entries = result?.objectValue?["credentials"]?.arrayValue,

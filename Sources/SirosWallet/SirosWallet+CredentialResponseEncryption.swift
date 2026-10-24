@@ -99,6 +99,9 @@ extension SirosWallet {
         }
         credentialResponseKeys[flowId] = key
         offeredResponseKeyFlows.insert(flowId)
+        // The flow's original issuance epoch, captured once at its first key (before a later cancel or newer
+        // start can advance it): a WMP completion is processed under it, see `handleWmpFlowComplete`.
+        if wmpFlowIssuanceEpochs[flowId] == nil { wmpFlowIssuanceEpochs[flowId] = issuanceEpoch }
         return key.publicJwk
     }
 
@@ -281,6 +284,7 @@ extension SirosWallet {
         decryptedCredentialResponses.removeAll()
         responseKeyOrigin.removeAll()
         offeredResponseKeyFlows.removeAll()
+        wmpFlowIssuanceEpochs.removeAll()
         credentialResponseEpoch += 1
         lock.unlock()
     }
