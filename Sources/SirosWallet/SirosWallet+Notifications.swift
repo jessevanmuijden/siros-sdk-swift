@@ -39,7 +39,7 @@ extension SirosWallet {
         // path below would otherwise accept it as a successful plain issuance).
         if flowAlreadyEnded(msg.flowId) { return }
         // Whether this wallet offered a response-encryption key for the flow, read before the flow's state is dropped.
-        lock.lock(); let offeredKey = credentialResponseKeys[msg.flowId] != nil; lock.unlock()
+        lock.lock(); let offeredKey = offeredResponseKeyFlows.contains(msg.flowId); lock.unlock()
         if offeredKey, msg.credentialResponseEncrypted != true {
             // The engine says the issuer answered in the clear although the wallet's key was offered: the engine holds
             // the credentials, which engine-blind issuance forbids. Nothing is stored; the issuer is told.

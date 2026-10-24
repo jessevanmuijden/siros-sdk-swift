@@ -76,6 +76,10 @@ public final class SirosWallet: @unchecked Sendable {
     /// result cannot recreate a key for a flow that is gone.
     var credentialResponseEpoch = 0
     /// The engine session and socket generation each WebSocket response key was created on (WMP keys have none).
+    /// The flows a response key was OFFERED for, as a fact of its own: it outlives the key (a lost socket's cleanup removes
+    /// the key but not this), so a plain `flow_complete` that was already queued is still recognised as a downgrade and
+    /// refused. Removed when the flow ends and when the session does.
+    var offeredResponseKeyFlows: Set<String> = []
     var responseKeyOrigin: [String: (engine: ObjectIdentifier, generation: Int)] = [:]
     /// Set when the session ends (logout, destroy, a refused installation); a new connection clears it.
     var blindSessionEnded = false

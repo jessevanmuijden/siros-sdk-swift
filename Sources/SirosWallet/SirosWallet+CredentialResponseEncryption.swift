@@ -98,6 +98,7 @@ extension SirosWallet {
             return nil
         }
         credentialResponseKeys[flowId] = key
+        offeredResponseKeyFlows.insert(flowId)
         return key.publicJwk
     }
 
@@ -279,6 +280,7 @@ extension SirosWallet {
         credentialResponseKeys.removeAll()
         decryptedCredentialResponses.removeAll()
         responseKeyOrigin.removeAll()
+        offeredResponseKeyFlows.removeAll()
         credentialResponseEpoch += 1
         lock.unlock()
     }

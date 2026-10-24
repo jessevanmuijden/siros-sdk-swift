@@ -1053,6 +1053,35 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         engine.disconnect()
     }
 
+    /// The plaintext-downgrade check survives a lost socket's cleanup: the cleanup removes the response key, but the fact
+    /// that a key was OFFERED stays until the flow ends, so a plain `flow_complete` that was already queued is refused
+    /// rather than processed as an ordinary plaintext issuance.
+    func testAQueuedPlainCompletionIsStillRefusedAfterTheLostSocketsCleanup() async throws {
+        let store = InMemoryCredentialStore()
+        let w = wallet(store: store)
+        let listener = Listener()
+        w.eventListener = listener
+        let engine = idleEngine()
+        w.engineSession = engine
+        engine.connect(appToken: "t")
+        var offer = try keyOnlyProofMessage(flowId: "dg")
+        offer.socketGeneration = engine.socketGeneration
+        offer.requestEpoch = engine.requestEpoch
+        try await w.answerGenerateProof(engine: engine, msg: offer)                  // the key is offered
+        engine.forceReconnect(appToken: "t2")                                        // the socket is replaced ...
+        w.cleanupAfterSocketReplacement(of: engine)                                  // ... and its cleanup removes the key
+        w.lock.lock(); XCTAssertNil(w.credentialResponseKeys["dg"], "the cleanup removed the key"); w.lock.unlock()
+        let now = Int64(Date().timeIntervalSince1970)
+        let jwt = "eyJ.\(Data(#"{"exp":\#(now + 3600),"iat":\#(now)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).sig"
+        let object: [String: Any] = ["type": "flow_complete", "flow_id": "dg", "credentials": [["format": "vc+sd-jwt", "credential": jwt]]]
+        await w.handleFlowComplete(msg: try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object)))
+        let stored = await store.getAll()
+        XCTAssertTrue(stored.isEmpty, "the queued plaintext completion is a downgrade, not an issuance")
+        XCTAssertEqual(listener.errors.count, 1)
+        XCTAssertTrue(listener.completed.isEmpty)
+        engine.disconnect()
+    }
+
     /// A late report from an engine that logout and a new login replaced touches nothing of the new engine's state.
     func testALateSocketReportFromAReplacedEngineLeavesTheNewEnginesKeysAlone() async throws {
         let w = wallet()
