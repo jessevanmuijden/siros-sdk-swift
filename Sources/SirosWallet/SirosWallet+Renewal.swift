@@ -145,25 +145,27 @@ extension SirosWallet {
             #if canImport(os)
             logger.debug("Starting renewal for batch=\(batchId) issuer=\(candidate.credentialIssuerIdentifier)")
             #endif
+            // Staged locally and published only inside the epoch-checked commit below: a
+            // renewal cancelled while this fetch was suspended must not overwrite the
+            // `activeOffer` of an issuance that started meanwhile.
+            var stagedOffer: CredentialOffer?
             do {
                 let metadata = try await fetchIssuerMetadata(issuerUrl: candidate.credentialIssuerIdentifier)
-                lock.lock()
-                activeOffer = Self.buildCredentialOffer(
+                stagedOffer = Self.buildCredentialOffer(
                     issuerUrl: candidate.credentialIssuerIdentifier,
                     configId: candidate.credentialConfigurationId,
                     metadata: metadata
                 )
-                lock.unlock()
             } catch {
                 #if canImport(os)
                 logger.warning("Failed to refresh issuer metadata for renewal display; card will show raw format: \(error.localizedDescription)")
                 #endif
             }
-            // Ownership check, source-batch assignment and send are ONE critical section
+            // Ownership check, offer and source-batch publication and send are ONE critical section
             // (like `dispatchIssuanceStart`): a cancel plus a newer renewal cannot land
             // between them, so this one can neither overwrite the newer renewal's source
             // batch nor send its cancelled start.
-            commitRenewalStart(epoch: startEpoch, batchId: batchId) {
+            commitRenewalStart(epoch: startEpoch, batchId: batchId, offer: stagedOffer) {
                 engine.startRenewal(
                     refreshToken: candidate.refreshToken,
                     credentialIssuer: candidate.credentialIssuerIdentifier,

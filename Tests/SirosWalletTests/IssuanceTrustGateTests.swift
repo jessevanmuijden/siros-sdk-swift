@@ -513,6 +513,34 @@ final class IssuanceTrustGateTests: XCTestCase {
         XCTAssertEqual(wallet.pendingRenewalSourceBatchId, 200, "A did not overwrite B's source batch")
     }
 
+    func testACancelledRenewalSuspendedInItsMetadataFetchCannotOverwriteALaterIssuancesOffer() {
+        let h = makeHarness()
+        let wallet = h.wallet
+        func offer(_ issuer: String, _ config: String) -> CredentialOffer {
+            CredentialOffer(credentialConfigurationId: config, credentialIssuerIdentifier: issuer, credentialName: config, issuerName: issuer)
+        }
+        // Renewal A took the guard and is suspended in fetchIssuerMetadata with its offer staged locally.
+        wallet.lock.lock(); wallet.issuanceInFlight = true; let aEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        let aOffer = offer("https://issuer-a.example", "type-a")
+        wallet.cancelCurrentFlow()
+        // Issuance B starts and prepares ITS offer.
+        wallet.lock.lock(); wallet.issuanceInFlight = true; wallet.activeOffer = offer("https://issuer-b.example", "type-b"); wallet.lock.unlock()
+        // A's fetch returns: its commit is refused and publishes nothing.
+        var sent = false
+        XCTAssertFalse(wallet.commitRenewalStart(epoch: aEpoch, batchId: 100, offer: aOffer) { _ in sent = true })
+        XCTAssertFalse(sent)
+        wallet.lock.lock(); let active = wallet.activeOffer; let batch = wallet.pendingRenewalSourceBatchId; wallet.lock.unlock()
+        XCTAssertEqual(active?.credentialIssuerIdentifier, "https://issuer-b.example", "B's offer is untouched")
+        XCTAssertEqual(active?.credentialConfigurationId, "type-b", "so are the credential type B validates against and the issuer/configuration its refresh token is stored under")
+        XCTAssertNil(batch)
+        // A renewal that still owns the wallet does publish its offer, with the batch and the send.
+        wallet.lock.lock(); let bEpoch = wallet.issuanceEpoch; wallet.lock.unlock()
+        XCTAssertTrue(wallet.commitRenewalStart(epoch: bEpoch, batchId: 200, offer: aOffer) { _ in sent = true })
+        wallet.lock.lock(); let published = wallet.activeOffer; wallet.lock.unlock()
+        XCTAssertEqual(published?.credentialConfigurationId, "type-a")
+        XCTAssertTrue(sent)
+    }
+
     func testAStartPreparingAcrossAnAccountReplacementUnwindsInsteadOfDispatching() throws {
         let h = makeHarness()
         let wallet = h.wallet

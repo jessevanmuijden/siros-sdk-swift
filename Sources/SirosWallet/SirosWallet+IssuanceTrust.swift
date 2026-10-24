@@ -148,14 +148,16 @@ extension SirosWallet {
     }
 
     /// The renewal's commit: if the renewal that took the guard at `epoch` still owns
-    /// the wallet, record its source batch and send its `flow_start` (`send` receives
+    /// the wallet, publish its fetched offer (if any), record its source batch and send its `flow_start` (`send` receives
     /// the epoch to tag it with), all under `lock`; otherwise do nothing. `send` must
     /// not take the wallet lock.
     /// - Returns: whether the start was sent.
     @discardableResult
-    func commitRenewalStart(epoch: Int, batchId: Int64, send: (Int) -> Void) -> Bool {
+    func commitRenewalStart(epoch: Int, batchId: Int64, offer: CredentialOffer? = nil, send: (Int) -> Void) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard issuanceEpoch == epoch else { return false }
+        // The display offer is published here, with the batch and the send, never earlier.
+        if let offer { activeOffer = offer }
         pendingRenewalSourceBatchId = batchId
         send(issuanceEpoch)
         return true
