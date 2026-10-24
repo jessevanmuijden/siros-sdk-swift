@@ -362,6 +362,38 @@ final class LogoSanitizerImageTests: XCTestCase {
         }
     }
 
+    // (4) SwiftDraw 0.29.0 overflows the stack on self-referencing pattern/mask; refused before it runs.
+    func testSelfReferencingPatternAndMaskRefused() {
+        let pattern = svg("<defs><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"4\" height=\"4\" fill=\"url(#p)\"/></pattern></defs><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/>")
+        let mask = svg("<defs><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"white\" mask=\"url(#m)\"/></mask></defs><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/>")
+        XCTAssertEqual(svgRejection(pattern), .activeContent)
+        XCTAssertEqual(svgRejection(mask), .activeContent)
+    }
+
+    // (5) SwiftDraw 0.29.0 traps (Float to Int) on these; refused before SVG(data:).
+    func testHugeOrNonFiniteDimensionsRefusedBeforeSwiftDraw() {
+        let bad = [
+            "width=\"1e30\" height=\"1\"", "width=\"1\" height=\"1e30\"",
+            "width=\"99999999999999999999\" height=\"1\"", "width=\"1e20mm\" height=\"1\"",
+            "viewBox=\"0 0 1e30 1\"", "viewBox=\"0 0 1 1e30\" width=\"4\" height=\"4\"",
+            "width=\"1e400\" height=\"1\"", "width=\"inf\" height=\"1\"", "width=\"nan\" height=\"1\"",
+            "width=\"4\" height=\"4\" viewBox=\"0 0 0 4\"", "width=\"4\" height=\"4\" viewBox=\"0 0 4\"",
+        ]
+        for attrs in bad {
+            let s = svg("<rect width=\"1\" height=\"1\"/>", attrs: attrs)
+            XCTAssertNotNil(svgRejection(s), attrs) // reaching SwiftDraw with these would crash the process
+        }
+        // Nested <svg> reaches the same conversion.
+        XCTAssertNotNil(svgRejection(svg("<svg width=\"1e30\" height=\"1e30\"><rect width=\"1\" height=\"1\"/></svg>")))
+        // Ordinary units and exponents still render.
+        for attrs in ["width=\"64px\" height=\"32px\"", "width=\"1e2\" height=\"50\"", "width=\"2em\" height=\"1em\"",
+                      "width=\"2.5in\" height=\"1in\""] {
+            guard case .success = LogoSanitizer.sanitize(svgUri(svg("<rect width=\"1\" height=\"1\"/>", attrs: attrs))) else {
+                return XCTFail(attrs)
+            }
+        }
+    }
+
     func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
         let s = svg("<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs><rect width=\"64\" height=\"32\" fill=\"url(#g)\"/>")
         guard case .success(.image) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
@@ -428,17 +460,50 @@ final class LogoRemoteSvgTests: XCTestCase {
         nonisolated(unsafe) static var body = Data()
         nonisolated(unsafe) static var type = "image/svg+xml"
         nonisolated(unsafe) static var status = 200
+        nonisolated(unsafe) static var declaredLength: Int?
+        nonisolated(unsafe) static var delay: TimeInterval = 0
+        nonisolated(unsafe) static var redirects: [String: String] = [:]
+        nonisolated(unsafe) static var requested: [String] = []
+
+        static func reset() {
+            body = Data(); type = "image/svg+xml"; status = 200; declaredLength = nil
+            delay = 0; redirects = [:]; requested = []
+        }
+
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {
-            let r = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil,
-                                    headerFields: ["Content-Type": Self.type])!
-            client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Self.body)
-            client?.urlProtocolDidFinishLoading(self)
+            let url = request.url!
+            Self.requested.append(url.absoluteString)
+            if let target = Self.redirects[url.absoluteString], let t = URL(string: target) {
+                let r = HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil, headerFields: ["Location": target])!
+                client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: t), redirectResponse: r)
+                // If the delegate refused the redirect nobody calls stopLoading;
+                // like a real HTTP stack, then deliver the 3xx as the final answer.
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [self] in
+                    guard !stopped else { return }
+                    client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocolDidFinishLoading(self)
+                }
+                return
+            }
+            let work = { [self] in
+                var headers = ["Content-Type": Self.type]
+                if let n = Self.declaredLength { headers["Content-Length"] = String(n) }
+                let r = HTTPURLResponse(url: url, statusCode: Self.status, httpVersion: nil, headerFields: headers)!
+                client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Self.body)
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            if Self.delay > 0 {
+                DispatchQueue.global().asyncAfter(deadline: .now() + Self.delay, execute: work)
+            } else { work() }
         }
-        override func stopLoading() {}
+        nonisolated(unsafe) private var stopped = false
+        override func stopLoading() { stopped = true }
     }
+
+    override func setUp() { StubProtocol.reset() }
 
     private var session: URLSession {
         let c = URLSessionConfiguration.ephemeral
@@ -472,6 +537,81 @@ final class LogoRemoteSvgTests: XCTestCase {
         if case .failure = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("404") }
         StubProtocol.status = 200; StubProtocol.type = "text/html"
         if case .failure(.unsupportedMediaType) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("html") }
+    }
+
+    private let okSvg = Data("<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>".utf8)
+
+    // (6) same authority validation as sanitize(_:), before any request
+    func testFetchRejectsUserinfoWithoutRequest() async {
+        StubProtocol.body = okSvg
+        let url = URL(string: "https://user:pw@example.org/logo.svg")!
+        if case .failure(.invalidRemoteUrl) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail() }
+        if case .failure(.invalidRemoteUrl) = await LogoSanitizer.fetchAndSanitize(URL(string: "http://example.org/l.svg")!, session: session) {} else { XCTFail() }
+        XCTAssertEqual(StubProtocol.requested, [], "no request may leave")
+        let cache = LogoCache(session: session)
+        let viaCache = await cache.resolve("https://user:pw@example.org/logo.svg")
+        XCTAssertNil(viaCache)
+        XCTAssertEqual(StubProtocol.requested, [])
+    }
+
+    // (2) redirects obey the same policy
+    func testRedirectToHttpOrUserinfoNotFollowed() async {
+        StubProtocol.body = okSvg
+        StubProtocol.redirects = ["https://example.org/a.svg": "http://example.org/b.svg"]
+        if case .failure = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail("http redirect followed") }
+        XCTAssertEqual(StubProtocol.requested, ["https://example.org/a.svg"], "redirect target must never be requested")
+
+        StubProtocol.reset(); StubProtocol.body = okSvg
+        StubProtocol.redirects = ["https://example.org/a.svg": "https://u:p@example.org/b.svg"]
+        if case .failure = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail("userinfo redirect followed") }
+        XCTAssertEqual(StubProtocol.requested, ["https://example.org/a.svg"])
+    }
+
+    func testRedirectToHttpsStillFollowed() async {
+        StubProtocol.body = okSvg
+        StubProtocol.redirects = ["https://example.org/a.svg": "https://cdn.example.org/b.svg"]
+        guard case .success(.image) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) else { return XCTFail() }
+        XCTAssertEqual(StubProtocol.requested, ["https://example.org/a.svg", "https://cdn.example.org/b.svg"])
+    }
+
+    // (3) cap is enforced on Content-Length and while streaming
+    func testDeclaredContentLengthOverCapRefusedBeforeReading() async {
+        StubProtocol.body = okSvg // small and valid: only the header gives it away
+        StubProtocol.declaredLength = LogoSanitizer.maxDecodedBytes + 1
+        if case .failure(.tooLarge) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail() }
+    }
+
+    func testCollectStopsReadingAtTheCap() async throws {
+        final class Counter: @unchecked Sendable { var n = 0 }
+        let c = Counter()
+        let endless = AsyncStream<UInt8> { cont in
+            for _ in 0..<(LogoSanitizer.maxDecodedBytes * 4) { cont.yield(0x41) }
+            cont.finish()
+        }
+        let counted = AsyncStream<UInt8> { cont in
+            Task { for await b in endless { c.n += 1; cont.yield(b) }; cont.finish() }
+        }
+        let got = try await LogoSanitizer.collect(counted, limit: LogoSanitizer.maxDecodedBytes, deadline: .distantFuture)
+        XCTAssertNil(got)
+        XCTAssertLessThan(c.n, LogoSanitizer.maxDecodedBytes * 2, "must stop pulling bytes soon after the cap")
+        let small = try await LogoSanitizer.collect(AsyncStream<UInt8> { $0.yield(1); $0.finish() }, limit: 4, deadline: .distantFuture)
+        XCTAssertEqual(small, Data([1]))
+    }
+
+    // (7) a cancelled resolve is not cached as a rejection
+    func testCancelledResolveIsNotCached() async {
+        StubProtocol.body = okSvg
+        StubProtocol.delay = 0.6
+        let cache = LogoCache(session: session)
+        let uri = "https://example.org/slow.svg"
+        let task = Task { await cache.resolve(uri) }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel()
+        let cancelled = await task.value
+        XCTAssertNil(cancelled)
+        StubProtocol.delay = 0
+        let fresh = await cache.resolve(uri)
+        guard case .image? = fresh else { return XCTFail("retry after cancel must fetch again, not hit a cached nil") }
     }
 }
 #endif

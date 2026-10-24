@@ -16,6 +16,11 @@ enum SvgActiveContentGuard {
         "script", "foreignobject", "use", "iframe", "object", "embed", "a",
         "image", "audio", "video", "animate", "set", "animatetransform", "animatemotion",
         "animatecolor", "handler", "listener", "feimage", "cursor", "font-face-uri",
+        // SwiftDraw 0.29.0 recurses without cycle detection through a pattern
+        // or mask that references itself (stack overflow, verified); neither
+        // can be proven acyclic here, so both are refused. clipPath, marker,
+        // filter and gradient href cycles were tried and are safe in 0.29.0.
+        "pattern", "mask",
     ]
 
     /// A `url(...)` that points anywhere but a same-document `#fragment`.
@@ -47,6 +52,45 @@ enum SvgActiveContentGuard {
         (qualified.split(separator: ":").last.map(String.init) ?? qualified).lowercased()
     }
 
+    /// Largest magnitude accepted for width/height/viewBox numbers. SwiftDraw
+    /// 0.29.0 traps (Float to Int) on values like `1e30`, before any size
+    /// check of ours could run, so everything is validated first.
+    static let maxSvgNumber = 1_000_000.0
+
+    private static let lengthPattern = try! NSRegularExpression( // swiftlint:disable:this force_try
+        pattern: "^[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?(px|pt|pc|mm|cm|in|em|ex|%)?$")
+
+    /// nil when width/height/viewBox of an `<svg>` element are safe to hand to SwiftDraw.
+    static func dimensionProblem(_ attrs: [String: String]) -> LogoRejection? {
+        for (key, raw) in attrs {
+            switch localName(key) {
+            case "width", "height":
+                let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let r = NSRange(v.startIndex..., in: v)
+                guard let m = lengthPattern.firstMatch(in: v, range: r) else { return .invalidSvg }
+                // Number = everything before the unit (group 3), so "em"/"ex" are not mistaken for an exponent.
+                let unitStart = m.range(at: 3).location == NSNotFound ? r.length : m.range(at: 3).location
+                let digits = (v as NSString).substring(to: unitStart)
+                guard let d = Double(digits), d.isFinite else { return .invalidSvg }
+                if abs(d) > maxSvgNumber { return .dimensionsTooLarge }
+            case "viewbox":
+                let parts = raw.split(whereSeparator: { " ,\t\r\n".contains($0) })
+                guard parts.count == 4 else { return .invalidSvg }
+                var nums: [Double] = []
+                for p in parts {
+                    let t = String(p)
+                    guard lengthPattern.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil,
+                          !t.hasSuffix("%"), let d = Double(t), d.isFinite else { return .invalidSvg }
+                    if abs(d) > maxSvgNumber { return .dimensionsTooLarge }
+                    nums.append(d)
+                }
+                if nums[2] <= 0 || nums[3] <= 0 { return .invalidSvg }
+            default: break
+            }
+        }
+        return nil
+    }
+
     static func cssIsUnsafe(_ css: String) -> Bool {
         let r = NSRange(css.startIndex..., in: css)
         return externalUrl.firstMatch(in: css, range: r) != nil || cssImport.firstMatch(in: css, range: r) != nil
@@ -71,6 +115,9 @@ enum SvgActiveContentGuard {
                 sawSvgRoot = true
             }
             if forbiddenElements.contains(name) { return refuse(parser, .activeContent) }
+            if name == "svg", let bad = SvgActiveContentGuard.dimensionProblem(attributeDict) {
+                return refuse(parser, bad)
+            }
             inStyle = name == "style"
             style = ""
             for (key, value) in attributeDict {

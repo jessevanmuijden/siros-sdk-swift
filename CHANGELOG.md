@@ -173,7 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and sanitize `https` SVG logos the same way. Only `https:` remote logos pass
   (`http:` and other schemes are refused). Without ImageIO (Linux) every
   `data:` logo is refused. `LogoCache` sanitizes off the main actor and caches
-  by URI; the sample app shows the issuer initial until ready or on failure.
+  by URI (a cancelled fetch is not cached); the sample app shows the issuer initial
+  until ready or on failure. Remote fetches validate the URL and every redirect
+  target (https, no userinfo) and stop reading at the 256 KiB cap. SVG `pattern`
+  and `mask` are refused (SwiftDraw 0.29.0 overflows the stack on self-referencing
+  ones), and width/height/viewBox are range-checked before SwiftDraw sees them
+  (it traps on values like `1e30`).
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
   `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
   not match the photo stored on the document's chip

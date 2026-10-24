@@ -108,31 +108,73 @@ public enum LogoSanitizer {
     }
 
     /// Downloads an `https` logo and sanitizes the bytes (SVG and raster alike)
-    /// with the same guard, render and caps as a `data:` logo. Fails closed: a
-    /// non-2xx answer, wrong content type, or more than `maxDecodedBytes`
-    /// is a rejection. Only `image/svg+xml` and allowlisted raster types pass.
+    /// with the same guard, render and caps as a `data:` logo. Fails closed: the
+    /// URL gets the same authority validation as `sanitize(_:)` (https, host,
+    /// no userinfo) before any request; every redirect target is validated
+    /// the same way; a non-2xx answer, wrong content type, or more than
+    /// `maxDecodedBytes` (checked on Content-Length and while streaming, so
+    /// the body is never buffered past the cap) is a rejection.
     public static func fetchAndSanitize(_ url: URL, session: URLSession = .shared) async -> Result<DisplayLogo, LogoRejection> {
-        guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
-            return .failure(.invalidRemoteUrl)
-        }
+        guard let url = validatedRemoteUrl(url.absoluteString) else { return .failure(.invalidRemoteUrl) }
+        #if canImport(ImageIO)
         var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        request.timeoutInterval = fetchTimeout
         request.setValue("image/svg+xml,image/png,image/jpeg,image/webp,image/gif", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode)
-        else { return .failure(.undecodable) }
-        let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
-            .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
-        return sanitize(imageData: data, declaredMediaType: type.isEmpty ? nil : type)
+        do {
+            // The per-task delegate applies whichever session the caller passes.
+            let (stream, response) = try await session.bytes(for: request, delegate: RedirectPolicy())
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return .failure(.undecodable)
+            }
+            if http.expectedContentLength > Int64(maxDecodedBytes) { return .failure(.tooLarge) }
+            guard let data = try await collect(stream, limit: maxDecodedBytes, deadline: Date().addingTimeInterval(fetchTimeout))
+            else { return .failure(.tooLarge) }
+            let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
+                .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+            return sanitize(imageData: data, declaredMediaType: type.isEmpty ? nil : type)
+        } catch {
+            return .failure(.undecodable)
+        }
+        #else
+        return .failure(.platformUnsupported)
+        #endif
     }
 
-    private static func sanitizeRemote(_ s: String) -> Result<DisplayLogo, LogoRejection> {
+    static let fetchTimeout: TimeInterval = 15
+
+    /// Reads at most `limit` bytes; nil as soon as one more would arrive (the
+    /// rest of the body is not read). Throws when the deadline passes.
+    static func collect<S: AsyncSequence>(_ bytes: S, limit: Int, deadline: Date) async throws -> Data?
+    where S.Element == UInt8 {
+        var out = Data()
+        for try await b in bytes {
+            if out.count >= limit { return nil }
+            out.append(b)
+            if out.count % 4096 == 0, Date() > deadline { throw URLError(.timedOut) }
+        }
+        return out
+    }
+
+    /// Redirects are followed only to URLs that pass the same policy as the original.
+    final class RedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(request.url.flatMap { LogoSanitizer.validatedRemoteUrl($0.absoluteString) } == nil ? nil : request)
+        }
+    }
+
+    /// https, a host, no userinfo; nil otherwise.
+    static func validatedRemoteUrl(_ s: String) -> URL? {
         guard let comps = URLComponents(string: s),
               comps.scheme?.lowercased() == "https",
               let host = comps.host, !host.isEmpty,
-              comps.user == nil, comps.password == nil,
-              let url = comps.url
-        else { return .failure(.invalidRemoteUrl) }
+              comps.user == nil, comps.password == nil
+        else { return nil }
+        return comps.url
+    }
+
+    private static func sanitizeRemote(_ s: String) -> Result<DisplayLogo, LogoRejection> {
+        guard let url = validatedRemoteUrl(s) else { return .failure(.invalidRemoteUrl) }
         return .success(.remote(url))
     }
 
@@ -335,6 +377,9 @@ public actor LogoCache {
         if case .remote(let url)? = result, url.path.lowercased().hasSuffix(".svg") {
             result = nil
             let fetched = await LogoSanitizer.fetchAndSanitize(url, session: session)
+            // A cancelled fetch (card scrolled away) is not a verdict about the
+            // logo: do not cache it, so the next resolve retries.
+            if Task.isCancelled { return nil }
             if case .success(let logo) = fetched { result = logo }
         }
         if entries.count >= capacity { entries.removeAll() }

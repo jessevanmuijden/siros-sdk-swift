@@ -480,7 +480,11 @@ private struct IssuerLogoBadge: View {
         .task(id: logoUri) {
             guard let logoUri else { logo = nil; return }
             logo = nil
-            logo = await LogoCache.shared.resolve(logoUri)
+            let resolved = await LogoCache.shared.resolve(logoUri)
+            // Actor calls do not abort on cancellation: a superseded task
+            // must not overwrite what the newer one set.
+            guard !Task.isCancelled else { return }
+            logo = resolved
         }
     }
 
