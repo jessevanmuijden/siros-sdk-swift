@@ -433,18 +433,88 @@ final class LogoSanitizerImageTests: XCTestCase {
         guard case .success = LogoSanitizer.sanitize(svgUri(ok)) else { return XCTFail("a few hundred shapes are fine") }
     }
 
-    // SwiftDraw gives style="width:..." precedence over the attribute and traps on huge values.
-    func testRootStyleDimensionsValidatedLikeAttributes() {
-        XCTAssertNil(SvgActiveContentGuard.dimensionProblem(["width": "8", "style": "fill:red;width:64px;height:8"]))
-        for style in ["width:1e30;height:8;", "width:1e30px", "height:99999999999999999999", "WIDTH : 1e30",
-                      "fill:red; height:1e20mm", "width:calc(1e30px)", "width:inf", "width:"] {
-            XCTAssertNotNil(SvgActiveContentGuard.dimensionProblem(["width": "8", "height": "8", "style": style]), style)
+    // MARK: Allowlist guard (deny by default), tested on the guard itself so failures are assertions.
+
+    private static let ns = "xmlns=\"http://www.w3.org/2000/svg\""
+
+    private func guardCheck(_ svgText: String) -> LogoRejection? { SvgActiveContentGuard.check(Data(svgText.utf8)) }
+
+    func testStyleAttributeAndElementAreNeverAllowed() {
+        // SwiftDraw prefers style="width:1e30" over the attribute and traps on it.
+        for style in ["width:1e30;height:8;", "fill:red", "", "font-family:x"] {
+            XCTAssertEqual(guardCheck(svg("<rect width=\"1\" height=\"1\"/>", attrs: "width=\"8\" height=\"8\" style=\"\(style)\"")), .activeContent, style)
+            XCTAssertEqual(guardCheck(svg("<rect width=\"1\" height=\"1\" style=\"\(style)\"/>")), .activeContent, style)
         }
-        // End to end: refused, not a process crash.
-        let s = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\" style=\"width:1e30;height:8;\"><rect width=\"1\" height=\"1\"/></svg>"
-        XCTAssertNotNil(svgRejection(s))
-        // Unrelated style declarations stay fine.
-        XCTAssertNil(SvgActiveContentGuard.dimensionProblem(["style": "stroke-width:2;font-size:12px;max-width:1e30"]))
+        XCTAssertEqual(guardCheck(svg("<style>rect{fill:red}</style>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<rect class=\"a\" width=\"1\" height=\"1\"/>")), .activeContent)
+    }
+
+    /// The fifth SwiftDraw crash class: @font-face -> WOFF decoder, reachable through
+    /// `url (` and `u/**/rl(` spellings that a regex denylist missed.
+    func testFontFaceWoffRoutesRefusedInEveryUrlSpelling() {
+        var woff = Data("wOFF".utf8) + Data([0, 1, 0, 0, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 44])
+        woff.append(Data(count: 44 - woff.count))
+        let b64 = woff.base64EncodedString()
+        for url in ["url(data:font/woff;base64,\(b64))", "url (data:font/woff;base64,\(b64))",
+                    "u/**/rl(data:font/woff;base64,\(b64))", "URL(data:font/woff;base64,\(b64))",
+                    "url(\"data:font/woff;base64,\(b64)\")", "url(https://evil.example/f.woff)"] {
+            let doc = svg("<style>@font-face{font-family:x;src:\(url)}</style><text style=\"font-family:x\">A</text>")
+            XCTAssertEqual(guardCheck(doc), .activeContent, url)
+            XCTAssertEqual(svgRejection(doc), .activeContent, url) // end to end: refused, never reaches SwiftDraw
+        }
+        // The same spellings in paint attributes.
+        for fill in ["url (#g)", "u/**/rl(#g)", "url( #g)", "url(#g )", "url('#g')", "url(data:image/png;base64,AAAA)",
+                     "url(https://evil.example/p.svg#a)", "url(#g) /*c*/"] {
+            XCTAssertEqual(guardCheck(svg("<defs><linearGradient id=\"g\"/></defs><rect width=\"1\" height=\"1\" fill=\"\(fill)\"/>")),
+                           .activeContent, fill)
+        }
+        XCTAssertNil(guardCheck(svg("<defs><linearGradient id=\"g\"/></defs><rect width=\"1\" height=\"1\" fill=\"url(#g) #fff\"/>")))
+    }
+
+    func testCommentsInsideValuesAndTextOutsideTitleRefused() {
+        XCTAssertEqual(guardCheck(svg("<rect width=\"1\" height=\"1\" fill=\"/*x*/red\"/>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<rect width=\"1\" height=\"1\" transform=\"scale(1)/**/\"/>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<g>hello</g>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<g><![CDATA[x]]></g>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<text>A</text>")), .activeContent)
+        XCTAssertNil(guardCheck(svg("<title>Acme</title><desc>logo</desc><!-- generator: x --><rect width=\"1\" height=\"1\"/>")))
+    }
+
+    func testNotAllowlistedElementsAttributesAndNamespacesRefused() {
+        for el in ["text", "tspan", "use", "image", "pattern", "mask", "filter", "marker", "symbol", "switch", "style", "script",
+                   "foreignObject", "a", "animate", "set", "font", "font-face", "view", "metadata", "sodipodi:namedview"] {
+            XCTAssertEqual(guardCheck(svg("<\(el)/>")), .activeContent, el)
+        }
+        for attr in ["onload=\"x\"", "xml:space=\"preserve\"", "xlink:href=\"#a\"", "href=\"#a\"", "inkscape:label=\"x\"",
+                     "font-size=\"12\"", "mask=\"url(#m)\"", "filter=\"url(#f)\"", "marker-end=\"url(#m)\"", "enable-background=\"new\""] {
+            XCTAssertEqual(guardCheck(svg("<rect width=\"1\" height=\"1\" \(attr)/>")), .activeContent, attr)
+        }
+        XCTAssertEqual(guardCheck("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:evil=\"http://evil.example\" width=\"1\" height=\"1\"/>"), .activeContent)
+        XCTAssertEqual(guardCheck("<svg xmlns=\"http://evil.example/svg\" width=\"1\" height=\"1\"/>"), .activeContent)
+    }
+
+    func testAttributeValueGrammarRejectsMalformedValues() {
+        for (attr, value) in [("fill", "javascript:alert(1)"), ("fill", "red;x"), ("stroke-width", "1e30"), ("opacity", "abc"),
+                              ("d", "M0 0 evil(1)"), ("transform", "scale(1) evil(2)"), ("points", "1,2,x"),
+                              ("stroke-linecap", "inherit"), ("clip-path", "url(https://x/y)"), ("display", "block"),
+                              ("id", "1bad id"), ("stroke-dasharray", "1,2,evil")] {
+            XCTAssertEqual(guardCheck(svg("<path \(attr)=\"\(value)\"/>")), .activeContent, "\(attr)=\(value)")
+        }
+    }
+
+    // Positive: typical simple logos still pass, and render.
+    func testRealisticLogosPassTheAllowlistAndRender() {
+        let logos = [
+            "<svg \(Self.ns) viewBox=\"0 0 100 100\" width=\"100\" height=\"100\"><title>Dot</title><circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"#0a84ff\" stroke=\"#003\" stroke-width=\"4\"/></svg>",
+            "<svg \(Self.ns) xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"120\" height=\"60\" viewBox=\"0 0 120 60\"><defs><linearGradient id=\"a\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"100%\" stop-color=\"rgb(0,0,255)\" stop-opacity=\"0.8\"/></linearGradient><linearGradient id=\"b\" xlink:href=\"#a\"/></defs><rect width=\"120\" height=\"60\" rx=\"8\" fill=\"url(#a)\"/></svg>",
+            "<svg \(Self.ns) width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g transform=\"translate(32 32) rotate(45)\" fill=\"none\" stroke=\"black\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M-20,-20 L20,-20 L20,20 Z\" fill-rule=\"evenodd\"/><ellipse rx=\"10\" ry=\"5\" opacity=\".5\"/><line x1=\"-5\" y1=\"0\" x2=\"5\" y2=\"0\" stroke-dasharray=\"2 1\"/></g></svg>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg \(Self.ns) width=\"32\" height=\"32\" viewBox=\"0 0 32 32\"><defs><clipPath id=\"c\"><rect width=\"16\" height=\"32\"/></clipPath><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"#123456\"/></radialGradient></defs><polygon points=\"0,0 32,0 16,32\" fill=\"url(#r)\" clip-path=\"url(#c)\"/><polyline points=\"0,32 16,16 32,32\" fill=\"none\" stroke=\"gray\"/></svg>",
+        ]
+        for (i, doc) in logos.enumerated() {
+            XCTAssertNil(guardCheck(doc), "logo \(i)")
+            guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(doc)) else { return XCTFail("logo \(i) must render") }
+            XCTAssertEqual(Array(data.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
+        }
     }
 
     func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
@@ -456,7 +526,7 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertEqual(svgRejection("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect></svg>"), .invalidSvg)
         XCTAssertEqual(svgRejection("<html><body/></html>"), .invalidSvg)
         XCTAssertEqual(svgRejection("not xml at all"), .invalidSvg)
-        XCTAssertEqual(svgRejection(svg("<text>&undefined;</text>")), .invalidSvg)
+        XCTAssertEqual(svgRejection(svg("<g>&undefined;</g>")), .invalidSvg)
         XCTAssertEqual(svgRejection(" "), .invalidSvg)
     }
 

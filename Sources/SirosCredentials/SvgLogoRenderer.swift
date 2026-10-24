@@ -6,28 +6,145 @@ import CoreGraphics
 import ImageIO
 import SwiftDraw
 
-/// Refuses (never repairs) an SVG that contains anything but static shapes,
-/// text and gradients. Mirrors siros-sdk-kotlin's `SvgActiveContentGuard`.
-/// `<image>` is refused outright, embedded `data:` rasters included. Uses
-/// Foundation's XMLParser, so malformed XML is itself a refusal. This is a
-/// gate in front of the rasterizer, not a sanitizer: nothing is rewritten.
+/// Deny-by-default gate in front of SwiftDraw. SwiftDraw 0.29.0 trapped or
+/// recursed without bound on five different inputs we found by testing
+/// (self-referencing pattern/mask, nested `<svg>`, huge dimensions in
+/// attributes and in `style`, WOFF fonts reached through `@font-face` with
+/// `url (` / `u/**/rl(` spellings), so a denylist cannot be trusted: the
+/// document is accepted only if every element, attribute and value is on the
+/// lists below, and anything not understood is refused (never repaired).
+///
+/// Supported: `svg` (root only), `g`, `defs`, `title`, `desc`, `path`, `rect`,
+/// `circle`, `ellipse`, `line`, `polyline`, `polygon`, `linearGradient`,
+/// `radialGradient`, `stop`, `clipPath`; geometry, paint (colour, `none`,
+/// `currentColor`, `url(#id)`), stroke, opacity, transform, `clip-path` and
+/// gradient attributes with validated grammar; `#fragment` hrefs on gradients.
+/// Not supported: `style` attributes and `<style>`, text/fonts, `use`,
+/// `image`, `pattern`, `mask`, `filter`, `marker`, `switch`, `symbol`,
+/// animation, scripts, `foreignObject`, links, DOCTYPE/entities, namespaced
+/// elements or attributes (other than the SVG/xlink declarations).
 enum SvgActiveContentGuard {
-    static let forbiddenElements: Set<String> = [
-        "script", "foreignobject", "use", "iframe", "object", "embed", "a",
-        "image", "audio", "video", "animate", "set", "animatetransform", "animatemotion",
-        "animatecolor", "handler", "listener", "feimage", "cursor", "font-face-uri",
-        // SwiftDraw 0.29.0 recurses without cycle detection through a pattern
-        // or mask that references itself (stack overflow, verified); neither
-        // can be proven acyclic here, so both are refused. clipPath, marker,
-        // filter and gradient href cycles were tried and are safe in 0.29.0.
-        "pattern", "mask",
+    static let allowedElements: Set<String> = [
+        "svg", "g", "defs", "title", "desc", "path", "rect", "circle", "ellipse", "line", "polyline",
+        "polygon", "linearGradient", "radialGradient", "stop", "clipPath",
     ]
 
-    /// A `url(...)` that points anywhere but a same-document `#fragment`.
-    private static let externalUrl = try! NSRegularExpression( // swiftlint:disable:this force_try
-        pattern: "url\\(\\s*(?!\\s*['\"]?\\s*#)", options: [.caseInsensitive])
-    private static let cssImport = try! NSRegularExpression( // swiftlint:disable:this force_try
-        pattern: "@import", options: [.caseInsensitive])
+    /// Bounds on document complexity (the byte cap alone allows ~25k elements).
+    static let maxElements = 5000
+    static let maxDepth = 64
+
+    /// Largest magnitude accepted for any number. SwiftDraw traps (Float to
+    /// Int) on values like `1e30` in sizes, before any check of ours could run.
+    static let maxSvgNumber = 1_000_000.0
+
+    // MARK: Value grammar (every pattern is anchored; nothing outside it passes)
+
+    private static func re(_ pattern: String) -> NSRegularExpression {
+        // swiftlint:disable:next force_try
+        try! NSRegularExpression(pattern: pattern)
+    }
+    private static let numberPattern = "[+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?"
+    private static let lengthPattern = re("^(" + numberPattern + ")(px|pt|pc|mm|cm|in|em|ex|%)?$")
+    private static let numberRe = re("^" + numberPattern + "$")
+    private static let idPattern = "[A-Za-z_][A-Za-z0-9_.:-]{0,63}"
+    private static let idRe = re("^" + idPattern + "$")
+    private static let fragmentRe = re("^#" + idPattern + "$")
+    private static let hexColorRe = re("^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+    private static let rgbRe = re("^rgba?\\(\\s*[0-9.%]+(?:\\s*,\\s*[0-9.%]+){2,3}\\s*\\)$")
+    private static let namedColorRe = re("^[A-Za-z]{3,20}$")
+    private static let paintUrlRe = re("^url\\(#" + idPattern + "\\)$")
+    private static let pathDataRe = re("^[MmZzLlHhVvCcSsQqTtAa0-9eE+\\-.,\\s]{1,100000}$")
+    private static let transformRe = re(
+        "^\\s*(?:(?:matrix|translate|scale|rotate|skewX|skewY)\\s*\\([0-9eE+\\-.,\\s]{0,200}\\)\\s*,?\\s*){1,16}$")
+    private static let aspectRe = re("^(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max))(?: (?:meet|slice))?$")
+
+    private static func matches(_ r: NSRegularExpression, _ v: String) -> Bool {
+        r.firstMatch(in: v, range: NSRange(v.startIndex..., in: v)) != nil
+    }
+
+    private static func isNumber(_ v: String) -> Bool {
+        guard matches(numberRe, v), let d = Double(v), d.isFinite else { return false }
+        return abs(d) <= maxSvgNumber
+    }
+
+    /// A number-list separated by spaces and/or commas.
+    private static func isNumberList(_ v: String, max count: Int = 10_000) -> Bool {
+        let parts = v.split(whereSeparator: { " ,\t\r\n".contains($0) })
+        return !parts.isEmpty && parts.count <= count && parts.allSatisfy { isNumber(String($0)) }
+    }
+
+    private static func isLengthList(_ v: String) -> Bool {
+        let parts = v.split(whereSeparator: { " ,\t\r\n".contains($0) })
+        return !parts.isEmpty && parts.count <= 64 && parts.allSatisfy { lengthProblem(String($0)) == nil }
+    }
+
+    private static func isOpacity(_ v: String) -> Bool {
+        let t = v.trimmingCharacters(in: .whitespaces)
+        if t.hasSuffix("%") { return isNumber(String(t.dropLast())) }
+        return isNumber(t)
+    }
+
+    static func isColor(_ v: String) -> Bool {
+        let t = v.trimmingCharacters(in: .whitespaces)
+        return ["none", "currentColor"].contains(t) || matches(hexColorRe, t) || matches(rgbRe, t) || matches(namedColorRe, t)
+    }
+
+    /// `none`, a colour, `url(#id)`, or `url(#id) <colour>`: no whitespace inside
+    /// `url(`, no comments, no external or data: URLs.
+    static func isPaint(_ v: String) -> Bool {
+        let t = v.trimmingCharacters(in: .whitespaces)
+        if isColor(t) { return true }
+        if matches(paintUrlRe, t) { return true }
+        guard t.hasPrefix("url("), let close = t.firstIndex(of: ")") else { return false }
+        let url = String(t[...close])
+        let rest = t[t.index(after: close)...].trimmingCharacters(in: .whitespaces)
+        return matches(paintUrlRe, url) && isColor(rest)
+    }
+
+    private static func isEnum(_ v: String, _ values: [String]) -> Bool { values.contains(v.trimmingCharacters(in: .whitespaces)) }
+
+    /// A CSS/SVG length: number, optional unit, magnitude within `maxSvgNumber`.
+    static func lengthProblem(_ raw: String) -> LogoRejection? {
+        let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let m = lengthPattern.firstMatch(in: v, range: NSRange(v.startIndex..., in: v)),
+              let r = Range(m.range(at: 1), in: v), let d = Double(v[r]), d.isFinite
+        else { return .invalidSvg }
+        return abs(d) > maxSvgNumber ? .dimensionsTooLarge : nil
+    }
+
+    /// Validators for the attributes that may appear on any allowed element.
+    private static let attributeValidators: [String: (String) -> Bool] = [
+        "id": { matches(idRe, $0) },
+        "x": { lengthProblem($0) == nil }, "y": { lengthProblem($0) == nil },
+        "width": { lengthProblem($0) == nil }, "height": { lengthProblem($0) == nil },
+        "cx": { lengthProblem($0) == nil }, "cy": { lengthProblem($0) == nil }, "r": { lengthProblem($0) == nil },
+        "rx": { lengthProblem($0) == nil }, "ry": { lengthProblem($0) == nil },
+        "x1": { lengthProblem($0) == nil }, "y1": { lengthProblem($0) == nil },
+        "x2": { lengthProblem($0) == nil }, "y2": { lengthProblem($0) == nil },
+        "fx": { lengthProblem($0) == nil }, "fy": { lengthProblem($0) == nil }, "fr": { lengthProblem($0) == nil },
+        "offset": { lengthProblem($0) == nil },
+        "points": { isNumberList($0) },
+        "d": { matches(pathDataRe, $0) },
+        "transform": { matches(transformRe, $0) }, "gradientTransform": { matches(transformRe, $0) },
+        "viewBox": { isNumberList($0, max: 4) && $0.split(whereSeparator: { " ,\t\r\n".contains($0) }).count == 4 },
+        "preserveAspectRatio": { matches(aspectRe, $0) },
+        "version": { isEnum($0, ["1.0", "1.1", "2.0"]) },
+        "fill": isPaint, "stroke": isPaint,
+        "stop-color": isColor, "color": isColor,
+        "stroke-width": { lengthProblem($0) == nil },
+        "stroke-linecap": { isEnum($0, ["butt", "round", "square"]) },
+        "stroke-linejoin": { isEnum($0, ["miter", "round", "bevel"]) },
+        "stroke-miterlimit": isNumber,
+        "stroke-dasharray": { $0.trimmingCharacters(in: .whitespaces) == "none" || isLengthList($0) },
+        "stroke-dashoffset": { lengthProblem($0) == nil },
+        "fill-rule": { isEnum($0, ["nonzero", "evenodd"]) }, "clip-rule": { isEnum($0, ["nonzero", "evenodd"]) },
+        "opacity": isOpacity, "fill-opacity": isOpacity, "stroke-opacity": isOpacity, "stop-opacity": isOpacity,
+        "clip-path": { $0.trimmingCharacters(in: .whitespaces) == "none" || matches(paintUrlRe, $0.trimmingCharacters(in: .whitespaces)) },
+        "display": { isEnum($0, ["inline", "none"]) },
+        "gradientUnits": { isEnum($0, ["userSpaceOnUse", "objectBoundingBox"]) },
+        "clipPathUnits": { isEnum($0, ["userSpaceOnUse", "objectBoundingBox"]) },
+        "spreadMethod": { isEnum($0, ["pad", "reflect", "repeat"]) },
+    ]
 
     /// nil when the SVG may be rasterized, otherwise why not.
     static func check(_ data: Data) -> LogoRejection? {
@@ -48,82 +165,43 @@ enum SvgActiveContentGuard {
         return nil
     }
 
-    private static func localName(_ qualified: String) -> String {
-        (qualified.split(separator: ":").last.map(String.init) ?? qualified).lowercased()
-    }
-
-    /// Largest magnitude accepted for width/height/viewBox numbers. SwiftDraw
-    /// 0.29.0 traps (Float to Int) on values like `1e30`, before any size
-    /// check of ours could run, so everything is validated first.
-    /// Bounds on document complexity (the byte cap alone allows ~25k elements).
-    static let maxElements = 5000
-    static let maxDepth = 64
-
-    static let maxSvgNumber = 1_000_000.0
-
-    private static let lengthPattern = try! NSRegularExpression( // swiftlint:disable:this force_try
-        pattern: "^[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?(px|pt|pc|mm|cm|in|em|ex|%)?$")
-
-    /// A CSS/SVG length: number, optional unit, magnitude within `maxSvgNumber`.
-    static func lengthProblem(_ raw: String) -> LogoRejection? {
-        let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let r = NSRange(v.startIndex..., in: v)
-        guard let m = lengthPattern.firstMatch(in: v, range: r) else { return .invalidSvg }
-        // Number = everything before the unit (group 3), so "em"/"ex" are not mistaken for an exponent.
-        let unitStart = m.range(at: 3).location == NSNotFound ? r.length : m.range(at: 3).location
-        let digits = (v as NSString).substring(to: unitStart)
-        guard let d = Double(digits), d.isFinite else { return .invalidSvg }
-        return abs(d) > maxSvgNumber ? .dimensionsTooLarge : nil
-    }
-
-    /// nil when width/height/viewBox of an `<svg>` element are safe to hand to SwiftDraw.
-    /// SwiftDraw gives an inline `style="width:..."` precedence over the
-    /// attribute and traps on the same huge values (verified on 0.29.0), so
-    /// width/height declared in a `style` attribute get the same check.
-    /// (Other CSS routes were tried and are safe: width/height on shapes,
-    /// stroke-width, font-size, transform, `<style>` rules.)
-    static func dimensionProblem(_ attrs: [String: String]) -> LogoRejection? {
-        for (key, raw) in attrs {
-            switch localName(key) {
-            case "width", "height":
-                if let bad = lengthProblem(raw) { return bad }
-            case "style":
-                for decl in raw.split(separator: ";") {
-                    guard let colon = decl.firstIndex(of: ":") else { continue }
-                    let prop = decl[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    let value = String(decl[decl.index(after: colon)...])
-                    if ["width", "height"].contains(prop), let bad = lengthProblem(value) { return bad }
-                }
-            case "viewbox":
-                let parts = raw.split(whereSeparator: { " ,\t\r\n".contains($0) })
-                guard parts.count == 4 else { return .invalidSvg }
-                var nums: [Double] = []
-                for p in parts {
-                    let t = String(p)
-                    guard lengthPattern.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil,
-                          !t.hasSuffix("%"), let d = Double(t), d.isFinite else { return .invalidSvg }
-                    if abs(d) > maxSvgNumber { return .dimensionsTooLarge }
-                    nums.append(d)
-                }
-                if nums[2] <= 0 || nums[3] <= 0 { return .invalidSvg }
-            default: break
+    /// nil when one element's attributes are all allowed with valid values.
+    static func attributeProblem(element: String, _ attrs: [String: String], isRoot: Bool) -> LogoRejection? {
+        for (key, value) in attrs {
+            switch key {
+            case "xmlns":
+                guard isRoot, value == "http://www.w3.org/2000/svg" else { return .activeContent }
+            case "xmlns:xlink":
+                guard isRoot, value == "http://www.w3.org/1999/xlink" else { return .activeContent }
+            case "href", "xlink:href":
+                // Same-document gradient inheritance only.
+                guard ["linearGradient", "radialGradient"].contains(element),
+                      matches(fragmentRe, value) else { return .activeContent }
+            case "width", "height", "viewBox":
+                if isRoot && key != "viewBox" { if let bad = lengthProblem(value) { return bad } }
+                guard attributeValidators[key]?(value) == true else { return .invalidSvg }
+                if key == "viewBox", let bad = viewBoxProblem(value) { return bad }
+            default:
+                guard let validate = attributeValidators[key], validate(value) else { return .activeContent }
             }
         }
         return nil
     }
 
-    static func cssIsUnsafe(_ css: String) -> Bool {
-        let r = NSRange(css.startIndex..., in: css)
-        return externalUrl.firstMatch(in: css, range: r) != nil || cssImport.firstMatch(in: css, range: r) != nil
+    /// viewBox: four finite numbers, positive size.
+    static func viewBoxProblem(_ raw: String) -> LogoRejection? {
+        let nums = raw.split(whereSeparator: { " ,\t\r\n".contains($0) }).compactMap { Double($0) }
+        guard nums.count == 4, nums.allSatisfy({ $0.isFinite }) else { return .invalidSvg }
+        if nums.contains(where: { abs($0) > maxSvgNumber }) { return .dimensionsTooLarge }
+        return nums[2] <= 0 || nums[3] <= 0 ? .invalidSvg : nil
     }
 
     private final class Delegate: NSObject, XMLParserDelegate {
         var refusal: LogoRejection?
         var sawSvgRoot = false
-        private var inStyle = false
         private var elementCount = 0
         private var depth = 0
-        private var style = ""
+        private var stack: [String] = []
 
         private func refuse(_ parser: XMLParser, _ r: LogoRejection) {
             if refusal == nil { refusal = r }
@@ -132,53 +210,44 @@ enum SvgActiveContentGuard {
 
         func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
                     qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
-            let name = localName(elementName)
-            if !sawSvgRoot {
-                if name != "svg" { return refuse(parser, .invalidSvg) }
+            let isRoot = !sawSvgRoot
+            if isRoot {
+                if elementName != "svg" { return refuse(parser, .invalidSvg) }
                 sawSvgRoot = true
-            } else if name == "svg" {
+            } else if elementName == "svg" {
                 // SwiftDraw 0.29.0 processes nested <svg> children twice per
                 // level: 20 levels (735 bytes) took 55 s to parse (verified).
                 return refuse(parser, .activeContent)
             }
+            guard SvgActiveContentGuard.allowedElements.contains(elementName) else { return refuse(parser, .activeContent) }
             elementCount += 1
             depth += 1
             if elementCount > SvgActiveContentGuard.maxElements || depth > SvgActiveContentGuard.maxDepth {
                 return refuse(parser, .tooLarge)
             }
-            if forbiddenElements.contains(name) { return refuse(parser, .activeContent) }
-            if name == "svg", let bad = SvgActiveContentGuard.dimensionProblem(attributeDict) {
+            if let bad = SvgActiveContentGuard.attributeProblem(element: elementName, attributeDict, isRoot: isRoot) {
                 return refuse(parser, bad)
             }
-            inStyle = name == "style"
-            style = ""
-            for (key, value) in attributeDict {
-                let attr = localName(key)
-                if attr.hasPrefix("on") { return refuse(parser, .activeContent) }
-                if value.range(of: "javascript:", options: .caseInsensitive) != nil { return refuse(parser, .activeContent) }
-                if cssIsUnsafe(value) { return refuse(parser, .activeContent) }
-                if attr == "href" || attr == "src",
-                   !value.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#") {
-                    return refuse(parser, .activeContent)
-                }
-            }
+            stack.append(elementName)
         }
 
         func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
             depth -= 1
-            if inStyle, cssIsUnsafe(style) { return refuse(parser, .activeContent) }
-            inStyle = false
+            _ = stack.popLast()
         }
 
+        /// Text is inert only inside title/desc; anywhere else only whitespace is allowed.
         func parser(_ parser: XMLParser, foundCharacters string: String) {
-            if inStyle { style += string }
+            if let top = stack.last, ["title", "desc"].contains(top) { return }
+            if !string.allSatisfy({ $0.isWhitespace }) { refuse(parser, .activeContent) }
         }
 
         func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
-            if inStyle { style += String(decoding: CDATABlock, as: UTF8.self) }
+            if let top = stack.last, ["title", "desc"].contains(top) { return }
+            refuse(parser, .activeContent)
         }
 
-        // Any entity/notation/element declaration is a DOCTYPE with content.
+        // Any entity/notation declaration is a DOCTYPE with content.
         func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) {
             refuse(parser, .activeContent)
         }

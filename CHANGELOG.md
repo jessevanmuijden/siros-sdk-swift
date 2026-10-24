@@ -163,10 +163,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `image/png|jpeg|webp|gif|svg+xml`, at most 256 KiB decoded and 2048 px per
   side; rasters are decoded with ImageIO, checked to be the declared type, and
   re-encoded as a fresh PNG, so metadata and trailing/polyglot payloads are
-  dropped. **SVG** is first run through an XMLParser-based refusal guard
-  (script, foreignObject, use, a, image, animation, iframe/object/embed, `on*`
-  attributes, non-fragment href, external `url()`/`@import`, DOCTYPE/entities
-  are refused, never repaired), then rasterized by
+  dropped. **SVG** is first run through a deny-by-default allowlist guard (XMLParser): only
+  `svg` (root), `g`, `defs`, `title`, `desc`, `path`, `rect`, `circle`, `ellipse`,
+  `line`, `polyline`, `polygon`, `linearGradient`, `radialGradient`, `stop` and
+  `clipPath` with validated geometry, paint (`url(#id)` only), stroke, opacity,
+  transform and gradient attributes are accepted; style attributes/elements, text and
+  fonts, `use`, `image`, `pattern`, `mask`, `filter`, `marker`, animation, scripts,
+  links, DOCTYPE/entities, namespaced content and anything not understood are refused,
+  never repaired. (SwiftDraw 0.29.0 crashes or hangs on five input classes we found, so
+  a denylist is not enough.) What passes is rasterized by
   [SwiftDraw](https://github.com/swhitty/SwiftDraw) (pinned exactly, 0.29.0,
   zlib licence) to at most 512 px and re-encoded like any raster. Same policy
   as siros-sdk-kotlin. `LogoSanitizer.fetchAndSanitize` and `LogoCache` fetch
