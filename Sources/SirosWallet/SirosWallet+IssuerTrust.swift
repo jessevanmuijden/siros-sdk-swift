@@ -118,14 +118,22 @@ extension SirosWallet {
     }
 
     /// The `docType` inside the signed MobileSecurityObject: the `issuerAuth`
-    /// payload is `#6.24(bstr(MSO))` (a bare MSO map is accepted too). Nil if it
+    /// payload is `#6.24(bstr(MSO))` (an untagged `bstr(MSO)` and a bare MSO map are accepted too). Nil if it
     /// cannot be read.
     static func signedDocType(msoPayload: [UInt8]) -> String? {
+        // The same three encodings `MdocCbor.decodeMso(fromPayload:)` accepts: the tag-24
+        // wrapper, an untagged bstr(MSO), or the bare MSO map.
         guard let top = try? CBOR.decode(msoPayload) else { return nil }
         var mso = top
-        if case .tagged(let tag, let inner) = top, tag == .encodedCBORDataItem {
+        switch top {
+        case .tagged(let tag, let inner) where tag == .encodedCBORDataItem:
             guard case .byteString(let bytes) = inner, let decoded = try? CBOR.decode(bytes) else { return nil }
             mso = decoded
+        case .byteString(let bytes):
+            guard let decoded = try? CBOR.decode(bytes) else { return nil }
+            mso = decoded
+        default:
+            break
         }
         guard case .map(let map) = mso, case .utf8String(let docType)? = map["docType"] else { return nil }
         return docType

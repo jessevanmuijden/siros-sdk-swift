@@ -544,10 +544,12 @@ final class IssuanceTrustGateTests: XCTestCase {
 
     // MARK: - The signed docType
 
-    private func msoPayload(docType: String?, tagged: Bool = true) -> [UInt8] {
+    private func msoPayload(docType: String?, tagged: Bool = true, bstr: Bool = false) -> [UInt8] {
         var map: [CBOR: CBOR] = ["version": .utf8String("1.0")]
         if let docType { map["docType"] = .utf8String(docType) }
         let mso = CBOR.map(map)
+        // bstr: the untagged bstr(MSO) encoding some issuers emit (MdocCbor.decodeMso accepts it).
+        if bstr { return CBOR.byteString(mso.encode()).encode() }
         return tagged ? CBOR.tagged(.encodedCBORDataItem, .byteString(mso.encode())).encode() : mso.encode()
     }
 
@@ -561,6 +563,15 @@ final class IssuanceTrustGateTests: XCTestCase {
     func testMatchingDocTypeIsAcceptedTaggedOrBare() {
         XCTAssertNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: msoPayload(docType: "org.example.A"), envelopeDocType: "org.example.A"))
         XCTAssertNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: msoPayload(docType: "org.example.A", tagged: false), envelopeDocType: "org.example.A"))
+    }
+
+    func testAnUntaggedBstrMsoIsReadLikeMdocCborDoes() {
+        let payload = msoPayload(docType: "org.example.A", bstr: true)
+        XCTAssertEqual(SirosWallet.signedDocType(msoPayload: payload), "org.example.A")
+        XCTAssertNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: payload, envelopeDocType: "org.example.A"),
+                     "a genuine credential with an untagged bstr(MSO) must not be refused as unreadable")
+        XCTAssertNotNil(SirosWallet.issuerAuthDocTypeRefusal(msoPayload: payload, envelopeDocType: "org.example.B"),
+                        "and a mismatch is still caught in that encoding")
     }
 
     func testAMsoWithNoReadableDocTypeCannotBeComparedAndIsRefused() {
