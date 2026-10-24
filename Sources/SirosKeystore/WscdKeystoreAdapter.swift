@@ -93,8 +93,18 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
 
     // MARK: - WscdManager conformance
 
-    public func isWscdPluginPresent(pluginId: String) async -> Bool {
-        await signer.isPluginPresent(pluginId: pluginId)
+    /// Onboarded = the plugin's key metadata is recorded in the privatedata-synced
+    /// `S.wscdCredentials` (`exportWscdCredentialsState`, the same source the host
+    /// uses to decide whether to offer enrollment), OR the live signer already holds
+    /// a key for the plugin (restored via `registerFido2PluginWithState` or enrolled
+    /// this session). Only plugins with an enrollment step are gated
+    /// (`WscdPluginCapabilities.onboardingRequiredPluginIds`); any failure to
+    /// determine it counts as NOT onboarded (fail closed).
+    public func isWscdPluginOnboarded(pluginId: String) async -> Bool {
+        guard WscdPluginCapabilities.onboardingRequiredPluginIds.contains(pluginId) else { return true }
+        if let state = await exportWscdCredentialsState()[pluginId], !state.isEmpty { return true }
+        guard let keys = try? await signer.listKeys() else { return false }
+        return keys.contains { $0.pluginId == pluginId }
     }
 
     public func lifecycleStatus(pluginId: String, contextId: String) async throws -> LifecycleStatus {

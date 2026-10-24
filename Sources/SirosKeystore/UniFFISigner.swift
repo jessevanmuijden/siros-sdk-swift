@@ -76,9 +76,6 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     /// Cache of key ID → JWK JSON Data, populated at generateKey time.
     private var publicKeyCache: [String: Data] = [:]
     private let cacheLock = NSLock()
-    /// The CTAP2 transport registered for the "fido2" plugin, if any - what
-    /// `isPluginPresent` asks. Guarded by `cacheLock`.
-    private var fido2Transport: Ctap2TransportProvider?
 
     /// Create a UniFFI-backed signer.
     ///
@@ -131,7 +128,6 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     ///   only needs to move raw command/response bytes.
     public func registerFido2Plugin(transport: Ctap2TransportProvider) throws {
         try ffi.registerFido2Plugin(transport: Ctap2TransportBridge(transport))
-        setFido2Transport(transport)
     }
 
     /// Register the FIDO2 previewSign plugin, restoring a previously-
@@ -141,26 +137,6 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     /// starting with no known keys.
     public func registerFido2PluginWithState(transport: Ctap2TransportProvider, state: Data) throws {
         try ffi.registerFido2PluginWithState(transport: Ctap2TransportBridge(transport), state: state)
-        setFido2Transport(transport)
-    }
-
-    private func currentFido2Transport() -> Ctap2TransportProvider? {
-        cacheLock.lock(); defer { cacheLock.unlock() }
-        return fido2Transport
-    }
-
-    private func setFido2Transport(_ transport: Ctap2TransportProvider) {
-        cacheLock.lock(); fido2Transport = transport; cacheLock.unlock()
-    }
-
-    /// "fido2" is present only when a transport is registered AND reports itself
-    /// available (an authenticator connected/reachable) - fail closed, never
-    /// guessing. Every other plugin needs no local device here: a software key is
-    /// always present, and R2PS reachability is the server's to report on use.
-    public func isPluginPresent(pluginId: String) async -> Bool {
-        guard pluginId == "fido2" else { return true }
-        guard let transport = currentFido2Transport() else { return false }
-        return await transport.isAvailable()
     }
 
     /// Export the FIDO2 plugin's current key metadata (key handles + public
@@ -299,15 +275,6 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
         keyId: String,
         payload: @escaping ([AuthenticationFactor]) throws -> Data
     ) async throws -> SignerScaOutcome {
-        // Before any PIN is asked for: a PIN with no token to use it on is a wasted,
-        // misleading prompt (mirrors the Kotlin SDK's FactorSigning.begin check).
-        if let pluginId = try await listKeys().first(where: { $0.keyId == keyId })?.pluginId,
-           !(await isPluginPresent(pluginId: pluginId)) {
-            throw TransactionDataError(
-                .insufficientAuthenticationFactors,
-                detail: "No applicable WSCD is available: the '\(pluginId)' authenticator is not present"
-            )
-        }
         do {
             return try await signForScaOnQueue(keyId: keyId, payload: payload)
         } catch FfiWscdError.AuthCancelled {

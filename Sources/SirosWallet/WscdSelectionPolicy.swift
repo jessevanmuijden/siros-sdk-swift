@@ -88,13 +88,12 @@ public enum WscdSelectionError: Error, Sendable, Equatable {
     /// are handled identically by every caller of `resolve`.
     case ambiguousChoiceNotMade(issuer: String, credentialType: String, requiredTier: String)
     /// One or more registered plugins' nominal tier meets the requirement, but
-    /// none of them has its device present right now (e.g. the FIDO2
-    /// authenticator is not connected), so nothing can be used. Thrown BEFORE
-    /// any key generation and therefore before any PIN prompt - the user is
-    /// told there is no applicable WSCD instead of being asked for a PIN for a
-    /// token that is not there. `absentPluginIds` lists the sufficient-but-absent
-    /// plugins (sorted).
-    case authenticatorNotPresent(issuer: String, credentialType: String, requiredTier: String, absentPluginIds: [String])
+    /// the user has not onboarded any of them (e.g. no FIDO2 token has been
+    /// enrolled), so nothing can be used. Thrown BEFORE any key generation and
+    /// therefore before any PIN prompt - the user is told there is no applicable
+    /// WSCD instead of being asked for a PIN with no token behind it.
+    /// `notOnboardedPluginIds` lists the sufficient-but-not-onboarded plugins (sorted).
+    case wscdNotOnboarded(issuer: String, credentialType: String, requiredTier: String, notOnboardedPluginIds: [String])
 }
 
 extension WscdSelectionError: LocalizedError {
@@ -107,9 +106,9 @@ extension WscdSelectionError: LocalizedError {
             return "Multiple authenticators meet the required key-storage tier " +
                 "(\(requiredTier)) for credential type \(credentialType) from issuer \(issuer), " +
                 "but no choice was made"
-        case .authenticatorNotPresent(let issuer, let credentialType, let requiredTier, let absent):
-            return "No applicable WSCD available: the authenticator required for key-storage tier " +
-                "\(requiredTier) (\(absent.joined(separator: ", "))) is not present, needed for " +
+        case .wscdNotOnboarded(let issuer, let credentialType, let requiredTier, let notOnboarded):
+            return "No applicable WSCD available: no authenticator has been set up for key-storage tier " +
+                "\(requiredTier) (\(notOnboarded.joined(separator: ", "))), needed for " +
                 "credential type \(credentialType) from issuer \(issuer)"
         }
     }
@@ -155,13 +154,13 @@ extension WscdSelectionError: LocalizedError {
 ///    `WscdSelectionError.noEligiblePlugin` (nothing usable to fall back to
 ///    at all).
 ///
-/// Presence (steps 2-8): a plugin whose device is not present right now
-/// (`isPluginPresent` - e.g. no FIDO2 authenticator connected) is treated as
-/// if it were not registered, at EVERY step including overrides/TOFU/default
+/// Onboarding (steps 2-8): a plugin the user has not onboarded
+/// (`isPluginOnboarded` - e.g. no FIDO2 token enrolled) is treated as if it
+/// were not registered, at EVERY step including overrides/TOFU/default
 /// mapping. If that leaves nothing while some sufficient plugin was merely
-/// absent, `WscdSelectionError.authenticatorNotPresent` is thrown - before any key
-/// generation, hence before any PIN prompt. Fails closed: absent is never
-/// "assumed present".
+/// not onboarded, `WscdSelectionError.wscdNotOnboarded` is thrown - before any
+/// key generation, hence before any PIN prompt. Fails closed: "cannot tell"
+/// is "not onboarded".
 // `@unchecked Sendable`: every mutable access (the persisted-mapping
 // read-modify-write sequences) is guarded by `lock` internally - see its
 // doc comment - matching this codebase's existing convention for types in
@@ -223,22 +222,22 @@ public final class WscdSelectionPolicy: @unchecked Sendable {
         credentialType: String,
         requiredTier: String?,
         availablePluginIds: [String],
-        isPluginPresent: @Sendable (String) async -> Bool = { _ in true }
+        isPluginOnboarded: @Sendable (String) async -> Bool = { _ in true }
     ) async throws -> String? {
         // 1. No declared requirement - no-op.
         guard let requiredTier else { return nil }
 
         let key = Self.tofuKey(issuer: issuer, credentialType: credentialType)
 
-        // Presence is only asked about plugins that could otherwise be
+        // Onboarding is only asked about plugins that could otherwise be
         // chosen (tier-sufficient), so a software plugin never costs a probe
-        // and an insufficient-but-absent one is not misreported as the cause.
-        // Absent plugins are dropped from everything below.
+        // and an insufficient-and-not-onboarded one is not misreported as the
+        // cause. Not-onboarded plugins are dropped from everything below.
         var present: [String] = []
-        var absentSufficient: [String] = []
+        var notOnboardedSufficient: [String] = []
         for id in Set(availablePluginIds) {
             guard isSufficient(id, for: requiredTier) else { present.append(id); continue }
-            if await isPluginPresent(id) { present.append(id) } else { absentSufficient.append(id) }
+            if await isPluginOnboarded(id) { present.append(id) } else { notOnboardedSufficient.append(id) }
         }
         let registered = Set(present)
 
@@ -323,12 +322,12 @@ public final class WscdSelectionPolicy: @unchecked Sendable {
             }
         }
 
-        // Zero eligible. If sufficient plugins exist but none is present, say so
+        // Zero eligible. If sufficient plugins exist but none is onboarded, say so
         // distinctly (before any PIN prompt) rather than a generic tier miss.
-        if !absentSufficient.isEmpty {
-            throw WscdSelectionError.authenticatorNotPresent(
+        if !notOnboardedSufficient.isEmpty {
+            throw WscdSelectionError.wscdNotOnboarded(
                 issuer: issuer, credentialType: credentialType, requiredTier: requiredTier,
-                absentPluginIds: absentSufficient.sorted()
+                notOnboardedPluginIds: notOnboardedSufficient.sorted()
             )
         }
         throw WscdSelectionError.noEligiblePlugin(issuer: issuer, credentialType: credentialType, requiredTier: requiredTier)

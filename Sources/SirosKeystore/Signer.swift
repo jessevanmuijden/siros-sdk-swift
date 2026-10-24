@@ -70,19 +70,9 @@ public protocol Signer: AnyObject, Sendable {
     /// - Parameter payload: builds the data to sign from the factors that will
     ///   be applied; called at most once per sign.
     func signForSca(keyId: String, payload: @escaping ([AuthenticationFactor]) throws -> Data) async throws -> SignerScaOutcome
-
-    /// Whether the physical/remote device backing `pluginId` is reachable RIGHT NOW,
-    /// asked before any user authentication is requested (a PIN prompt for a token
-    /// that is not there can only fail afterwards). Must be side-effect free: no
-    /// prompt, no key operation. Plugins with no external device (software keys)
-    /// are always present; a plugin that needs a device which is not registered or
-    /// not connected is absent. The default is `true`.
-    func isPluginPresent(pluginId: String) async -> Bool
 }
 
 public extension Signer {
-    func isPluginPresent(pluginId: String) async -> Bool { true }
-
     func authenticationCapability(keyId: String) async throws -> SignerFactorCapability {
         .cannot("this signer does not report TS12 authentication factors")
     }

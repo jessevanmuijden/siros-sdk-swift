@@ -20,13 +20,14 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// something and then report success must check this first. Defaults to nil.
     var unsupportedSchemaVersion: UnsupportedSchemaVersion? { get }
 
-    /// Whether the WSCD plugin `pluginId` (e.g. "fido2") that this keystore backs
-    /// has its device present right now - checked by `WscdSelectionPolicy` BEFORE
-    /// any key generation, so an absent token fails the flow up front instead of
-    /// after a PIN prompt. Side-effect free. A genuine protocol requirement
-    /// (defaulted to `true` below for software keystores) so it dispatches
-    /// dynamically through the `KeystoreManager` existential.
-    func isWscdPluginPresent(pluginId: String) async -> Bool
+    /// Whether the user has ONBOARDED the WSCD plugin `pluginId` (e.g. "fido2"):
+    /// enrolled a token/key with it, so there is something for a PIN to unlock.
+    /// Checked by `WscdSelectionPolicy` BEFORE any key generation, so a user with no
+    /// onboarded token of the required assurance fails up front with a clear error
+    /// instead of being asked for a PIN that nothing could use. Side-effect free.
+    /// A genuine protocol requirement (defaulted to `true` below: software keystores
+    /// need no onboarding) so it dispatches dynamically through the existential.
+    func isWscdPluginOnboarded(pluginId: String) async -> Bool
 
     /// Unlock the keystore using PRF-derived key material.
     ///
@@ -552,7 +553,7 @@ extension KeystoreError: LocalizedError {
 extension KeystoreManager {
     public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { nil }
 
-    public func isWscdPluginPresent(pluginId: String) async -> Bool { true }
+    public func isWscdPluginOnboarded(pluginId: String) async -> Bool { true }
 
     public func signVpToken(
         credential: String,

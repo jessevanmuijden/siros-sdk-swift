@@ -35,6 +35,12 @@ public enum WscdPluginCapabilities {
         "r2ps": "iso_18045_high",
     ]
 
+    /// Plugins with an enrollment ("onboarding") step: the user must register a
+    /// token/key before the plugin can sign anything (and before a PIN means
+    /// anything). `softkey` has none; `r2ps` enrolment is server-side lifecycle
+    /// state this SDK does not track here, so it is not gated by this set.
+    public static let onboardingRequiredPluginIds: Set<String> = ["fido2"]
+
     /// The nominal tier for a known plugin ID, or `nil` if the ID isn't in
     /// the static table (an unknown/future plugin ID is never eligible for
     /// anything - see `meets`).

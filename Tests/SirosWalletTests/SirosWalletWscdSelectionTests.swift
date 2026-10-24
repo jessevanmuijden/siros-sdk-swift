@@ -47,9 +47,9 @@ private final class StubKeystoreManager: KeystoreManager, @unchecked Sendable {
     /// that an issuer's advertised methods reached the keystore.
     private(set) var lastHolderBinding: HolderBinding?
 
-    /// What `isWscdPluginPresent` reports - `false` simulates an absent token.
-    var present = true
-    func isWscdPluginPresent(pluginId: String) async -> Bool { present }
+    /// What `isWscdPluginOnboarded` reports - `false` simulates a user with no onboarded token.
+    var onboarded = true
+    func isWscdPluginOnboarded(pluginId: String) async -> Bool { onboarded }
 
     init(label: String) { self.label = label }
 
@@ -181,14 +181,15 @@ final class SirosWalletWscdSelectionTests: XCTestCase {
         XCTAssertEqual(result?.keyIds.first, "fido2-key-0")
     }
 
-    func testAbsentFido2FailsBeforeAnyKeyGenerationOrPin() async throws {
+    func testNotOnboardedFido2FailsBeforeAnyKeyGenerationOrPin() async throws {
         // iso_18045_high needed, fido2 is the only sufficient plugin but its
-        // token is absent: must throw authenticatorNotPresent without ever reaching
+        // token is not onboarded: must throw wscdNotOnboarded without ever reaching
         // generateKeypairs (where the PIN prompt would happen) - neither on the
         // fido2 keystore nor by falling back to the default one.
         let defaultKeystore = StubKeystoreManager(label: "softkey")
         let fidoKeystore = StubKeystoreManager(label: "fido2")
-        fidoKeystore.present = false
+        fidoKeystore.onboarded = false
+        defaultKeystore.onboarded = false  // the wallet's main keystore has no record either
         var config = WalletConfig(backendUrl: "https://example.invalid")
         config.availableKeystores = ["fido2": fidoKeystore, "softkey": defaultKeystore]
 
@@ -198,16 +199,32 @@ final class SirosWalletWscdSelectionTests: XCTestCase {
 
         do {
             _ = try await w.requestBackendKeyAttestation(audience: "https://issuer.example.com", nonce: "n", count: 1)
-            XCTFail("expected WscdSelectionError.authenticatorNotPresent to propagate")
-        } catch WscdSelectionError.authenticatorNotPresent(_, _, let tier, let absent) {
+            XCTFail("expected WscdSelectionError.wscdNotOnboarded to propagate")
+        } catch WscdSelectionError.wscdNotOnboarded(_, _, let tier, let notOnboarded) {
             XCTAssertEqual(tier, "iso_18045_high")
-            XCTAssertEqual(absent, ["fido2"])
+            XCTAssertEqual(notOnboarded, ["fido2"])
         }
         XCTAssertEqual(fidoKeystore.generateKeypairsCallCount, 0)
         XCTAssertEqual(defaultKeystore.generateKeypairsCallCount, 0)
     }
 
-    func testPresentFido2StillGeneratesKeys() async throws {
+    func testOnboardingRecordedOnMainKeystoreCounts() async throws {
+        // The fido2 adapter itself knows nothing, but the wallet's main keystore
+        // (where `wscdCredentials` lives) reports the plugin onboarded.
+        let mainKeystore = StubKeystoreManager(label: "main")
+        let fidoKeystore = StubKeystoreManager(label: "fido2")
+        fidoKeystore.onboarded = false
+        var config = WalletConfig(backendUrl: "https://example.invalid")
+        config.availableKeystores = ["fido2": fidoKeystore]
+        let w = SirosWallet(config: config, authProvider: StubAuthProvider(), keystore: mainKeystore)!
+        w.apiClient = fakeApiClient()
+        w.activeVctm = Vctm(vct: "urn:example:pid", requiredKeyStorage: "iso_18045_high")
+
+        let (result, _) = try await w.requestBackendKeyAttestation(audience: "https://issuer.example.com", nonce: "n", count: 1)
+        XCTAssertEqual(result?.keyIds.first, "fido2-key-0")
+    }
+
+    func testOnboardedFido2StillGeneratesKeys() async throws {
         let defaultKeystore = StubKeystoreManager(label: "softkey")
         let fidoKeystore = StubKeystoreManager(label: "fido2")
         var config = WalletConfig(backendUrl: "https://example.invalid")
