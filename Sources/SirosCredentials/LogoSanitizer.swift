@@ -242,6 +242,7 @@ public enum LogoSanitizer {
             i += 2 + len
             if m == 0xDA { // entropy-coded data: skip to the next real marker
                 while i + 1 < b.count {
+                    if b[i] == 0xFF, b[i + 1] == 0xFF { i += 1; continue } // fill byte stays in the scan
                     if b[i] == 0xFF, b[i + 1] != 0x00, !(0xD0...0xD7).contains(b[i + 1]) { break }
                     i += 1
                 }
@@ -261,4 +262,28 @@ public enum LogoSanitizer {
         }
     }
     #endif
+}
+
+/// Resolves logo URIs to sanitized results off the caller's thread and
+/// remembers them by URI (rejections too, so a bad logo is not re-decoded on
+/// every render). Bounded: when full it forgets everything and starts over.
+public actor LogoCache {
+    public static let shared = LogoCache()
+    private var entries: [String: DisplayLogo?] = [:]
+    private let capacity: Int
+    /// Number of times the sanitizer actually ran (for tests).
+    public private(set) var sanitizeCount = 0
+
+    public init(capacity: Int = 64) { self.capacity = max(1, capacity) }
+
+    /// The sanitized logo, or nil when the URI was rejected (show the issuer initial).
+    public func resolve(_ uri: String) -> DisplayLogo? {
+        if let hit = entries[uri] { return hit }
+        sanitizeCount += 1
+        var result: DisplayLogo?
+        if case .success(let logo) = LogoSanitizer.sanitize(uri) { result = logo }
+        if entries.count >= capacity { entries.removeAll() }
+        entries[uri] = .some(result)
+        return result
+    }
 }

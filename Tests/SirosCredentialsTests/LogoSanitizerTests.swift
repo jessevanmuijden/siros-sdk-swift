@@ -210,6 +210,19 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertTrue(LogoSanitizer.hasEndMarker(Data(withThumb + [1, 2, 3]), mediaType: "image/jpeg"))
     }
 
+    /// Legal fill bytes before a restart marker inside the scan must not end it early.
+    func testJpegFillByteBeforeRestartMarkerAccepted() {
+        // SOI, SOS (len 3 header-ish, content irrelevant to the walker), scan with FF FF D0 then more data, EOI.
+        let sos: [UInt8] = [0xFF, 0xDA, 0x00, 0x03, 0x00]
+        let scan: [UInt8] = [0x11, 0x22, 0xFF, 0xFF, 0xD0, 0x33, 0xFF, 0x00, 0x44]
+        let ok: [UInt8] = [0xFF, 0xD8] + sos + scan + [0xFF, 0xD9]
+        XCTAssertTrue(LogoSanitizer.hasEndMarker(Data(ok), mediaType: "image/jpeg"))
+        // Truncated after the padded restart: still refused.
+        XCTAssertFalse(LogoSanitizer.hasEndMarker(Data([0xFF, 0xD8] + sos + scan), mediaType: "image/jpeg"))
+        // Fill bytes before the final EOI are fine too.
+        XCTAssertTrue(LogoSanitizer.hasEndMarker(Data([0xFF, 0xD8] + sos + scan + [0xFF, 0xFF, 0xD9]), mediaType: "image/jpeg"))
+    }
+
     func testDeclaredTypeMustMatchContent() {
         let png = encode(makeImage(width: 4, height: 4), uti: "public.png")
         if case .failure(.undecodable) = LogoSanitizer.sanitize(uri("image/jpeg", png)) {} else {
@@ -261,3 +274,29 @@ final class LogoSanitizerImageTests: XCTestCase {
     }
 }
 #endif
+
+final class LogoCacheTests: XCTestCase {
+    func testResultIsCachedByUriIncludingRejections() async {
+        let cache = LogoCache(capacity: 8)
+        let good = "https://example.org/a.png"
+        let bad = "javascript:alert(1)"
+        let first = await cache.resolve(good)
+        let again = await cache.resolve(good)
+        XCTAssertEqual(first, again)
+        XCTAssertNotNil(first)
+        let r1 = await cache.resolve(bad)
+        let r2 = await cache.resolve(bad)
+        XCTAssertNil(r1)
+        XCTAssertNil(r2)
+        let count = await cache.sanitizeCount
+        XCTAssertEqual(count, 2, "each distinct URI sanitized once")
+    }
+
+    func testCacheIsBounded() async {
+        let cache = LogoCache(capacity: 2)
+        for i in 0..<5 { _ = await cache.resolve("https://example.org/\(i).png") }
+        _ = await cache.resolve("https://example.org/0.png") // evicted, sanitized again
+        let count = await cache.sanitizeCount
+        XCTAssertEqual(count, 6)
+    }
+}

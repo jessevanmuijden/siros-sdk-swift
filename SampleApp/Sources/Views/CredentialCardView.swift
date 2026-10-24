@@ -251,67 +251,8 @@ struct CredentialCardView: View {
         return .expired
     }
 
-    @ViewBuilder
     private func issuerBadge(meta: CredentialMetadata?, issuerName: String?, fgColor: Color) -> some View {
-        // Every logo goes through the SDK's LogoSanitizer: data: logos are
-        // decoded and re-encoded (SVG and anything dubious refused), only
-        // https URLs are fetched. Anything refused or failing to load falls
-        // back to the issuer initial.
-        let logo = (meta?.logo?.uri).flatMap { uri -> DisplayLogo? in
-            if case .success(let l) = LogoSanitizer.sanitize(uri) { return l }
-            return nil
-        }
-        let initialBadge = issuerInitialBadge(issuerName: issuerName, fgColor: fgColor)
-        switch logo {
-        case .image(let data):
-            if let image = Self.platformImage(from: data) {
-                image.resizable().scaledToFill()
-                    .frame(width: 32, height: 32)
-                    .clipShape(Circle())
-            } else {
-                initialBadge
-            }
-        case .remote(let url):
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .empty, .failure:
-                    // Placeholder while loading, and the fallback on failure.
-                    initialBadge
-                @unknown default:
-                    initialBadge
-                }
-            }
-            .frame(width: 32, height: 32)
-            .clipShape(Circle())
-        case nil:
-            initialBadge
-        }
-    }
-
-    @ViewBuilder
-    private func issuerInitialBadge(issuerName: String?, fgColor: Color) -> some View {
-        if let initial = issuerName?.prefix(1).uppercased() {
-            Circle()
-                .fill(fgColor.opacity(0.15))
-                .frame(width: 32, height: 32)
-                .overlay(
-                    Text(initial)
-                        .font(.caption.bold())
-                        .foregroundStyle(fgColor)
-                )
-        }
-    }
-
-    private static func platformImage(from data: Data) -> Image? {
-        #if canImport(UIKit)
-        return UIImage(data: data).map { Image(uiImage: $0) }
-        #elseif canImport(AppKit)
-        return NSImage(data: data).map { Image(nsImage: $0) }
-        #else
-        return nil
-        #endif
+        IssuerLogoBadge(logoUri: meta?.logo?.uri, issuerName: issuerName, fgColor: fgColor)
     }
 
     private func loadSvg(preferDark: Bool) async {
@@ -495,5 +436,75 @@ extension Color {
         let g = Double((value >> 8) & 0xFF) / 255.0
         let b = Double(value & 0xFF) / 255.0
         self.init(red: r, green: g, blue: b)
+    }
+}
+
+/// Issuer badge: the sanitized logo when there is one, otherwise the issuer
+/// initial. Sanitizing runs in `LogoCache` (off the main actor, cached by
+/// URI), never in `body`; until it finishes, and whenever the logo is
+/// rejected or fails to load, the initial is shown.
+private struct IssuerLogoBadge: View {
+    let logoUri: String?
+    let issuerName: String?
+    let fgColor: Color
+    @State private var logo: DisplayLogo?
+
+    var body: some View {
+        Group {
+            switch logo {
+            case .image(let data):
+                if let image = Self.platformImage(from: data) {
+                    image.resizable().scaledToFill()
+                        .frame(width: 32, height: 32)
+                        .clipShape(Circle())
+                } else {
+                    initialBadge
+                }
+            case .remote(let url):
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFill()
+                    case .empty, .failure:
+                        initialBadge
+                    @unknown default:
+                        initialBadge
+                    }
+                }
+                .frame(width: 32, height: 32)
+                .clipShape(Circle())
+            case nil:
+                initialBadge
+            }
+        }
+        .task(id: logoUri) {
+            guard let logoUri else { logo = nil; return }
+            logo = nil
+            logo = await LogoCache.shared.resolve(logoUri)
+        }
+    }
+
+    @ViewBuilder
+    private var initialBadge: some View {
+        if let initial = issuerName?.prefix(1).uppercased() {
+            Circle()
+                .fill(fgColor.opacity(0.15))
+                .frame(width: 32, height: 32)
+                .overlay(
+                    Text(initial)
+                        .font(.caption.bold())
+                        .foregroundStyle(fgColor)
+                )
+        }
+    }
+
+    private static func platformImage(from data: Data) -> Image? {
+        #if canImport(UIKit)
+        return UIImage(data: data).map { Image(uiImage: $0) }
+        #elseif canImport(AppKit)
+        return NSImage(data: data).map { Image(nsImage: $0) }
+        #else
+        return nil
+        #endif
     }
 }
