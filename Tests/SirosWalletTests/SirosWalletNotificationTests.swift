@@ -40,7 +40,9 @@ final class SirosWalletNotificationTests: XCTestCase {
         var obj: [String: Any] = ["type": MessageTypes.flowComplete, "flow_id": flowId]
         if let credentials { obj["credentials"] = credentials }
         let data = try! JSONSerialization.data(withJSONObject: obj)
-        return try! JSONDecoder().decode(FlowCompleteMessage.self, from: data)
+        var msg = try! JSONDecoder().decode(FlowCompleteMessage.self, from: data)
+        msg.startTag = 0 // the wallet's initial issuance epoch: this completion's flow started under it
+        return msg
     }
 
     private func makeWallet(store: InMemoryCredentialStore) -> SirosWallet {

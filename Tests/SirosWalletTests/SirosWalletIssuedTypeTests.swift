@@ -357,7 +357,8 @@ final class SirosWalletIssuedTypeTests: XCTestCase {
             "type": "flow_complete", "flow_id": "flow-1",
             "credentials": [["format": "dc+sd-jwt", "credential": raw], ["format": "dc+sd-jwt", "credential": raw]],
         ]
-        let msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: JSONSerialization.data(withJSONObject: object))
+        var msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: JSONSerialization.data(withJSONObject: object))
+        msg.startTag = 0  // the wallet's initial issuance epoch; the trust gate drops an untagged completion
 
         let completion = Task { await w.handleFlowComplete(msg: msg) }
         await parked.waitUntilParked()

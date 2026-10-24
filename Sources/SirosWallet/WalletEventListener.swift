@@ -147,6 +147,19 @@ public protocol WalletEventListener: AnyObject, Sendable {
     /// A transaction-log record (EC TS12 section 5.3) could not be made
     /// durable. The record is still held for the running session.
     func onTransactionLogFailure()
+
+    /// An issuance was refused because the issuer's trust could not be
+    /// established: the wallet backend's evaluation was negative, or an mdoc's
+    /// `issuerAuth` was missing, unverifiable, or not trusted (negative, or the
+    /// trust service was unreachable and no configured local root vouched for
+    /// it). Nothing was stored, no refresh token was captured, a renewal's old
+    /// credentials were kept, and the issuer was sent an OID4VCI
+    /// `credential_failure` notification if it asked for one. Fired just before
+    /// `onFlowError` (which carries user-facing text).
+    /// - Parameters:
+    ///   - issuer: the issuer identifier, when known.
+    ///   - reason: a short non-secret reason for logs.
+    func onIssuerNotTrusted(flowId: String, issuer: String?, reason: String)
 }
 
 /// Default implementations for optional callbacks.
@@ -168,5 +181,8 @@ public extension WalletEventListener {
     func onCredentialNearExpiry(credential: StoredCredential, eligibleRemaining: Int, threshold: Int) {}
     func onTransactionLogFailure() {
         // No-op by default: implementers override to tell the user a record was not stored.
+    }
+    func onIssuerNotTrusted(flowId: String, issuer: String?, reason: String) {
+        // No-op by default: onFlowError follows with user-facing text.
     }
 }
