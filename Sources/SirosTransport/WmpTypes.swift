@@ -366,9 +366,28 @@ public struct FlowErrorParams: Codable, Sendable {
         self.wmp = wmp; self.flowId = flowId; self.code = code; self.message = message; self.data = data
     }
 
+    /// The protocol's numeric flow-error code (go-wmp `ErrFlowError`); the application code travels in
+    /// `data.error_code`.
+    public static let flowErrorCode = -31006
+
     enum CodingKeys: String, CodingKey {
         case wmp, code, message, data
         case flowId = "flow_id"
+    }
+
+    /// `code` is a number on the wire (go-wmp `FlowErrorParams.Code` is an `int`); a string is accepted
+    /// too, and either reads as text here.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        wmp = try c.decodeIfPresent(WmpMeta.self, forKey: .wmp)
+        flowId = try c.decode(String.self, forKey: .flowId)
+        if let number = try? c.decodeIfPresent(Int.self, forKey: .code) {
+            code = String(number)
+        } else {
+            code = try c.decodeIfPresent(String.self, forKey: .code)
+        }
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        data = try c.decodeIfPresent(AnyCodable.self, forKey: .data)
     }
 }
 

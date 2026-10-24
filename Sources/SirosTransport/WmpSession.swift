@@ -21,6 +21,26 @@ public final class WmpSession: @unchecked Sendable {
 
     public var currentState: WmpSessionState { _state }
 
+    /// Called once when the session has ended for good: closed, or every reconnect attempt exhausted. NOT on a
+    /// transient `.failed` (one failed resume that the retry loop goes on from). A hook rather than a state
+    /// observer, so it never takes elements from `stateStream`, which a host may be reading.
+    public var onTerminal: (@Sendable () -> Void)?
+    private var terminalFired = false
+    private let terminalLock = NSLock()
+
+    /// Fires `onTerminal` once per session, whichever of a permanent disconnect or `close()` comes first; a new
+    /// `create()` re-arms it.
+    private func fireTerminalOnce() {
+        terminalLock.lock()
+        let first = !terminalFired
+        terminalFired = true
+        terminalLock.unlock()
+        if first { onTerminal?() }
+    }
+
+    /// Called after a lost connection has been resumed.
+    public var onResumed: (@Sendable () -> Void)?
+
     // Request-response correlation
     private nonisolated(unsafe) var pendingRequests: [String: CheckedContinuation<JsonRpcResponse, Error>] = [:]
     private let pendingLock = NSLock()
@@ -61,6 +81,7 @@ public final class WmpSession: @unchecked Sendable {
         sender: String? = nil,
         capabilitiesOffered: [String: AnyCodable]? = nil
     ) async throws {
+        terminalLock.lock(); terminalFired = false; terminalLock.unlock()
         setState(.connecting)
         try await transport.connect()
         startMessageLoop()
@@ -119,6 +140,7 @@ public final class WmpSession: @unchecked Sendable {
         }
 
         setState(.active)
+        onResumed?()
     }
 
     /// Close the session gracefully.
@@ -132,11 +154,16 @@ public final class WmpSession: @unchecked Sendable {
             )
         )
 
-        try await sendNotification(method: "wmp.session.close", params: params)
+        // The local teardown does not depend on the peer hearing about it: a failed close notification (a failed POST on a
+        // healthy stream, say) still disconnects, ends the session and fires the terminal hook, then reports the failure.
+        var notificationError: Error?
+        do { try await sendNotification(method: "wmp.session.close", params: params) } catch { notificationError = error }
         await transport.disconnect()
         setState(.closed)
+        fireTerminalOnce()
         sessionId = nil
         resumptionToken = nil
+        if let notificationError { throw notificationError }
     }
 
     /// Send a JSON-RPC request and wait for the correlated response.
@@ -254,10 +281,11 @@ public final class WmpSession: @unchecked Sendable {
     }
 
     private func handleDisconnect() async {
-        guard resumptionToken != nil else { return }
-        setState(.resuming)
+        // Without a resumption token there is nothing to retry: the loss is final, and ends the session the same way.
+        let attempts = resumptionToken == nil ? 0 : config.maxReconnectAttempts
+        if attempts > 0 { setState(.resuming) }
 
-        for attempt in 0..<config.maxReconnectAttempts {
+        for attempt in 0..<attempts {
             let backoffMs = min(
                 config.reconnectBaseMs * Int64(1 << (attempt + 1)),
                 config.reconnectMaxMs
@@ -273,6 +301,7 @@ public final class WmpSession: @unchecked Sendable {
         }
 
         setState(.failed)
+        fireTerminalOnce()
         // Cancel all pending requests
         pendingLock.lock()
         let pending = pendingRequests

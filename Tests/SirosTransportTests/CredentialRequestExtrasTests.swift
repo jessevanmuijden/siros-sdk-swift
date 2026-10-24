@@ -64,24 +64,24 @@ final class CredentialRequestExtrasTests: XCTestCase {
         return try XCTUnwrap(try JSONDecoder().decode(AnyCodable.self, from: data).objectValue)
     }
 
-    /// Runs one sign sub-flow over WMP and hands back the `sign_response`
-    /// notification's params.
+    /// Runs one sign sub-flow over WMP and hands back the child's
+    /// `wmp.flow.complete` result.
     private func runWmpSignFlow(returning result: SignSubFlowResult) async throws -> [String: AnyCodable] {
         let profile = OpenID4xProfile(config: OpenID4xConfig(onSignRequest: { _, _ in result }))
         let ctx = FakePeerContext()
         profile.initialize(ctx: ctx)
 
-        await profile.handleProgress(params: FlowProgressParams(
-            wmp: WmpMeta(), flowId: "f1", step: "sign_request", payload: signPayload()
+        var members = signPayload().objectValue ?? [:]
+        members["parent_flow_id"] = .string("f1")
+        await profile.runChildFlow(params: FlowStartParams(
+            wmp: WmpMeta(), flowId: "c1", flowType: "sign", params: .object_(members)
         ))
 
         let notification = try XCTUnwrap(
-            ctx.notifications.first { $0.method == WmpMethods.flowAction },
-            "no wmp.flow.action notification was sent"
+            ctx.notifications.first { $0.method == WmpMethods.flowComplete },
+            "no wmp.flow.complete notification was sent"
         )
-        let params = try XCTUnwrap(notification.params)
-        XCTAssertEqual(params["action"], .string("sign_response"))
-        return params
+        return try XCTUnwrap(notification.params?["result"]?.objectValue)
     }
 
     // MARK: - Tests
