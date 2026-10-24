@@ -52,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
+- **The `nymauth-*` proving seam: `NymAuthNativeProver`, its registry and typed errors,
+  with a refusing default.** One narrow async call (verified circuit bytes and the
+  already-assembled inputs in, proof and pseudonym out; the circuit authors' ABI,
+  mirrored from the Kotlin SDK). No native binding is shipped, so
+  `NymAuthNativeProverRegistry` hands out `RefusingNymAuthNativeProver`, which refuses
+  every request with `NymAuthNativeError(.noNativeProver)`; nothing is substituted.
+  Binding failures map to coarse kinds (and, for a refusal, a coarse reason) and carry
+  no message; the request (it holds the delivered seed) and response redact their
+  description, debug description and mirror. The request mirrors the Kotlin ABI: `circuitId` is the catalog circuit id the presentation states as `system_id`, `artifactHash` the catalog hash of the verified circuit, `time` the PROVER-supplied `proof_time` (rulebook v0.4, exactly 20 bytes), `verifierInput` the SHA-256 of the PREFIXED verifier id. Not wired into the wallet.
 - **`PresentationConsentCoordinator`: the ready-made `PresentationConsentHandler` for a host app.** It
   renders a request into the SDK's approved wording (`PresentationConsentText`) and hands the app one
   question at a time (`onChange`, `current`, `answer(true)` / `decline()`), built on `ConsentPrompt`: a single
