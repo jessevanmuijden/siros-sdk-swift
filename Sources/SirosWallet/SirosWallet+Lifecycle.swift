@@ -50,8 +50,11 @@ extension SirosWallet {
 
     /// `resetIssuanceGuards()` for a caller that already holds `lock` (the
     /// start's failure path and `cancelCurrentFlow` reset the guards and the
-    /// state in one critical section).
+    /// state in one critical section). Also bumps `issuanceEpoch`: whatever
+    /// completion was already underway for the state being cleared no longer owns
+    /// it (see `issuanceTrustGateHandled`).
     func resetIssuanceGuardsLocked() {
+        issuanceEpoch &+= 1
         activeOffer = nil
         activeVctm = nil
         activeVctmDocument = nil
@@ -204,30 +207,22 @@ extension SirosWallet {
 
         lock.lock(); pendingAuthorizations.removeValue(forKey: flowId); lock.unlock()
 
+        // The resume continues THIS flow's issuance: refuse it unless that issuance
+        // can be identified and still owns the wallet (not cancelled, not superseded).
+        guard let startEpoch = pending.startEpoch else {
+            listener?.onFlowError(
+                flowId: flowId,
+                errorMessage: "Failed to resume issuance: the authorization cannot be tied to the issuance that started it",
+                redirectUri: nil
+            )
+            return
+        }
+        guard startStillOwned(startEpoch) else { return }
+
         Task {
             do {
-                guard let tokens else {
-                    throw SirosError.wallet(message: "Not connected")
-                }
-                let token = try await tokens.ensureBackendToken()
-                engine.forceReconnect(appToken: token.raw)
-                try await engine.awaitConnected()
-                // Client attestation for the resumed flow: Execute() sets up
-                // h.attestationProvider identically whether msg.AuthCode is
-                // set or not (it runs before that branch), so the engine
-                // sends its `request_attestation` sign request on resume
-                // exactly as on a fresh start - and the token request (which
-                // only ever happens via this resume path for redirect-based
-                // authorization_code issuers; a real geneva2026.mdoc.online
-                // run once showed "No OAuth Client Attestations were
-                // provided" when resume skipped it) gets the headers from
-                // `handleSignRequest`'s answer. Nothing to pre-resolve here.
-                engine.resumeIssuance(
-                    offer: pending.offer,
-                    credentialOfferUri: pending.credentialOfferUri,
-                    redirectUri: pending.redirectUri,
-                    authCode: code,
-                    codeVerifier: pending.codeVerifier
+                try await resumeAuthorization(
+                    engine: engine, pending: pending, code: code, startEpoch: startEpoch, tokens: tokens
                 )
             } catch {
                 lock.lock(); let listener = eventListener; lock.unlock()
@@ -238,6 +233,64 @@ extension SirosWallet {
                 )
             }
         }
+    }
+
+    /// The asynchronous half of `completeAuthorization`: reconnect the engine, then
+    /// resume the originating issuance with a fresh `flow_start`.
+    ///
+    /// Its tag and its ownership check use `startEpoch`, the epoch the ORIGINATING
+    /// issuance started under (`PendingAuthorization.startEpoch`), never a fresh
+    /// sample: the token and connection awaits can outlast a cancel and a newer start,
+    /// and then this resume belongs to nobody and is not sent.
+    func resumeAuthorization(
+        engine: WalletEngineSession,
+        pending: PendingAuthorization,
+        code: String,
+        startEpoch: Int,
+        tokens: AuthTokens?
+    ) async throws {
+        let token: String
+        if let tokenHook = authorizationResumeTokenHook {
+            token = try await tokenHook()
+        } else {
+            guard let tokens else {
+                throw SirosError.wallet(message: "Not connected")
+            }
+            token = try await tokens.ensureBackendToken().raw
+        }
+        // BEFORE the reconnect: forceReconnect closes whatever socket is current, which
+        // after a cancel and a newer start is the NEWER issuance's. A resume that no
+        // longer owns the wallet must not touch it.
+        guard startStillOwned(startEpoch) else { return }
+        if let connect = authorizationResumeConnectHook {
+            try await connect(engine)
+        } else {
+            engine.forceReconnect(appToken: token)
+            try await engine.awaitConnected()
+        }
+        // Client attestation for the resumed flow: Execute() sets up
+        // h.attestationProvider identically whether msg.AuthCode is
+        // set or not (it runs before that branch), so the engine
+        // sends its `request_attestation` sign request on resume
+        // exactly as on a fresh start - and the token request (which
+        // only ever happens via this resume path for redirect-based
+        // authorization_code issuers; a real geneva2026.mdoc.online
+        // run once showed "No OAuth Client Attestations were
+        // provided" when resume skipped it) gets the headers from
+        // `handleSignRequest`'s answer. Nothing to pre-resolve here.
+        guard startStillOwned(startEpoch) else { return }
+        if let send = authorizationResumeSendHook {
+            send(startEpoch)
+            return
+        }
+        engine.resumeIssuance(
+            offer: pending.offer,
+            credentialOfferUri: pending.credentialOfferUri,
+            redirectUri: pending.redirectUri,
+            authCode: code,
+            codeVerifier: pending.codeVerifier,
+            startTag: startEpoch
+        )
     }
 
     /// Release all resources. Instance must not be reused after this.
