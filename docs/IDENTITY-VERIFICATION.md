@@ -51,12 +51,13 @@ Checked against facetec-api v0.16.0.
 | The liveness proof is **single-use and expires** (15 minutes by default). A refused or abandoned session cannot be resumed. | The provider never reuses a relay. After a refusal, the app starts a new scan. |
 | **Every request of a session must reach the same facetec-api instance.** | Deployment concern: sticky routing, or one instance. |
 | A **chip is required for every document** (`nfcAuthenticationStatusEnumInt` 4), checked by a PDP. | With `requireNfc` (default) the provider refuses to start on a device that cannot read NFC. Refusals come back as `nfc_*` / `chip_untrusted`. |
+| The **face must match the photo stored on the chip** (FaceTec's `matchLevelNFCToFaceMap`), not only the printed photo (sirosfoundation/facetec-api#77). | Nothing to do on the device: facetec-api decides. A refusal comes back as `chip_photo_mismatch`. |
 
 ## Error codes
 
 facetec-api reports a refusal in the process-request response as
 `credentialIssueErrorCode` (message in `credentialIssueError`).
-`FaceTecIDVProvider` maps it as below. siros-sdk-kotlin maps the same way, with the same dedicated errors (`IDVException.ChipUntrusted`, `DocumentExpired`, `SessionExpired`) and `errorCode`s.
+`FaceTecIDVProvider` maps it as below. siros-sdk-kotlin maps the same way, with the same dedicated errors (`IDVException.ChipUntrusted`, `ChipPhotoMismatch`, `DocumentExpired`, `SessionExpired`) and `errorCode`s.
 
 The legacy `/v1` endpoints (`RemoteIDVClient`) answer 422 with `error_code`
 instead, and `RemoteIDVClient` maps it the same way (`IDVError(refusalCode:message:)`),
@@ -69,6 +70,7 @@ with the backend's `error` text as the message. A 422 body without a code stays 
 | `match_failed`, `policy_rejected`, `document_unreadable` | `verificationFailed` | `idv_verification_failed` |
 | `nfc_skipped`, `nfc_not_requested`, `nfc_device_not_capable`, `nfc_chip_read_failed`, `nfc_not_authenticated` | `documentChipNotVerified(reason:)` | `idv_<code>` |
 | `chip_untrusted` | `chipUntrusted` | `idv_chip_untrusted` |
+| `chip_photo_mismatch` | `chipPhotoMismatch` | `idv_chip_photo_mismatch` |
 | `document_expired` | `documentExpired` | `idv_document_expired` |
 | `session_expired` | `sessionExpired` | `idv_session_expired` |
 | `issuance_failed`, `internal_error`, any future code | `providerError(code:)` | `idv_provider_<code>` |

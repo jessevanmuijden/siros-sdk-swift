@@ -105,7 +105,8 @@ public final class RemoteIDVClient: @unchecked Sendable {
     /// code becomes the error for that code, with the backend's message
     /// (see ``IDVError/init(refusalCode:message:)``: `nfc_*` is
     /// ``IDVError/documentChipNotVerified(reason:message:)``, `chip_untrusted`,
-    /// `document_expired` and `session_expired` have their own errors, and so on).
+    /// `chip_photo_mismatch`, `document_expired` and `session_expired` have their
+    /// own errors, and so on).
     /// A body without a code goes to the step's own `fallback`, with the raw body.
     static func idvError(
         for422ErrorCode errorCode: String?,
