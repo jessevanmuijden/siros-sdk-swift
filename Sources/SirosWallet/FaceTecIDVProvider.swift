@@ -66,9 +66,10 @@ import FaceTecSDK
 ///   because the document's chip was not read and authenticated (`nfc_*`).
 /// - ``IDVError/livenessFailed(message:)``, ``IDVError/verificationFailed(message:)``:
 ///   liveness, face match, policy or unreadable-document refusals.
-/// - ``IDVError/chipUntrusted(message:)``, ``IDVError/documentExpired(message:)``,
-///   ``IDVError/sessionExpired(message:)``: facetec-api's `chip_untrusted`,
-///   `document_expired` and `session_expired`.
+/// - ``IDVError/chipUntrusted(message:)``, ``IDVError/chipPhotoMismatch(message:)``,
+///   ``IDVError/documentExpired(message:)``, ``IDVError/sessionExpired(message:)``:
+///   facetec-api's `chip_untrusted`, `chip_photo_mismatch`, `document_expired`
+///   and `session_expired`.
 /// - ``IDVError/providerError(code:message:)``: any other refusal code
 ///   (`issuance_failed`, `internal_error`, ...) or FaceTec status, with the
 ///   code kept.

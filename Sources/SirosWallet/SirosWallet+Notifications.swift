@@ -307,6 +307,7 @@ extension SirosWallet {
         attestedKeyIds: [String]?,
         batchId: Int64
     ) async -> (stored: Bool, failureReason: String?) {
+        lock.lock(); let epoch = storeEpoch; lock.unlock()
         // A container this build must not rewrite is read-only. Storing would be
         // silently discarded (`CredentialStore.save` does not throw), and the
         // issuer would then be told the credential was accepted.
@@ -363,7 +364,7 @@ extension SirosWallet {
                 batchId: batchId,
                 instanceId: index
             )
-            await credentialStore.save(stored)
+            guard await saveUnlessWiped(stored, epoch: epoch) else { return (false, Self.wipedDuringIssuance) }
             notifyCredentialAccepted(cred, flowId: flowId, stored: stored)
             return (true, nil)
         }
@@ -418,13 +419,26 @@ extension SirosWallet {
             batchId: batchId,
             instanceId: index
         )
-        await credentialStore.save(stored)
+        guard await saveUnlessWiped(stored, epoch: epoch) else { return (false, Self.wipedDuringIssuance) }
 
         // OID4VCI §10: confirm acceptance to the issuer (via the backend)
         // while the issuance access token is still valid. The backend
         // forwards using ephemeral flow state; nothing is stored there.
         notifyCredentialAccepted(cred, flowId: flowId, stored: stored)
         return (true, nil)
+    }
+
+    static let wipedDuringIssuance = "The account was deleted while the credential was being issued"
+
+    /// Save `stored` unless a local wipe began after `epoch` was read. See
+    /// `credentialWriteGate`.
+    private func saveUnlessWiped(_ stored: StoredCredential, epoch: UInt64) async -> Bool {
+        await credentialWriteGate.withLock { [self] in
+            lock.lock(); let current = storeEpoch; lock.unlock()
+            guard current == epoch else { return false }
+            await credentialStore.save(stored)
+            return true
+        }
     }
 
     private func notifyCredentialAccepted(_ cred: CredentialResult, flowId: String, stored: StoredCredential) {

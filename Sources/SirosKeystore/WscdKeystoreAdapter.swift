@@ -177,6 +177,26 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         credentialsKeystore.lock()
     }
 
+    /// Plugin whose keys live on an external authenticator. They cannot be
+    /// erased by this SDK and are skipped by ``eraseKeyMaterial()``.
+    private static let externalAuthenticatorPluginId = "fido2"
+
+    /// Deletes every key the retained `signer` holds, except those on an
+    /// external authenticator. Continues past a failing key and throws one
+    /// error naming each, so the caller can report that key material remains.
+    public func eraseKeyMaterial() async throws {
+        let keys = try await signer.listKeys()
+        var failures: [String] = []
+        for key in keys where key.pluginId != Self.externalAuthenticatorPluginId {
+            do { try await signer.deleteKey(keyId: key.keyId) } catch {
+                failures.append("\(key.keyId): \(error.localizedDescription)")
+            }
+        }
+        if !failures.isEmpty {
+            throw KeystoreError.invalidParameter("signing keys not erased: " + failures.joined(separator: "; "))
+        }
+    }
+
     /// The persisted (privatedata-synced) copy of every hardware-backed WSCD
     /// plugin's key metadata - see `JweKeystore.exportWscdCredentials`'s doc
     /// comment. Read this after `unlock` to restore a previously-enrolled

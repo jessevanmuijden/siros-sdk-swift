@@ -233,6 +233,7 @@
       "nfc_chip_read_failed": "The chip in your document could not be read. Please try again and hold the document still against the top of the phone.",
       "nfc_not_authenticated": "The chip in your document could not be verified, so no credential was issued.",
       "chip_untrusted": "The chip in your document could not be confirmed as issued by a recognised authority, so no credential was issued.",
+      "chip_photo_mismatch": "Your face did not match the photo stored in your document's chip, so no credential was issued. Please try again, or use another identity document.",
       "document_expired": "This document has expired, so no credential was issued. Please use a valid identity document.",
       "session_expired": "The verification took too long or was already used. Please start again.",
       "issuance_failed": "Your identity was verified, but the credential could not be issued. Please try again later.",

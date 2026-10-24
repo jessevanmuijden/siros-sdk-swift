@@ -176,6 +176,43 @@ final class BackendApiClientTests: XCTestCase {
         }
     }
 
+    /// The backend answers a non-empty passkey list or NO_PASSKEY. A missing,
+    /// empty or partly malformed list must not turn into a discoverable prompt.
+    func testDeleteAccountBeginRejectsAMissingEmptyOrMalformedAllowList() async throws {
+        let head = #"{"challengeId":"c","publicKey":{"challenge":{"$b64u":"AQID"},"rpId":"x""#
+        for tail in [
+            "}}",
+            #","allowCredentials":[]}}"#,
+            #","allowCredentials":"nope"}}"#,
+            #","allowCredentials":[{"type":"public-key"}]}}"#,
+            #","allowCredentials":[{"type":"public-key","id":{"$b64u":"cGstMQ"}},{"type":"public-key"}]}}"#,
+        ] {
+            let server = MockHttpServer()
+            server.enqueue(head + tail)
+            do {
+                _ = try await deletingClient(server).deleteAccountBegin()
+                XCTFail("must not accept \(tail)")
+            } catch SirosError.backendApi(let code, let message, _) {
+                XCTAssertEqual(code, 0)
+                XCTAssertTrue(message.contains("allowCredentials"), message)
+            }
+        }
+    }
+
+    /// Only STEP_UP_EXPIRED is the step-up expiry; another 410 is not.
+    func testDeleteAccountOnlyReadsStepUpExpiredAs410Expiry() async throws {
+        for body in [#"{"error":"GONE"}"#, ""] {
+            let server = MockHttpServer()
+            server.enqueueFailure(code: 410, body: body)
+            do {
+                let response = try await delete(server)
+                XCTFail("a 410 without STEP_UP_EXPIRED must throw, got \(response)")
+            } catch SirosError.backendApi(let code, _, _) {
+                XCTAssertEqual(code, 410)
+            }
+        }
+    }
+
     func testDeleteAccountSendsTheStepUpAssertionAndConfirmationAsJson() async throws {
         let server = MockHttpServer()
         server.enqueue(#"{"result":"DELETED"}"#)

@@ -110,6 +110,18 @@ public final class ASAuthorizationAuthProvider: NSObject, AuthProvider, WscdAuto
         }
     }
 
+    /// The WebAuthn `userVerification` string as Apple's preference type;
+    /// anything unrecognised is `.preferred`, the WebAuthn default.
+    static func userVerificationPreference(
+        for value: String
+    ) -> ASAuthorizationPublicKeyCredentialUserVerificationPreference {
+        switch value {
+        case "required": return .required
+        case "discouraged": return .discouraged
+        default: return .preferred
+        }
+    }
+
     public func authenticate(options: AuthenticateOptions) async throws -> AuthenticateResult {
         setLastRpId(options.rpId)
 
@@ -126,6 +138,13 @@ public final class ASAuthorizationAuthProvider: NSObject, AuthProvider, WscdAuto
         let securityKeyRequest = securityKeyProvider.createCredentialAssertionRequest(
             challenge: options.challenge
         )
+
+        // Without this Apple's default (.preferred) applies, and a PIN-less
+        // security key then yields a UP-only assertion that a relying party
+        // requiring verification (the account-deletion step-up) rejects.
+        let verification = Self.userVerificationPreference(for: options.userVerification)
+        platformRequest.userVerificationPreference = verification
+        securityKeyRequest.userVerificationPreference = verification
 
         if let allowCredentials = options.allowCredentials {
             platformRequest.allowedCredentials = allowCredentials.map {

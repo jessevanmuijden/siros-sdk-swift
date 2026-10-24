@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+import SirosCredentials
 #if canImport(Security)
 import Security
 #endif
@@ -94,7 +95,14 @@ public final class AccountRegistry: @unchecked Sendable {
     /// Remove all cached accounts (factory reset).
     public func clear() {
         lock.lock(); defer { lock.unlock() }
-        deleteAll()
+        try? storage.eraseAll()
+    }
+
+    /// ``clear()`` that reports a storage failure, so an account wipe can tell
+    /// the host that cached accounts may remain.
+    public func eraseAll() throws {
+        lock.lock(); defer { lock.unlock() }
+        try storage.eraseAll()
     }
 
     // MARK: - Active Account
@@ -149,7 +157,6 @@ public final class AccountRegistry: @unchecked Sendable {
     }
 
     private func deleteKey(_ key: String) { storage.deleteKey(key) }
-    private func deleteAll() { storage.deleteAll() }
 
     private enum Keys {
         static let accounts = "siros_cached_accounts"
@@ -164,6 +171,12 @@ protocol AccountRegistryStorage: Sendable {
     func writeData(_ key: String, _ data: Data)
     func deleteKey(_ key: String)
     func deleteAll()
+    /// ``deleteAll()`` that surfaces a failure; defaults to it.
+    func eraseAll() throws
+}
+
+extension AccountRegistryStorage {
+    func eraseAll() throws { deleteAll() }
 }
 
 final class InMemoryAccountRegistryStorage: AccountRegistryStorage, @unchecked Sendable {
@@ -174,6 +187,13 @@ final class InMemoryAccountRegistryStorage: AccountRegistryStorage, @unchecked S
     func writeData(_ key: String, _ data: Data) { lock.withLock { items[key] = data } }
     func deleteKey(_ key: String) { lock.withLock { _ = items.removeValue(forKey: key) } }
     func deleteAll() { lock.withLock { items.removeAll() } }
+
+    /// Test seam: make ``eraseAll()`` fail the way a Keychain store can.
+    var eraseFailure: Error?
+    func eraseAll() throws {
+        if let eraseFailure { throw eraseFailure }
+        deleteAll()
+    }
 }
 
 #if canImport(Security)
@@ -218,12 +238,17 @@ final class KeychainAccountRegistryStorage: AccountRegistryStorage {
         SecItemDelete(query as CFDictionary)
     }
 
-    func deleteAll() {
+    func deleteAll() { try? eraseAll() }
+
+    func eraseAll() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SirosError.keystore(message: "Keychain account registry could not be erased (status \(status))")
+        }
     }
 }
 #else

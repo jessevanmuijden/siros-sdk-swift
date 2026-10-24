@@ -298,6 +298,64 @@ final class SirosWalletIssuedTypeTests: XCTestCase {
         )
     }
 
+    /// An issuance parked on its metadata fetch while the account is deleted
+    /// must not put the credential back once the wipe has finished.
+    func testAnIssuanceInFlightDuringAWipeDoesNotRestoreItsCredential() async {
+        let store = InMemoryCredentialStore()
+        let w = SirosWallet(
+            config: WalletConfig(backendUrl: "https://example.invalid", credentialStore: store),
+            authProvider: StubAuthProvider(), keystore: StubKeystoreManager(), accountRegistry: .inMemory()
+        )!
+        let issuers = displayDocument("urn:eudi:pid:1", displayName: "PID")
+        let staleDocument = displayDocument("urn:eudi:pid:1", displayName: "PID (old)")
+        let parked = FetchPause()
+        w.vctmFetcher = VctmFetcher(httpGet: { @Sendable _ in
+            await parked.pause()
+            return issuers.raw
+        })
+        let raw = sdJwt(vct: "urn:eudi:pid:1", integrity: digest(of: issuers.raw))
+
+        let issuance = Task {
+            await w.storeIssuedCredential(
+                credentialResult(format: "dc+sd-jwt", credential: raw),
+                index: 0, flowId: "flow-1", offer: offer(vct: "urn:eudi:pid:1"),
+                vctm: staleDocument.vctm, vctmDocument: staleDocument, attestedKeyIds: nil, batchId: 1
+            )
+        }
+        await parked.waitUntilParked()
+        _ = await w.wipeLocalState()
+        await parked.resume()
+        let outcome = await issuance.value
+
+        XCTAssertFalse(outcome.stored, "a wiped account accepts nothing")
+        XCTAssertEqual(outcome.failureReason, SirosWallet.wipedDuringIssuance)
+        let saved = await store.getAll()
+        XCTAssertTrue(saved.isEmpty, "the credential must not reappear after the wipe")
+    }
+
+    private actor FetchPause {
+        private var parkedContinuation: CheckedContinuation<Void, Never>?
+        private var isParked = false
+        private var released = false
+        private var parkedWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func pause() async {
+            if released { return }
+            isParked = true
+            let waiters = parkedWaiters; parkedWaiters = []
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { parkedContinuation = $0 }
+        }
+        func waitUntilParked() async {
+            if isParked { return }
+            await withCheckedContinuation { parkedWaiters.append($0) }
+        }
+        func resume() {
+            released = true
+            parkedContinuation?.resume(); parkedContinuation = nil
+        }
+    }
+
     /// A container this build must not rewrite is read-only, so an issued credential is
     /// not "accepted": `CredentialStore.save` does not throw, and without this check the
     /// credential would be dropped and the issuer told it was accepted.
