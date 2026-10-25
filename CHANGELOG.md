@@ -196,6 +196,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Added
+- **`LogoSanitizer` / `DisplayLogo`: safe rendering of credential and issuer
+  display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
+  returns `.image(pngBytes)`, `.remote(httpsURL)` or a typed `LogoRejection`
+  (fail closed). `data:` logos must be `data:<type>;base64,...` with type
+  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 2048 px per side; they
+  are decoded with ImageIO, checked to be the declared type, and re-encoded as a
+  fresh PNG, so metadata and trailing/polyglot payloads are dropped. **SVG is
+  refused** (`svgNotSupported`; script, external references, no safe renderer in
+  this SDK); it is tracked in a separate pull request. Only `https:` remote logos
+  pass (`http:` and other schemes are refused). Without ImageIO (Linux) every
+  `data:` logo is refused. Same policy as siros-sdk-kotlin, except that Kotlin
+  also renders SVG.
+  `LogoCache` fetches every `https` logo once (`LogoSanitizer.fetchAndSanitize`),
+  decides raster versus refused-SVG from the response `Content-Type` (untyped bytes
+  are sniffed), caches by URI off the main actor, and shares one download between
+  concurrent callers (the last waiter leaving cancels it). Fetches validate the URL
+  and every redirect target (https, no userinfo), stop reading at the 256 KiB cap,
+  have one wall-clock budget (default 15 s, clamped to 120 s, invalid values
+  refused), report `timedOut`/`networkFailure` for transport problems, and never
+  cache transient failures or cancellations. The sample app shows the issuer initial
+  until the logo is ready or when it fails. See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
   assertion (step-up, valid 2 minutes, single use) and the typed confirmation

@@ -251,26 +251,8 @@ struct CredentialCardView: View {
         return .expired
     }
 
-    @ViewBuilder
     private func issuerBadge(meta: CredentialMetadata?, issuerName: String?, fgColor: Color) -> some View {
-        if let logo = (meta?.logo?.uri).flatMap({ URL(string: $0) }), ["http", "https"].contains(logo.scheme?.lowercased()) {
-            AsyncImage(url: logo) { image in
-                image.resizable().scaledToFill()
-            } placeholder: {
-                Circle().fill(fgColor.opacity(0.15))
-            }
-            .frame(width: 32, height: 32)
-            .clipShape(Circle())
-        } else if let initial = issuerName?.prefix(1).uppercased() {
-            Circle()
-                .fill(fgColor.opacity(0.15))
-                .frame(width: 32, height: 32)
-                .overlay(
-                    Text(initial)
-                        .font(.caption.bold())
-                        .foregroundStyle(fgColor)
-                )
-        }
+        IssuerLogoBadge(logoUri: meta?.logo?.uri, issuerName: issuerName, fgColor: fgColor)
     }
 
     private func loadSvg(preferDark: Bool) async {
@@ -454,5 +436,70 @@ extension Color {
         let g = Double((value >> 8) & 0xFF) / 255.0
         let b = Double(value & 0xFF) / 255.0
         self.init(red: r, green: g, blue: b)
+    }
+}
+
+/// Issuer badge: the sanitized logo when there is one, otherwise the issuer
+/// initial. Sanitizing runs in `LogoCache` (off the main actor, cached by
+/// URI), never in `body`; until it finishes, and whenever the logo is
+/// rejected or fails to load, the initial is shown.
+private struct IssuerLogoBadge: View {
+    let logoUri: String?
+    let issuerName: String?
+    let fgColor: Color
+    @State private var logo: DisplayLogo?
+
+    var body: some View {
+        Group {
+            switch logo {
+            case .image(let data):
+                if let image = Self.platformImage(from: data) {
+                    image.resizable().scaledToFill()
+                        .frame(width: 32, height: 32)
+                        .clipShape(Circle())
+                } else {
+                    initialBadge
+                }
+            case .remote:
+                // LogoCache fetches and sanitizes every https logo, so it never hands
+                // out a bare URL; if one ever appears, it is not drawn unchecked.
+                initialBadge
+            case nil:
+                initialBadge
+            }
+        }
+        .task(id: logoUri) {
+            guard let logoUri else { logo = nil; return }
+            logo = nil
+            let resolved = await LogoCache.shared.resolve(logoUri)
+            // Actor calls do not abort on cancellation: a superseded task
+            // must not overwrite what the newer one set.
+            guard !Task.isCancelled else { return }
+            logo = resolved
+        }
+    }
+
+    @ViewBuilder
+    private var initialBadge: some View {
+        if let initial = issuerName?.prefix(1).uppercased() {
+            Circle()
+                .fill(fgColor.opacity(0.15))
+                .frame(width: 32, height: 32)
+                .overlay(
+                    Text(initial)
+                        .font(.caption.bold())
+                        .foregroundStyle(fgColor)
+                )
+        }
+    }
+
+    private static func platformImage(from data: Data) -> Image? {
+        #if canImport(UIKit)
+        return UIImage(data: data).map { Image(uiImage: $0) }
+        #elseif canImport(AppKit)
+        return NSImage(data: data).map { Image(nsImage: $0) }
+        #else
+        return nil
+        #endif
     }
 }
