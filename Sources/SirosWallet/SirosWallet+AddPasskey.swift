@@ -128,17 +128,9 @@ extension SirosWallet {
         case let .preparationFailed(error):
             rollbackLocalCredential(credentialId: created.credentialId)
             throw error
-        case .notStored:
-            // Reconciled with the backend: it did not store the passkey, so the credential just created is unused.
-            rollbackLocalCredential(credentialId: created.credentialId)
-            return .notSubmitted(message: "the backend did not store the passkey")
         case let .finishOutcomeUnknown(error):
             // Kept: the backend may hold this passkey and its PRF entry, and deleting the credential would make them
-            // unusable. The enrolment is pending reconciliation (see `reconcilePendingEnrolment()`) and syncs are
-            // blocked until then; the keystore was locked.
-            if currentEnrollmentIsLive(generation: startGeneration, epoch: startEpoch), let userId = sessionStore.userId {
-                setState(.keystoreLocked(userId: userId, displayName: sessionStore.displayName))
-            }
+            // unusable. The caller reconciles later (list the account's passkeys / retry).
             return .finishOutcomeUnknown(message: error.localizedDescription)
         case let .sessionChanged(accepted):
             if accepted { return .sessionChanged(message: nil) }
@@ -204,12 +196,7 @@ extension SirosWallet {
                     ifMatch: ifMatch
                 )
             } catch {
-                // Whether the backend stored it is unknown: ask it, before anything else can sync.
-                switch await reconcileUnknownFinish(prepared: prepared, context: context) {
-                case .adopted: outcome = .added(credentialId: nil)
-                case .notStored: return .notStored
-                case .unresolved: return .finishOutcomeUnknown(error)
-                }
+                return .finishOutcomeUnknown(error)
             }
             guard case let .added(credentialId) = outcome else { return .refused(outcome) }
 
@@ -279,7 +266,7 @@ extension SirosWallet {
 
     /// Remembers the new passkey in the local account cache so a cached login
     /// can offer it with its own PRF salt.
-    func recordAddedPasskey(_ credentialId: Data, prfSalt: Data, nickname: String) {
+    private func recordAddedPasskey(_ credentialId: Data, prfSalt: Data, nickname: String) {
         guard let accountId = accountRegistry.activeAccountId,
               var account = accountRegistry.findAccount(accountId: accountId) else { return }
         let id = Self.b64UrlEncode(credentialId)
@@ -304,8 +291,6 @@ private enum EnrolmentTransaction {
     /// The request to register-finish failed in transport (timeout, lost response, 5xx): whether the backend
     /// stored the passkey is UNKNOWN, so the credential must not be rolled back.
     case finishOutcomeUnknown(Error)
-    /// register-finish failed in transport, and the backend's private data shows it did NOT store the passkey.
-    case notStored
     /// Accepted, committed into the live keystore and published to the
     /// local caches.
     case committed(credentialId: String?)
@@ -315,7 +300,7 @@ private enum EnrolmentTransaction {
 }
 
 /// Everything one locked enrolment transaction needs, bundled to keep the helper signatures short.
-struct EnrolmentContext {
+private struct EnrolmentContext {
     let client: BackendApiClient
     let challenge: PasskeyEnrollmentChallenge
     let created: RegisterResult

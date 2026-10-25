@@ -62,13 +62,9 @@ public enum AddPasskeyResult: Sendable, Equatable {
     /// created was rolled back (where the `AuthProvider` can), and nothing is enrolled anywhere. Call `addPasskey`
     /// again on the active session if it still needs doing.
     case notSubmitted(message: String?)
-    /// The request to `register-finish` failed in transport (timeout, lost response, 5xx) and the backend could not
-    /// be asked either, so whether it stored the passkey and its PRF entry is UNKNOWN. (When it CAN be asked, the
-    /// wallet settles it at once: `.added` if the backend stored it, `.notSubmitted` if not.) The credential just
-    /// created was NOT rolled back, the keystore was locked, and ordinary private-data syncs and exports are blocked
-    /// until the enrolment is settled - an ordinary write carries no `If-Match` and would erase an entry the backend
-    /// may hold. It is settled by ``SirosWallet/reconcilePendingEnrolment()``, and automatically at the next
-    /// `unlockKeystore()` and `login()`.
+    /// The request to `register-finish` failed in transport (timeout, lost response, 5xx), so whether the backend
+    /// stored the passkey and its PRF entry is UNKNOWN. The credential just created was NOT rolled back: deleting it
+    /// would make an accepted passkey unusable. Check the account's passkeys before retrying.
     case finishOutcomeUnknown(message: String?)
     /// The backend accepted the passkey and the cached container carries its
     /// PRF entry, but this wallet's live keystore could not take the entry.

@@ -265,8 +265,6 @@ public final class SirosWallet: @unchecked Sendable {
     let keystoreContainerLock = AsyncLock()
     /// Serialises `addPasskey` ceremonies: see `addPasskey`.
     let addPasskeyCeremonyMutex = AsyncMutex()
-    /// An enrolment whose register-finish outcome is unknown; see `PendingEnrolmentReconcile`. Under `lock`.
-    var pendingEnrolmentReconcile: PendingEnrolmentReconcile?
 
     /// WSCD hardware-key lifecycle (enroll/rotate/destroy) and
     /// additional-plugin registration (FIDO2 rawSign, R2PS remote HSM) -
@@ -1138,8 +1136,6 @@ public final class SirosWallet: @unchecked Sendable {
                 setupApiClientWithTokens(tokens)
             }
             let privateData = try await fetchPrivateData()
-            // The backend's container is in hand: settle an add-passkey whose outcome was unknown against it.
-            reconcilePendingEnrolment(fetched: privateData)
 
             // PRF/HKDF parameters, normal or recovered - see `resolveLoginPrf`.
             let cached = assertion.cachedAccount.flatMap { $0.accountId == accountId ? $0 : nil }
@@ -1346,8 +1342,6 @@ public final class SirosWallet: @unchecked Sendable {
               let asClient = authServerClient else { return }
         // Taken before the first await: an unlock that resumes after an account wipe must restore nothing.
         guard let ticket = teardownGate.ticket() else { return }
-        // An add-passkey whose outcome was unknown is settled first, so this unlock reads the adopted container.
-        _ = await reconcilePendingEnrolment()
         // The account being unlocked, captured before the ceremony: a refusal
         // arrives after it, and the registry is mutable in between. See
         // `handleLifecycleRefusal(_:forAccount:)`.

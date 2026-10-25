@@ -164,8 +164,6 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         /// before returning - lets a test force an exact interleaving with a
         /// concurrent operation instead of racing on timing.
         var finishGate: Gate?
-        /// The answer to `GET /user/session/private-data`; nil leaves the default (an answer with no container).
-        var privateData: Result<String, Error>?
         /// Opened the moment a `register-finish` request is actually sent,
         /// so a test can wait for "the finish is in flight" without a guess.
         let finishStarted = Gate()
@@ -212,9 +210,6 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
                 if url.path.hasSuffix("register-finish") {
                     await finishStarted.open()
                     await finishGate?.wait()
-                }
-                if method == "GET", url.path.hasSuffix("private-data"), let privateData {
-                    return Data(try privateData.get().utf8)
                 }
                 return Data(try (url.path.hasSuffix("register-begin") ? begin : finish).get().utf8)
             }
@@ -382,95 +377,18 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         }
     }
 
-    /// The backend's private data as `GET /user/session/private-data` answers it, holding the given passkeys' entries.
-    private func privateDataAnswer(_ credentialIds: [String]) throws -> String {
-        let container = try twoPasskeyContainer(
-            first: Data(credentialIds[0].utf8), second: Data(credentialIds[1].utf8),
-            firstSalt: Data(repeating: 0x11, count: 32), secondSalt: Data(repeating: 0x22, count: 32)
-        )
-        return #"{"privateData":{"$b64u":"\#(SirosWallet.b64UrlEncode(container))"}}"#
-    }
-
-    /// register-finish's response was lost but the backend DID store the enrolment: the wallet asks it, finds the new
-    /// passkey's PRF entry, adopts the enrolment (commit + caches) and reports `.added`; no rollback.
-    func testALostFinishResponseIsAdoptedWhenTheBackendStoredTheEnrolment() async throws {
+    /// The server may have accepted the write and the response been lost: a transport failure on finish leaves the
+    /// outcome UNKNOWN, so the credential is NOT rolled back and a distinct result says so.
+    func testALostFinishResponseKeepsTheCredentialAndReportsAnUnknownOutcome() async throws {
         let f = makeFixture()
         f.server.finish = .failure(SirosError.network(message: "response lost"))
-        f.server.privateData = .success(try privateDataAnswer(["pk-1", "new-pk"]))
 
-        let result = try await f.wallet.addPasskey(nickname: "Laptop")
-
-        guard case .added = result else { return XCTFail("got \(result)") }
-        XCTAssertEqual(f.auth.rollbackCalls, 0)
-        XCTAssertEqual(f.keystore.committed, [Data("new-pk".utf8)])
-        XCTAssertEqual(f.registry.findAccount(accountId: "default:user-1")?.passkeys.map(\.credentialId).last, SirosWallet.b64UrlEncode(Data("new-pk".utf8)))
-        XCTAssertFalse(f.wallet.enrolmentSyncBlocked)
-    }
-
-    /// register-finish's response was lost and the backend did NOT store it: the credential is rolled back and the
-    /// result says nothing was enrolled.
-    func testALostFinishResponseIsRolledBackWhenTheBackendDidNotStoreTheEnrolment() async throws {
-        let f = makeFixture()
-        f.server.finish = .failure(SirosError.network(message: "request lost"))
-        f.server.privateData = .success(try privateDataAnswer(["pk-1", "pk-9"]))
-
-        let result = try await f.wallet.addPasskey(nickname: "Laptop")
-
-        guard case .notSubmitted = result else { return XCTFail("got \(result)") }
-        XCTAssertEqual(f.auth.rollbackCalls, 1)
-        XCTAssertTrue(f.keystore.committed.isEmpty)
-        XCTAssertFalse(f.wallet.enrolmentSyncBlocked)
-        assertUnchanged(f)
-    }
-
-    /// The backend cannot be asked either: the outcome stays unknown, the keystore is locked and ordinary syncs and
-    /// exports are blocked until a later reconcile settles it (here by the explicit call).
-    func testWhenTheBackendCannotBeAskedSyncsAreBlockedUntilTheEnrolmentIsReconciled() async throws {
-        let f = makeFixture()
-        f.server.finish = .failure(SirosError.network(message: "response lost"))
-        f.server.privateData = .failure(SirosError.network(message: "still offline"))
-
-        let result = try await f.wallet.addPasskey(nickname: "Laptop")
+        let result = try await f.wallet.addPasskey(nickname: "n")
 
         guard case .finishOutcomeUnknown = result else { return XCTFail("got \(result)") }
-        XCTAssertEqual(f.auth.rollbackCalls, 0, "kept: the backend may hold it")
-        XCTAssertFalse(f.keystore.isUnlocked, "the live keystore lacks the entry the backend may hold")
-        XCTAssertTrue(f.wallet.enrolmentSyncBlocked)
-
-        // The user unlocks again from the stale cache: nothing may export meanwhile.
-        f.keystore.isUnlocked = true
-        await f.wallet.persistAndSyncKeystore()
-        do { try await f.wallet.persistKeystoreOrThrow(generation: f.wallet.currentAccountGeneration()); XCTFail("blocked") } catch {}
-        XCTAssertFalse(f.keystore.operationOrder.contains("export"), "an export would drop the PRF entry: \(f.keystore.operationOrder)")
-        let stillUnknown = await f.wallet.reconcilePendingEnrolment()
-        guard case .finishOutcomeUnknown = stillUnknown else { return XCTFail("got \(String(describing: stillUnknown))") }
-        XCTAssertTrue(f.wallet.enrolmentSyncBlocked, "stays blocked while the backend cannot be asked")
-
-        // The backend is reachable again and holds the entry: adopted, unblocked.
-        f.server.privateData = .success(try privateDataAnswer(["pk-1", "new-pk"]))
-        let adopted = await f.wallet.reconcilePendingEnrolment()
-        guard case .added = adopted else { return XCTFail("got \(String(describing: adopted))") }
-        XCTAssertFalse(f.wallet.enrolmentSyncBlocked)
-        XCTAssertEqual(f.registry.findAccount(accountId: "default:user-1")?.passkeys.map(\.credentialId).last, SirosWallet.b64UrlEncode(Data("new-pk".utf8)))
-        XCTAssertNotNil(f.sessionStore.privateDataJwe)
-        XCTAssertNotEqual(f.sessionStore.privateDataJwe, "old-container", "the cache holds the backend's container")
-        let nothing = await f.wallet.reconcilePendingEnrolment()
-        XCTAssertNil(nothing, "nothing pending any more")
-    }
-
-    /// Settling later against a container WITHOUT the entry rolls the credential back.
-    func testAPendingEnrolmentTheBackendNeverStoredIsRolledBackOnReconcile() async throws {
-        let f = makeFixture()
-        f.server.finish = .failure(SirosError.network(message: "response lost"))
-        f.server.privateData = .failure(SirosError.network(message: "offline"))
-        _ = try await f.wallet.addPasskey(nickname: "Laptop")
-        f.server.privateData = .success(try privateDataAnswer(["pk-1", "pk-9"]))
-
-        let settled = await f.wallet.reconcilePendingEnrolment()
-
-        guard case .notSubmitted = settled else { return XCTFail("got \(String(describing: settled))") }
-        XCTAssertEqual(f.auth.rollbackCalls, 1)
-        XCTAssertFalse(f.wallet.enrolmentSyncBlocked)
+        XCTAssertEqual(f.auth.rollbackCalls, 0, "an unknown outcome must not delete a credential the backend may hold")
+        XCTAssertTrue(f.keystore.committed.isEmpty)
+        assertUnchanged(f)
     }
 
     /// A preparation failure sent nothing: the credential is rolled back and the error is thrown.
