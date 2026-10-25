@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Set a PIN on a fresh FIDO2 authenticator (draft, needs siros-wscd-manager#119).** `WscdAuthProvider` gains
+- **Set a PIN on a fresh FIDO2 authenticator (siros-wscd-manager v0.11.0).** `WscdAuthProvider` gains
   `requestPin(pluginId:request:)` with a `PinRequest` kind (`enterPin`, `setNewPin(minLength:)`, `confirmNewPin`) and an
   optional retry reason; the default calls the existing `requestPin(pluginId:)`. The SDK, not the app, asks twice,
   compares, enforces the minimum length in characters (NFC code points, as the authenticator counts them) and bounds the
