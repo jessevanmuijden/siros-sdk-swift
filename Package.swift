@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import PackageDescription
@@ -282,5 +282,8 @@ let package = Package(
             ],
             path: "Tests/SirosWalletTests"
         ),
-    ]
+    ],
+    // Tools 6.0 (needed to depend on SwiftDraw, whose manifest is 6.0) would switch every target to
+    // the Swift 6 language mode; the package is not migrated, so it stays in Swift 5 mode.
+    swiftLanguageModes: [.v5]
 )

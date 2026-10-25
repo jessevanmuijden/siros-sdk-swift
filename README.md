@@ -2,7 +2,7 @@
 
 [![Swift CI](https://github.com/sirosfoundation/siros-sdk-swift/actions/workflows/swift.yml/badge.svg)](https://github.com/sirosfoundation/siros-sdk-swift/actions/workflows/swift.yml)
 [![codecov](https://codecov.io/gh/sirosfoundation/siros-sdk-swift/graph/badge.svg)](https://codecov.io/gh/sirosfoundation/siros-sdk-swift)
-[![Swift 5.10+](https://img.shields.io/badge/Swift-5.10+-orange.svg)](https://swift.org)
+[![Swift 6.0+](https://img.shields.io/badge/Swift-6.0+-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/platform-iOS%2016%2B%20%7C%20macOS%2013%2B-lightgrey.svg)](https://developer.apple.com)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sirosfoundation/siros-sdk-swift/badge)](https://scorecard.dev/viewer/?uri=github.com/sirosfoundation/siros-sdk-swift)
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
@@ -23,7 +23,7 @@ Native Swift SDK for integrating SIROS ID wallet infrastructure into iOS and mac
 ## Requirements
 
 - iOS 18+ (macOS 15+ for building and running the test suite only; the native XCFrameworks ship iOS slices)
-- Swift 5.10+
+- Swift 6.0+
 - Xcode 16+ (for Apple platforms)
 
 ## Installation

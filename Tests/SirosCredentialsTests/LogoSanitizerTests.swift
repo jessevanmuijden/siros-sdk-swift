@@ -82,6 +82,20 @@ final class LogoSanitizerTests: XCTestCase {
         for d in bad { XCTAssertFalse(validPath(d), d.debugDescription) }
     }
 
+    /// SwiftDraw scans back to the last move for every Z: 99,000 compact Zs did not finish in 25 s on a release
+    /// build. Complexity is capped per path and per document (validator and guard level, nothing reaches SwiftDraw).
+    func testPathComplexityIsBounded() {
+        XCTAssertFalse(validPath("M0 0" + String(repeating: "Z", count: 99_000)))
+        XCTAssertFalse(validPath("M0 0 " + String(repeating: "Z ", count: SvgPathData.maxSegments + 1)))
+        XCTAssertFalse(validPath("M0 0 " + String(repeating: "L1 1 ", count: SvgPathData.maxSegments + 1)), "implicit repeats count too")
+        XCTAssertFalse(validPath(String(repeating: "M0 0 ", count: SvgPathData.maxSubpaths + 1)))
+        XCTAssertTrue(validPath("M0 0 " + String(repeating: "L1 1 ", count: 1000) + String(repeating: "Z", count: 100)))
+        XCTAssertTrue(validPath(String(repeating: "M0 0 L1 1 Z ", count: 300)))
+        let counts = SvgPathData.analyze("M0 0 L1 1 2 2 Z m1 1 z", maxNumber: 1e6)
+        XCTAssertEqual(counts?.segments, 6) // M L L Z m z
+        XCTAssertEqual(counts?.subpaths, 2)
+    }
+
     /// Deterministic bounded property test: whatever the grammar accepts is ASCII-only, starts with
     /// M/m, uses only command letters, never has a comma after Z/z, and every Z/z is followed by
     /// whitespace/end/letter. (The matching "renders under SwiftDraw within a timeout" fuzz is a scratch
@@ -595,6 +609,13 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertNil(guardCheck(svg("<path d=\"M0 0 L8 0 L8 8 Z\" fill=\"red\"/>")))
     }
 
+    func testDocumentWideSegmentBudgetAndHugePathsRefusedByTheGuard() {
+        XCTAssertNotNil(guardCheck(svg("<path d=\"M0 0" + String(repeating: "Z", count: 99_000) + "\"/>")))
+        let one = "<path d=\"M0 0 " + String(repeating: "L1 1 ", count: 3000) + "\"/>" // fine alone
+        XCTAssertNil(guardCheck(svg(one)))
+        XCTAssertEqual(guardCheck(svg(String(repeating: one, count: 7))), .tooLarge, "7 x 3000 > document budget")
+    }
+
     func testTransformAndPointsAreValidatedStrictly() {
         for t in ["scale(2)", "scale(2 3)", "translate(1,2) rotate(45)", "rotate(10 4 4)", "matrix(1 0 0 1 5 5)", "skewX(10) skewY(5)",
                   " translate( 1 , 2 ) "] { XCTAssertTrue(SvgActiveContentGuard.isValidTransform(t), t) }
@@ -784,6 +805,16 @@ final class LogoRemoteSvgTests: XCTestCase {
 
     override func setUp() { StubProtocol.reset() }
 
+    /// Condition-based wait (no fixed sleeps): polls until `condition` holds or `timeout` passes.
+    private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() > deadline { return false }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return true
+    }
+
     private var session: URLSession {
         let c = URLSessionConfiguration.ephemeral
         c.protocolClasses = [StubProtocol.self]
@@ -971,8 +1002,8 @@ final class LogoRemoteSvgTests: XCTestCase {
         StubProtocol.declaredLength = 10_000_000
         StubProtocol.trickleChunks = 200 // 10 s of body if nobody cancels
         if case .failure(.tooLarge) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail() }
-        try? await Task.sleep(nanoseconds: 400_000_000)
-        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0, "URLSessionTask must be cancelled")
+        let stopped = await waitUntil { StubProtocol.stopLoadingCalls > 0 }
+        XCTAssertTrue(stopped, "URLSessionTask must be cancelled")
         XCTAssertLessThan(StubProtocol.chunksSent, 100, "body must stop flowing")
     }
 
@@ -980,8 +1011,8 @@ final class LogoRemoteSvgTests: XCTestCase {
         StubProtocol.status = 500
         StubProtocol.trickleChunks = 200
         if case .failure = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/a.svg")!, session: session) {} else { XCTFail() }
-        try? await Task.sleep(nanoseconds: 400_000_000)
-        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0)
+        let stopped = await waitUntil { StubProtocol.stopLoadingCalls > 0 }
+        XCTAssertTrue(stopped)
         XCTAssertLessThan(StubProtocol.chunksSent, 100)
     }
 
@@ -993,8 +1024,8 @@ final class LogoRemoteSvgTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(t0)
         if case .failure(.timedOut) = r {} else { XCTFail("expected timedOut, got \(r)") }
         XCTAssertLessThan(elapsed, 3, "deadline must fire while awaiting the next byte")
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0, "timeout must cancel the download")
+        let stopped = await waitUntil { StubProtocol.stopLoadingCalls > 0 }
+        XCTAssertTrue(stopped, "timeout must cancel the download")
     }
 
     // (4) one in-flight fetch per URI
@@ -1021,7 +1052,8 @@ final class LogoRemoteSvgTests: XCTestCase {
         let uri = "https://example.org/shared.svg"
         let a = Task { await cache.resolve(uri) }
         let b = Task { await cache.resolve(uri) }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        let started = await waitUntil { StubProtocol.requested.count == 1 }
+        XCTAssertTrue(started)
         a.cancel()
         let bv = await b.value
         guard case .image? = bv else { return XCTFail("the surviving waiter must still get the image") }
@@ -1035,17 +1067,17 @@ final class LogoRemoteSvgTests: XCTestCase {
     // (7) a cancelled resolve is not cached as a rejection
     func testCancelledResolveIsNotCached() async {
         StubProtocol.body = okSvg
-        StubProtocol.delay = 0.6
+        StubProtocol.delay = 3 // far longer than the test: a normal finish cannot masquerade as a cancel
         let cache = LogoCache(session: session)
         let uri = "https://example.org/slow.svg"
         let task = Task { await cache.resolve(uri) }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        let started = await waitUntil { StubProtocol.requested.count == 1 }
+        XCTAssertTrue(started, "the fetch must be under way before it is cancelled")
         task.cancel()
         let cancelled = await task.value
         XCTAssertNil(cancelled)
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        // The slow response is still 0.4 s away: only a cancel can have stopped the load by now.
-        XCTAssertGreaterThan(StubProtocol.stopLoadingCalls, 0, "last waiter leaving must cancel the download")
+        let stopped = await waitUntil(timeout: 2.5) { StubProtocol.stopLoadingCalls > 0 }
+        XCTAssertTrue(stopped, "last waiter leaving must cancel the download")
         StubProtocol.delay = 0
         let fresh = await cache.resolve(uri)
         guard case .image? = fresh else { return XCTFail("retry after cancel must fetch again, not hit a cached nil") }

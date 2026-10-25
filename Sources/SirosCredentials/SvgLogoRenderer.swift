@@ -235,6 +235,7 @@ enum SvgActiveContentGuard {
         var sawSvgRoot = false
         private var elementCount = 0
         private var depth = 0
+        private var pathSegments = 0
         private var stack: [String] = []
 
         private func refuse(_ parser: XMLParser, _ r: LogoRejection) {
@@ -261,6 +262,10 @@ enum SvgActiveContentGuard {
             }
             if let bad = SvgActiveContentGuard.attributeProblem(element: elementName, attributeDict, isRoot: isRoot) {
                 return refuse(parser, bad)
+            }
+            if let d = attributeDict["d"], let counts = SvgPathData.analyze(d, maxNumber: SvgActiveContentGuard.maxSvgNumber) {
+                pathSegments += counts.segments
+                if pathSegments > SvgPathData.maxDocumentSegments { return refuse(parser, .tooLarge) }
             }
             stack.append(elementName)
         }

@@ -20,10 +20,27 @@ import Foundation
 ///               is not ASCII is refused outright.
 ///
 /// Arc flags are a single `0` or `1` and may be written without separators.
+///
+/// Complexity is bounded as well, because SwiftDraw's close handling scans back to the last move for
+/// every `Z` (measured on 0.29.0 release builds: 99,000 compact `Z`s did not finish in 25 s; 5,000
+/// lines followed by 30,000 `Z`s took 20 s). A path may have at most `maxSegments` segments (commands
+/// plus implicit repeats, `Z` included) and `maxSubpaths` moves, and a document `maxDocumentSegments`
+/// in total; typical logos have tens to a few hundred.
 enum SvgPathData {
+    static let maxSegments = 5000
+    static let maxSubpaths = 1000
+    static let maxDocumentSegments = 20_000
+
     static func isValid(_ d: String, maxNumber: Double) -> Bool {
+        guard let counts = analyze(d, maxNumber: maxNumber) else { return false }
+        return counts.segments <= maxSegments && counts.subpaths <= maxSubpaths
+    }
+
+    /// Grammar check plus segment/subpath counts; nil when the syntax is not a strict match.
+    static func analyze(_ d: String, maxNumber: Double) -> (segments: Int, subpaths: Int)? {
         let b = Array(d.utf8)
-        guard !b.isEmpty, b.count <= 100_000, b.allSatisfy({ $0 < 0x80 }) else { return false }
+        guard !b.isEmpty, b.count <= 100_000, b.allSatisfy({ $0 < 0x80 }) else { return nil }
+        var segments = 0, subpaths = 0
         var i = 0
         func isDigit(_ x: UInt8) -> Bool { x >= 0x30 && x <= 0x39 }
         func isWhitespace(_ x: UInt8) -> Bool { x == 0x20 || x == 0x09 || x == 0x0A || x == 0x0D }
@@ -62,17 +79,20 @@ enum SvgPathData {
             0x4D: 2, 0x4C: 2, 0x54: 2, 0x48: 1, 0x56: 1, 0x43: 6, 0x53: 4, 0x51: 4, 0x41: 7, 0x5A: 0, // M L T H V C S Q A Z
         ]
         skipWhitespace()
-        guard i < b.count, b[i] == 0x4D || b[i] == 0x6D else { return false }
+        guard i < b.count, b[i] == 0x4D || b[i] == 0x6D else { return nil }
         while true {
             // Whitespace, and commas between segments, but the caller of Z handles its own tail.
             skipSeparators()
-            if i >= b.count { return true }
+            if i >= b.count { return (segments, subpaths) }
             let cmd = b[i]
-            guard isLetter(cmd), let n = argCounts[upper(cmd)] else { return false }
+            guard isLetter(cmd), let n = argCounts[upper(cmd)] else { return nil }
             i += 1
+            segments += 1
+            if upper(cmd) == 0x4D { subpaths += 1 }
+            if segments > 4 * maxSegments { return nil } // stop counting once it is hopeless
             if n == 0 { // Z/z takes nothing: only whitespace may follow, then a command letter or the end
                 skipWhitespace()
-                if i < b.count, !isLetter(b[i]) { return false }
+                if i < b.count, !isLetter(b[i]) { return nil }
                 continue
             }
             var groups = 0
@@ -82,12 +102,13 @@ enum SvgPathData {
                 for k in 0..<n {
                     skipSeparators()
                     let isFlag = upper(cmd) == 0x41 && (k == 3 || k == 4)
-                    guard isFlag ? flag() : number() else { return false }
+                    guard isFlag ? flag() : number() else { return nil }
                 }
                 groups += 1
-                guard groups <= 20_000 else { return false }
+                guard groups <= 20_000 else { return nil }
             }
-            guard groups >= 1 else { return false }
+            guard groups >= 1 else { return nil }
+            segments += groups - 1 // implicit repeats are segments too
         }
     }
 }

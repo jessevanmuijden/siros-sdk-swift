@@ -195,6 +195,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
   provider is gone.
 
+### Changed
+- **BREAKING: the minimum Swift is now 6.0** (`swift-tools-version: 6.0`, Xcode 16+). SwiftDraw, used for SVG logos, declares tools 6.0, so a 5.10 toolchain could no longer resolve the package. The package stays in the Swift 5 language mode (`swiftLanguageModes: [.v5]`); only the tools version changed.
+
 ### Added
 - **`LogoSanitizer` / `DisplayLogo`: safe rendering of credential and issuer
   display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
@@ -235,6 +238,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response `Content-Type` instead of the file name; the sample app draws only sanitized
   results. SVG without a `Content-Type` is routed by a content sniff (still guarded);
   timeouts and network errors are reported as `timedOut`/`networkFailure` and are not cached.
+  Path complexity is capped (5000 segments / 1000 subpaths per path, 20,000 per document):
+  SwiftDraw's close handling is quadratic, 99,000 compact `Z`s did not finish in 25 s.
   See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
