@@ -322,6 +322,22 @@ public struct SignResponseMessage: Codable, Sendable {
     /// the WIA and a freshly signed PoP when `audience` was given.
     public var dpopKeyId: String?
     public var dpopProof: String?
+    /// Answer to `generate_proof` when the engine sent `credential_response_encryption`: the
+    /// PUBLIC JWK (`kty` EC, `crv` P-256, `x`, `y`, `use` enc, `alg`) of a key the wallet
+    /// generated for this proof request, so the issuer's response is encrypted to a key only the
+    /// wallet holds. Absent means declined.
+    public var credentialResponseEncryptionJwk: [String: String]?
+    /// Answer to `decrypt_credential_response`: ONLY the control fields of the decrypted
+    /// response. The credentials, `credential_metadata` and `notification_id` stay in the wallet.
+    /// `decrypt_credential_response` answers exactly ONE of: `credentialCount` (credentials were
+    /// issued, 1 to 256), `transactionId` with `interval` (deferred), or `error`.
+    public var credentialCount: Int?
+    public var transactionId: String?
+    public var interval: Int?
+    /// Set when the wallet could not do what the request asked (for example a response it could
+    /// not decrypt). `errorCode` is a short machine-readable code; neither carries any plaintext.
+    public var error: String?
+    public var errorCode: String?
     public var timestamp: String?
 
     public init(
@@ -336,8 +352,15 @@ public struct SignResponseMessage: Codable, Sendable {
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil,
+        credentialCount: Int? = nil,
+        transactionId: String? = nil,
+        interval: Int? = nil,
+        error: String? = nil,
+        errorCode: String? = nil,
         timestamp: String? = nil
     ) {
+        self.credentialCount = credentialCount
         self.type = type
         self.flowId = flowId
         self.messageId = messageId
@@ -349,11 +372,20 @@ public struct SignResponseMessage: Codable, Sendable {
         self.clientAttestationPoP = clientAttestationPoP
         self.dpopKeyId = dpopKeyId
         self.dpopProof = dpopProof
+        self.credentialResponseEncryptionJwk = credentialResponseEncryptionJwk
+        self.transactionId = transactionId
+        self.interval = interval
+        self.error = error
+        self.errorCode = errorCode
         self.timestamp = timestamp
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, proofs, timestamp
+        case type, proofs, timestamp, interval, error
+        case transactionId = "transaction_id"
+        case credentialCount = "credential_count"
+        case errorCode = "error_code"
+        case credentialResponseEncryptionJwk = "credential_response_encryption_jwk"
         case flowId = "flow_id"
         case messageId = "message_id"
         case proofJwt = "proof_jwt"
@@ -549,6 +581,15 @@ public struct FlowCompleteMessage: Codable, Sendable {
     /// Persisted with the refresh token and presented back as
     /// `FlowStartMessage.dpopKeyId` on renewal.
     public var dpopKeyId: String?
+    /// True when the issuer's response was encrypted to this wallet's key: the entries of
+    /// `credentials` then carry no `credential` value, and entry i belongs to the i-th credential
+    /// the wallet decrypted for this flow (`decrypt_credential_response`).
+    public var credentialResponseEncrypted: Bool?
+    /// Display-only response-level `credential_metadata` of a PLAIN issuer response, when the engine
+    /// relays it: only `display` and `claims`. Every other member is dropped at decoding, so an
+    /// extension member such as `org.siros.secret_seed` can never arrive this way: those come only
+    /// from the wallet's own decryption of an encrypted response.
+    public var credentialMetadata: CredentialDisplayMetadata?
     public var timestamp: String?
     /// The engine's own issuer trust evaluation for this flow (the
     /// `trust_evaluated` progress step), attached by `WalletEngineSession`
@@ -563,6 +604,8 @@ public struct FlowCompleteMessage: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case type, credentials, timestamp
+        case credentialMetadata = "credential_metadata"
+        case credentialResponseEncrypted = "credential_response_encrypted"
         case flowId = "flow_id"
         case redirectUri = "redirect_uri"
         case typeMetadata = "type_metadata"
@@ -574,9 +617,40 @@ public struct FlowCompleteMessage: Codable, Sendable {
     }
 }
 
+/// The display-only part of a response-level `credential_metadata` object: `display` and `claims`,
+/// kept as received. Decoding looks at those two members and nothing else, so no other member (a
+/// delivered secret, an unknown extension) is ever held in this type, logged from it or re-encoded
+/// from it. Anything that is not an object decodes to an empty value.
+public struct CredentialDisplayMetadata: Codable, Sendable, Equatable {
+    public var display: AnyCodable?
+    public var claims: AnyCodable?
+
+    enum CodingKeys: String, CodingKey { case display, claims }
+
+    public init(display: AnyCodable? = nil, claims: AnyCodable? = nil) {
+        self.display = display
+        self.claims = claims
+    }
+
+    public init(from decoder: Decoder) throws {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.init()
+            return
+        }
+        // A member of the wrong shape is ignored, not an error: display metadata must never fail a flow.
+        self.init(
+            display: try? container.decodeIfPresent(AnyCodable.self, forKey: .display),
+            claims: try? container.decodeIfPresent(AnyCodable.self, forKey: .claims)
+        )
+    }
+}
+
 public struct CredentialResult: Codable, Sendable {
     public var format: String
-    public var credential: String
+    /// Absent when the issuer's response was encrypted to the wallet's own key
+    /// (`FlowCompleteMessage.credentialResponseEncrypted`): the wallet has the credential, the
+    /// engine never did.
+    public var credential: String?
     public var vct: String?
     public var typeMetadata: AnyCodable?
     /// OID4VCI §10 notification identifier for this credential, if the issuer
@@ -584,10 +658,36 @@ public struct CredentialResult: Codable, Sendable {
     /// event occurs.
     public var notificationId: String?
 
+    public init(
+        format: String, credential: String?, vct: String? = nil,
+        typeMetadata: AnyCodable? = nil, notificationId: String? = nil
+    ) {
+        self.format = format
+        self.credential = credential
+        self.vct = vct
+        self.typeMetadata = typeMetadata
+        self.notificationId = notificationId
+    }
+
     enum CodingKeys: String, CodingKey {
         case format, credential, vct
         case typeMetadata = "type_metadata"
         case notificationId = "notification_id"
+    }
+}
+
+/// The engine's `credential_response_encryption` parameter of a `generate_proof` sign request:
+/// the `alg`/`enc` pair it negotiated from the issuer's metadata, and whether the issuer
+/// requires response encryption. The wallet answers with a public JWK for that pair (or declines).
+public struct CredentialResponseEncryptionRequest: Codable, Sendable, Equatable {
+    public var alg: String
+    public var enc: String
+    public var required: Bool?
+
+    public init(alg: String, enc: String, required: Bool? = nil) {
+        self.alg = alg
+        self.enc = enc
+        self.required = required
     }
 }
 
@@ -674,6 +774,12 @@ public struct SignRequestMessage: Codable, Sendable {
     public var action: String
     public var params: SignRequestParams
     public var timestamp: String?
+    /// The engine session's socket generation when this request was received (set by the session, never on the
+    /// wire). A request that was buffered across a reconnect carries the old generation, so the wallet can refuse it
+    /// before it allocates anything for a flow that ran on the replaced socket.
+    public var socketGeneration: Int = 0
+    /// The session's request epoch when this request was received; see `WalletEngineSession.invalidateBufferedRequests()`.
+    public var requestEpoch: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case type, action, params, timestamp
@@ -729,9 +835,16 @@ public struct SignRequestParams: Codable, Sendable {
     public var dpopNonce: String?
     public var ath: String?
     public var keyId: String?
+    /// `generate_proof`: the response encryption the engine negotiated, when the issuer supports it.
+    public var credentialResponseEncryption: CredentialResponseEncryptionRequest?
+    /// `decrypt_credential_response`: the issuer's Credential Response as a compact JWE, and whether
+    /// it answers a deferred request.
+    public var jwe: String?
+    public var deferred: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case audience, nonce, issuer, count, htm, htu, ath
+        case audience, nonce, issuer, count, htm, htu, ath, jwe, deferred
+        case credentialResponseEncryption = "credential_response_encryption"
         case proofType = "proof_type"
         case proofTypesSupported = "proof_types_supported"
         case credentialsToInclude = "credentials_to_include"

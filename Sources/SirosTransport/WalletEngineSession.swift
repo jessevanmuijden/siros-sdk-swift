@@ -85,6 +85,19 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     /// cancel() or a callback.
     private let lifecycleLock = NSLock()
     private var epoch = 0
+    /// Called (outside every lock) each time the connection this session had is lost, or is replaced by
+    /// `forceReconnect`: what the owner keeps for flows that ran on it goes. The epoch has already moved on.
+    public var onSocketReplaced: (() -> Void)?
+    /// Advanced by the owner when what has been received so far is no longer wanted (a cancelled flow): requests
+    /// stamped with an older value are refused when handled. Under `connLock`, like `epoch`.
+    public private(set) var requestEpoch = 0
+
+    /// The identity of the live socket: a request stamped with an older value was received on one that has since been
+    /// lost or replaced. This is the session's `epoch`.
+    public var socketGeneration: Int { connLock.lock(); defer { connLock.unlock() }; return epoch }
+
+    /// Marks every request received so far as obsolete (they are refused when the wallet handles them).
+    public func invalidateBufferedRequests() { connLock.lock(); requestEpoch += 1; connLock.unlock() }
     /// The one pending backoff-then-connect attempt; any connect replaces it.
     private var pendingReconnect: Task<Void, Never>?
     private var sessionId: String?
@@ -501,6 +514,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         let failed = webSocketTask
         webSocketTask = nil
         epoch += 1
+        let hadToken = lastAppToken != nil
         let replaced = scheduleReconnectLocked()
         connLock.unlock()
         // A send or handshake error can arrive while its receive is still pending:
@@ -509,6 +523,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         failed?.cancel(closeCode: .goingAway, reason: nil)
         lifecycleLock.unlock()
         replaced?.cancel()
+        // The connection was lost (not dropped on purpose): outside every lock, after the epoch moved on.
+        if hadToken { onSocketReplaced?() }
     }
 
     /// Schedules the one backoff attempt. Called with `connLock` held, by
@@ -676,6 +692,8 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         case MessageTypes.handshakeComplete:
             if let msg = try? decoder.decode(HandshakeCompleteMessage.self, from: data) {
                 sessionId = msg.sessionId
+                // A recovered connection starts a fresh retry budget: the next loss is not charged for this one's.
+                reconnectAttempts = 0
                 setState(.connected)
                 adoptServerPingInterval(from: msg.config)
             }
@@ -695,7 +713,10 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
                 flowErrorContinuation.yield(msg)
             }
         case MessageTypes.signRequest:
-            if let msg = try? decoder.decode(SignRequestMessage.self, from: data) {
+            if var msg = try? decoder.decode(SignRequestMessage.self, from: data) {
+                // handleFrame holds `connLock` and has just checked the epoch, so these are the receiving socket's.
+                msg.socketGeneration = epoch
+                msg.requestEpoch = requestEpoch
                 signRequestContinuation.yield(msg)
             }
         case MessageTypes.matchRequest:
@@ -860,6 +881,12 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         clientAttestationPoP: String? = nil,
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
+        credentialResponseEncryptionJwk: [String: String]? = nil,
+        credentialCount: Int? = nil,
+        transactionId: String? = nil,
+        interval: Int? = nil,
+        error: String? = nil,
+        errorCode: String? = nil,
         messageId: String? = nil
     ) {
         send(SignResponseMessage(
@@ -872,7 +899,13 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             clientAttestation: clientAttestation,
             clientAttestationPoP: clientAttestationPoP,
             dpopKeyId: dpopKeyId,
-            dpopProof: dpopProof
+            dpopProof: dpopProof,
+            credentialResponseEncryptionJwk: credentialResponseEncryptionJwk,
+            credentialCount: credentialCount,
+            transactionId: transactionId,
+            interval: interval,
+            error: error,
+            errorCode: errorCode
         ))
     }
 
@@ -1046,6 +1079,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         // cancelled attempt inert.)
         pending?.cancel()
         after?()
+        if old != nil { onSocketReplaced?() }
     }
 
     /// Resume an OID4VCI credential issuance flow after an OAuth authorization

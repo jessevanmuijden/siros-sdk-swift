@@ -3,6 +3,7 @@
 import XCTest
 import SirosAuth
 import SirosCredentials
+import SirosKeystore
 import SirosTransport
 @testable import SirosWallet
 
@@ -116,6 +117,97 @@ final class SirosWalletNotificationTests: XCTestCase {
 
         let stored = await store.getAll()
         XCTAssertTrue(stored.isEmpty)
+    }
+
+    // MARK: - Renewal never costs the credential it replaces
+
+    private final class FlowListener: WalletEventListener, @unchecked Sendable {
+        var errors: [String] = [], completed: [String] = []
+        func onCredentialSelectionRequired(request: PresentationRequest) async -> [Int64] { [] }
+        func onFlowError(flowId: String, errorMessage: String, redirectUri: String?) { errors.append(errorMessage) }
+        func onFlowComplete(flowId: String, redirectUri: String?) { completed.append(flowId) }
+    }
+
+    /// A wallet holding batch 77 (one credential and its refresh token), mid-renewal of it.
+    private func renewalWallet() async -> (SirosWallet, InMemoryCredentialStore, FlowListener) {
+        let store = InMemoryCredentialStore()
+        let wallet = makeWallet(store: store)
+        let listener = FlowListener()
+        wallet.eventListener = listener
+        await store.save(StoredCredential(id: 1, format: "vc+sd-jwt", raw: "old.jwt.value", batchId: 77, instanceId: 0))
+        await wallet.setCredentialRefreshToken(batchId: 77, entry: CredentialRefreshTokenEntry(
+            refreshToken: "old-rt", dpopJwk: nil, credentialIssuerIdentifier: "https://i.example", credentialConfigurationId: "pid"
+        ))
+        wallet.lock.lock(); wallet.pendingRenewalSourceBatchId = 77; wallet.lock.unlock()
+        return (wallet, store, listener)
+    }
+
+    private func renewalMessage(_ credentials: [[String: Any]]) -> FlowCompleteMessage {
+        var obj: [String: Any] = [
+            "type": MessageTypes.flowComplete, "flow_id": "renew", "credentials": credentials,
+            "refresh_token": "new-rt", "credential_issuer": "https://i.example", "selected_credential_configuration_id": "pid",
+        ]
+        obj["redirect_uri"] = NSNull()
+        var msg = try! JSONDecoder().decode(FlowCompleteMessage.self, from: try! JSONSerialization.data(withJSONObject: obj))
+        msg.startTag = 0 // the wallet's initial issuance epoch, as in `makeFlowComplete`
+        return msg
+    }
+
+    /// A plain completion with an entry that has no credential value is refused whole: the old batch and its refresh
+    /// token stay, nothing new is stored, and the new refresh token is not kept.
+    func testAnUnreadableReplacementLeavesTheOldBatchAndRefreshTokenAlone() async {
+        let now = Int64(Date().timeIntervalSince1970)
+        let good: [String: Any] = ["format": "vc+sd-jwt", "credential": makeJwt(exp: now + 3600, iat: now)]
+        for (name, entries) in [("missing", [["format": "vc+sd-jwt"] as [String: Any]]), ("one of two", [good, ["format": "vc+sd-jwt"]]), ("empty", [["format": "vc+sd-jwt", "credential": ""] as [String: Any]])] {
+            let (wallet, store, listener) = await renewalWallet()
+            await wallet.handleFlowComplete(msg: renewalMessage(entries))
+            let stored = await store.getAll()
+            XCTAssertEqual(stored.map(\.id), [1], "\(name): only the old credential remains")
+            let tokens = await wallet.exportCredentialRefreshTokens()
+            XCTAssertEqual(tokens.keys.sorted(), [77], "\(name): the old refresh token stays, no new one is kept")
+            XCTAssertEqual(tokens[77]?.refreshToken, "old-rt", name)
+            XCTAssertEqual(listener.errors.count, 1, name)
+            XCTAssertTrue(listener.completed.isEmpty, name)
+        }
+    }
+
+    /// The same renewal with a readable replacement supersedes the old batch and keeps the new refresh token.
+    func testAReadableReplacementSupersedesTheOldBatch() async {
+        let now = Int64(Date().timeIntervalSince1970)
+        let (wallet, store, listener) = await renewalWallet()
+        await wallet.handleFlowComplete(msg: renewalMessage([["format": "vc+sd-jwt", "credential": makeJwt(exp: now + 3600, iat: now)]]))
+        let stored = await store.getAll()
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertNotEqual(stored.first?.id, 1, "the old credential is gone")
+        let tokens = await wallet.exportCredentialRefreshTokens()
+        XCTAssertNil(tokens[77], "the old refresh token goes with its batch")
+        XCTAssertEqual(tokens.values.first?.refreshToken, "new-rt")
+        XCTAssertTrue(listener.errors.isEmpty)
+    }
+
+    /// A completion whose credentials are all rejected (here: expired) stores nothing, so no refresh token is
+    /// attached to a batch that does not exist, and the old batch is untouched.
+    func testNoRefreshTokenIsKeptForABatchThatStoredNothing() async {
+        let now = Int64(Date().timeIntervalSince1970)
+        let (wallet, store, _) = await renewalWallet()
+        await wallet.handleFlowComplete(msg: renewalMessage([["format": "vc+sd-jwt", "credential": makeJwt(exp: now - 3600, iat: now - 7200)]]))
+        let stored = await store.getAll()
+        XCTAssertEqual(stored.map(\.id), [1])
+        let tokens = await wallet.exportCredentialRefreshTokens()
+        XCTAssertEqual(tokens.keys.sorted(), [77])
+    }
+
+    /// WMP: a plain completion that names a credential entry without its value is an error, never a success.
+    func testAWmpCompletionWithAnUnreadableEntryIsRefused() async {
+        let store = InMemoryCredentialStore()
+        let wallet = makeWallet(store: store)
+        let listener = FlowListener()
+        wallet.eventListener = listener
+        await wallet.handleWmpFlowComplete(flowId: "w1", result: .object_(["credentials": .array([.object_(["format": .string("vc+sd-jwt")])])]))
+        XCTAssertEqual(listener.errors.count, 1)
+        XCTAssertTrue(listener.completed.isEmpty)
+        await wallet.handleWmpFlowComplete(flowId: "w2", result: .object_(["credentials": .array([.object_(["format": .string("vc+sd-jwt"), "credential": .string("a.b.c")])])]))
+        XCTAssertEqual(listener.completed, ["w2"], "a readable completion still completes")
     }
 }
 

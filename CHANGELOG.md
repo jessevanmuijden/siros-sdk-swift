@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Issuer trust is evaluated on a wallet-encrypted completion's DECRYPTED credentials.** Main's issuance trust gate
+  read the engine's entries, which carry no value when the wallet decrypted the response itself, so an encrypted `mso_mdoc`
+  issuance could never verify. The gate now runs after the entries are paired with what the wallet decrypted (the Kotlin
+  SDK's `fillEncryptedCompletion` shape); a plain completion still uses the engine-provided credentials.
+- **A lost socket's cleanup no longer removes the plaintext-downgrade check.** The wallet remembers, per flow, that a
+  response key was OFFERED (`offeredResponseKeyFlows`, ported from the Kotlin SDK's offered marker); it outlives the key
+  until the flow ends, so a plain `flow_complete` already queued when the socket was lost is still refused (nothing
+  stored, `credential_failure` per notification id) instead of being processed as an ordinary plaintext issuance.
+
+### Fixed
+- **Blind issuance: socket replacement without the wallet lock, scoped cleanup, and unpairable completions.**
+  `onSocketReplaced` no longer cleans up inside the callback (the issuance start replaces the socket while holding the
+  wallet lock, which deadlocked): it schedules a cleanup scoped to the reporting engine and to the response keys that
+  engine's EARLIER sockets created, so a key the replacement socket already advertised, or a new login's engine, is left
+  alone. A decrypt's late reply is not sent on a replacement connection, and a key superseded by a newer `generate_proof`
+  makes the older decrypt stale instead of failing the issuance. Decrypted credentials the completion cannot be paired
+  with (a count mismatch, an unreadable encrypted completion) are reported to the issuer with `credential_failure`; a
+  late completion does not revive a failed or cancelled flow; an `epk` carrying a private `d` is refused;
+  `OpenID4xConfig.onCancel` receives the flow type, so cancelling an `oid4vp` parent leaves an issuance's guards alone.
+
+### Fixed
 - **WMP: a retry timer scheduled before a resume does nothing after it, and the event stream ends when a close fails.** A
   timed retry carries the resume generation it was scheduled in and is validated under the lock that claims the answer,
   so a resume (which resets the budgets and replays the queue) cannot be followed by stale retries. `WmpPeer.close`
@@ -156,6 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Added
+- **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
+  Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
   `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
   not match the photo stored on the document's chip
@@ -353,6 +376,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verbatim copy of privatedata-spec `test-vectors/` at pull request 9, head
   `64315a5eae50e08a93772488217bbc913c82dd56`, with a recorded source and a
   digest check (`vectors.PROVENANCE.txt`, `vectors.SHA256SUMS`).
+- **Engine-blind issuance: the wallet decrypts the issuer's Credential Response.** The engine (remote
+  or embedded) relays ciphertext and never sees a credential, the `secret_seed` or any other
+  `credential_metadata`; this replaces the earlier approach of the engine relaying
+  `credential_metadata` in `flow_complete` (that relay of arbitrary members and the WMP
+  `redacted_members` marker are gone, never released). For PLAIN issuer responses the engine may
+  still relay display-only `credential_metadata`: `FlowCompleteMessage.credentialMetadata` decodes
+  `display` and `claims` and nothing else, so an extension member such as `org.siros.secret_seed`
+  can only ever come from the wallet's own decryption. On BOTH the engine WebSocket and WMP:
+  - `generate_proof` may carry `credential_response_encryption {alg, enc, required}`. The wallet
+    generates a FRESH in-memory P-256 key per proof request (so per c_nonce retry), keeps it per
+    flow id, and answers with `credential_response_encryption_jwk` (public JWK: `kty` EC, `crv`
+    P-256, `x`, `y`, `use` enc, `alg` the negotiated one). A pair it cannot open, or no request,
+    is a decline. The key is dropped when the flow completes, fails or is cancelled, and on
+    logout; it can not be serialized.
+  - New sign action `decrypt_credential_response {jwe, deferred}`: ECDH-ES (RFC 7518 4.6) with
+    A128GCM, A256GCM, A128CBC-HS256 and A256CBC-HS512, directly or with `ECDH-ES+A128KW` /
+    `ECDH-ES+A256KW` (RFC 3394 unwrap; gdc advertises only `+A256KW`). The header must carry
+    exactly the negotiated `alg`/`enc`; `zip`, `crit` and any curve but P-256 are refused; the
+    CBC-HMAC tag is verified, in constant time, before anything is decrypted. The wallet parses
+    the Credential Response strictly, keeps the credentials and the response-level
+    `credential_metadata` itself, and answers `sign_response` with exactly ONE of `{credential_count: N}`
+    (1 to 256), `{transaction_id, interval}` (deferred) or `{error, error_code}` (a code, never any
+    plaintext); credentials together with a `transaction_id` are refused. A key-only `generate_proof`
+    (response encryption wanted, no `proof_types_supported` and no `proof_type`) returns the JWK and no proofs. The
+    encrypted key length is checked before any unwrapping. On WMP a failure is a flow error with that
+    code, and the wallet ends the issuance locally too.
+  - `flow_complete.credentials[i]` of an encrypted response has no `credential`
+    (`credential_response_encrypted: true`); entry i is paired with the i-th decrypted credential
+    (immediate and deferred answers in order), a count mismatch is a flow error and stores
+    nothing, and the `notification_id` for `credential_notification` comes from the decrypted body
+    ONLY (the engine sees none). A response the wallet rejects after reading it (the receiver below
+    refuses it) is reported to the issuer as `credential_failure`. State is dropped per flow id on
+    completion, error, sign failure and `wmp.flow.cancel`, everywhere on cancel and logout, and
+    never by an unrelated flow ending; a key is not created for a flow that ended while proofs
+    were being generated. WMP now installs a notifier, so acceptance and failure notifications are
+    sent on that transport too.
+    `CredentialResult.credential` is therefore optional.
+  - `SirosWallet.credentialMetadataReceiver` is the seam for delivered-secret validation
+    (`DeliveredSecretReceipt`, privatedata-spec 5A): it gets each whole decrypted response (the
+    credentials, so a commitment can be checked against every one of a batch, the `notification_id`
+    and the `credential_metadata`) and whether it is deferred, and may refuse the whole response.
+    Nothing is wired by default; storing the metadata into the container needs #202.
+  Over WMP the answers travel the orchestrator's child-flow route (`wmp.flow.complete` on the child flow
+  with the response as `result`; see the stand-alone fix in https://github.com/sirosfoundation/siros-sdk-swift/pull/220).
+  The decrypted `credential_metadata` is held to the limits the engine used to enforce (1 MiB, depth 16,
+  256 members per object, member names of at most 256 bytes, no duplicate members); a response that
+  breaks them, or is otherwise rejected after it was read, is reported to the issuer as
+  `credential_failure` (the `notification_id` is read from the body even then). A flow error, a stale
+  response (the flow ended while the receiver was suspended) and locking the wallet or ending the
+  session drop the key and everything decrypted with it. Numbers in an object-valued credential are
+  kept exactly. A pair this build cannot open is answered, never left hanging: declined (no JWK) when optional, and when the engine REQUIRES encryption with it an error `sign_response` (`UNSUPPORTED_RESPONSE_ENCRYPTION`, the original `message_id`) over the WebSocket and a rejected flow error over WMP. Duplicate member names are refused wherever they hide (also behind escapes and inside the seed member).
+  A cancelled sign request (a WMP child flow) installs no key, writes no issuance state and keeps no
+  response; the `credential_failure` of a rejected response is handed to the transport (WMP: awaited)
+  before the error answer; an encrypted completion that reports no credentials is an error, not a success.
+  The WMP handlers also end when the session fails for good (reconnects exhausted) or closes, and the wallet
+  stops them (`WmpPeer.shutdownProfiles()`) before it clears blind-issuance state on logout, `destroy()` and
+  an ended session, instead of relying on an unawaited `close()`.
+  The AES block primitive is CommonCrypto on Apple platforms and a FIPS 197 reference elsewhere (CI);
+  the unwrap and CBC are built on it. Tests: 12 JWEs from go-jose v4.1.6 (every alg/enc pair, vendored
+  with its generator), RFC 7518 Appendix C, RFC 3394, RFC 7516 A.3 and FIPS 197 vectors.
 - **WMP HTTP+SSE transport: SSE event ids, `Last-Event-ID` and replay dedupe.** The
   transport now parses `text/event-stream` with `SseEventParser` (the `id` field, a
   persistent last event id, comments, multi-line `data`), sends `Last-Event-ID` when it
@@ -502,6 +585,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **Blind issuance: requests of lost or replaced sockets, cancelled and failed flows.** `WalletEngineSession` stamps each
+  sign request with the generation (its `epoch`) of the socket that carried it (`SignRequestMessage.socketGeneration`)
+  and with a request epoch (`requestEpoch`); `onSocketReplaced` fires, outside every lock, when the connection is lost
+  or `forceReconnect` replaces it, and a recovered connection starts a fresh retry budget. The wallet refuses a request
+  from an older generation or epoch before allocating anything. `cancelCurrentFlow()` advances the request epoch
+  (also while the wallet is still `.ready`), marks the active flow ended, and stops everything the WMP peer runs
+  (`WmpPeer.cancelAllFlowsNow()`) whatever the wallet state; `reportSignFailure` marks its flow ended. A decrypt for an
+  ended flow is answered `NO_RESPONSE_KEY`, and the same encrypted response delivered again is retained once.
+- **Blind issuance: buffered requests and replaying children.** Each WebSocket sign request carries the socket
+  generation it was received on (`SignRequestMessage.socketGeneration`, stamped by the session, not on the wire); a
+  `generate_proof` / `decrypt_credential_response` buffered across a same-object reconnect is dropped before it
+  allocates a key or replies. A request for a flow that already ended (its terminal cleanup ran first) is rejected too.
+  Cancelling a child whose answer is being replayed, or one that already completed, is a child cancel: the wallet's
+  parent-flow callback is not invoked.
+- **Blind issuance: a plain completion after an offered key is an error.** When the wallet offered a
+  response-encryption key for a flow and its `flow_complete` / `wmp.flow.complete` does not say the response was
+  encrypted to the wallet (`credential_response_encrypted: true`), the engine held the credentials: the completion is
+  refused, nothing is stored, and the issuer gets `credential_failure` for each notification id the entries carry.
+  Pending responses carrying `org.siros.secret_seed` are refused on every poll, and a response's `credential_metadata`
+  is never carried into the next. Each `credentials[]` entry must be an object with a `credential` member, and its
+  inner value is what is stored (tests pin this).
+- **Review follow-ups (WMP replay, stale sockets, cancellation).** Replayed child answers are claimed under the lock
+  before their send is awaited (a second resume cannot resend them), an answer queued by a send that began before a
+  resume is retried at once, shutdown releases the routing entries of children with queued answers, and a session
+  notifies its terminal state once whether it failed or was closed. A late failure of a replaced engine socket is
+  ignored (it neither clears issuance state nor schedules a reconnect). A proof that finishes after its flow was
+  cancelled writes no attested key ids and gets no reply. `cancelCurrentFlow()` stops the active WMP flow's children
+  (`WmpPeer.cancelFlowNow`) and sends the cancel on the peer.
+- **Blind issuance: validate-then-claim is one step, and a pending response never carries a seed.** The "session is
+  live" check now returns the flow generation from the same critical section, and the response key is stored only if
+  the session has not ended in that section, so a request that resumes after logout or destroy retains no key.
+  A pending (deferred) response whose `credential_metadata` carries `org.siros.secret_seed` is refused
+  (`DEFERRED_SEED`) and the issuer is told through `credential_failure` when it gave a `notification_id`, instead
+  of being dropped as an ordinary pending answer.
+- **A plain completion with an unreadable credential entry is refused whole, and a renewal never costs the credential
+  it replaces.** A plain (not wallet-encrypted) `flow_complete` / `wmp.flow.complete` whose credential entry has no
+  value (missing or empty) is an error before anything is stored or superseded, on both transports. A refresh token is
+  kept only for a batch that stored at least one credential. The old batch and its refresh token were already removed
+  only after a replacement was stored; tests now pin that.
 - **WMP: a timed retry resends only its own answer, and a session closes locally whatever the close notification does.**
   A retry timer drains just the child that scheduled it (a resume still drains the whole queue), so an answer that spent
   its budget is not resent by another child's retry. `WmpSession.close` disconnects the transport, ends the session and

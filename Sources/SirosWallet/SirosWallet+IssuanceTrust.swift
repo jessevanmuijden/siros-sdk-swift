@@ -68,7 +68,7 @@ extension SirosWallet {
     /// platform without the Security framework).
     func mdocIssuanceTrustResult(_ credential: CredentialResult) async -> TrustResult? {
         if let hook = mdocIssuanceTrustHook { return await hook(credential) }
-        guard let document = CredentialUtils.parseMdocDocument(credential.credential) else {
+        guard let raw = credential.credential, let document = CredentialUtils.parseMdocDocument(raw) else {
             #if canImport(os)
             logger.warning("Issued mdoc credential could not be parsed for the issuer trust check")
             #endif

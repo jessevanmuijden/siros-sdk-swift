@@ -35,6 +35,19 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // A flow that already failed or was cancelled is not revived by a late completion (its key is gone, so the plain
+        // path below would otherwise accept it as a successful plain issuance).
+        if flowAlreadyEnded(msg.flowId) { return }
+        // Whether this wallet offered a response-encryption key for the flow, read before the flow's state is dropped.
+        lock.lock(); let offeredKey = offeredResponseKeyFlows.contains(msg.flowId); lock.unlock()
+        if offeredKey, msg.credentialResponseEncrypted != true {
+            // The engine says the issuer answered in the clear although the wallet's key was offered: the engine holds
+            // the credentials, which engine-blind issuance forbids. Nothing is stored; the issuer is told.
+            await refusePlainCompletion(flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId))
+            return
+        }
+        // Taken before `cancelTransactionTasks`, which also drops the flow's response-encryption key.
+        let decryptedResponses = takeDecryptedCredentialResponses(flowId: msg.flowId)
         cancelTransactionTasks(flowId: msg.flowId)
         lock.lock(); legacyFlowSnapshots.removeValue(forKey: msg.flowId); lock.unlock()
         lock.lock()
@@ -60,8 +73,29 @@ extension SirosWallet {
         pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
         lock.unlock()
 
+        var credentialsToStore = msg.credentials
+        if msg.credentialResponseEncrypted == true {
+            // Engine-blind issuance: the engine never held the credentials. Entry i of the engine's
+            // list is the i-th credential this wallet decrypted; a count mismatch is not guessed at.
+            guard let entries = msg.credentials,
+                  let paired = Self.pairEncryptedCredentials(entries: entries, decrypted: decryptedResponses) else {
+                await rejectDecryptedCompletion(
+                    flowId: msg.flowId, responses: decryptedResponses,
+                    message: "The credentials the issuer sent do not match what the engine reported"
+                )
+                return
+            }
+            credentialsToStore = paired
+        }
+        // The issuer trust gate sees the credentials that will be stored: for a
+        // wallet-encrypted completion the engine's entries carry no values, so
+        // the gate runs on the decrypted ones (same shape as the Kotlin SDK's
+        // `fillEncryptedCompletion` before `issuanceTrustRefusal`).
+        var gateMsg = msg
+        gateMsg.credentials = credentialsToStore
+
         // Fail closed on issuer trust before anything is stored or superseded.
-        if await issuanceTrustGateHandled(msg, offer: offer, epoch: epochAtStart) { return }
+        if await issuanceTrustGateHandled(gateMsg, offer: offer, epoch: epochAtStart) { return }
 
         // Shared across every copy in this response so the UI can group them
         // into one card (see StoredCredential.batchId) - ALWAYS assigned,
@@ -70,6 +104,15 @@ extension SirosWallet {
         // response is its own batch of at least one, there is no "no batch"
         // sentinel on either client.
         let batchId = Int64(Date().timeIntervalSince1970 * 1000)
+
+        // A plain (not wallet-encrypted) completion carries each credential's value. One that lacks it is unreadable
+        // as a whole: refused before anything is stored or superseded, so a renewal never costs the user the
+        // credential it was replacing (and the issuer's other entries are not half-applied).
+        if msg.credentialResponseEncrypted != true,
+           let entries = msg.credentials, entries.contains(where: { ($0.credential ?? "").isEmpty }) {
+            await failIssuanceLocally(flowId: msg.flowId, message: "The issuer's credential did not arrive")
+            return
+        }
 
         let (oldBatchId, oldRenewedClaims) = await snapshotRenewalSourceBatch()
         let wasRenewal = oldBatchId != nil
@@ -80,7 +123,7 @@ extension SirosWallet {
         // as success - see storeFailureReason below.
         var storedCount = 0
         var storeFailureReason: String?
-        if let credentials = msg.credentials {
+        if let credentials = credentialsToStore {
             for (index, cred) in credentials.enumerated() {
                 let outcome = await storeIssuedCredential(
                     cred, index: index, flowId: msg.flowId, offer: offer, vctm: vctm,
@@ -102,7 +145,8 @@ extension SirosWallet {
             await deleteRenewalSourceBatch(oldBatchId)
         }
 
-        await captureRefreshTokenIfPresent(msg: msg, offer: offer, batchId: batchId)
+        // A refresh token belongs to a batch that exists: with nothing stored there is no batch to attach it to.
+        if storedCount > 0 { await captureRefreshTokenIfPresent(msg: msg, offer: offer, batchId: batchId) }
         await notifyRenewalAttributeDiffIfNeeded(wasRenewal: wasRenewal, oldClaims: oldRenewedClaims, batchId: batchId)
 
         // Terminal path for this issuance - see `resetIssuanceGuards()`.
@@ -124,7 +168,7 @@ extension SirosWallet {
         // anything went wrong. Surface it as a flow error instead so the
         // UI's error handling fires, matching how any other flow failure is
         // handled.
-        let expectedCredentials = msg.credentials?.count ?? 0
+        let expectedCredentials = credentialsToStore?.count ?? 0
         lock.lock(); let listener = eventListener; lock.unlock()
         if expectedCredentials > 0 && storedCount == 0 {
             listener?.onFlowError(flowId: msg.flowId, errorMessage: storeFailureReason ?? "Credential could not be processed", redirectUri: nil)
@@ -132,6 +176,20 @@ extension SirosWallet {
             listener?.onFlowComplete(flowId: msg.flowId, redirectUri: msg.redirectUri)
         }
 
+        await restoreReadyState()
+    }
+
+    /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
+    /// for each notification id the entries carry, and the issuance ended locally.
+    func refusePlainCompletion(flowId: String, notificationIds: [String]) async {
+        for id in Set(notificationIds).sorted() where !id.isEmpty {
+            await sendCredentialFailure(flowId: flowId, notificationId: id)
+        }
+        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet")
+    }
+
+    /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
+    func restoreReadyState() async {
         switch state {
         case .flowActive(let userId, let displayName, _, _, _, _),
              .ready(let userId, let displayName, _, _):
@@ -325,18 +383,21 @@ extension SirosWallet {
         if let refusal = keystore.unsupportedSchemaVersion {
             return (false, refusal.localizedDescription)
         }
+        guard let rawCredential = cred.credential else {
+            return (false, "The issuer's credential did not arrive")
+        }
         if cred.format == "mso_mdoc" {
             // mso_mdoc credentials are base64url-encoded CBOR (a
             // DeviceResponse-shaped envelope, per wallet-frontend#191), never
             // JWT-shaped - the parseJwtPayload-based validation/expiry/
             // metadata path below doesn't apply and would always fail,
             // silently dropping every issued mdoc credential.
-            guard let mdocDocument = CredentialUtils.parseMdocDocument(cred.credential) else {
+            guard let mdocDocument = CredentialUtils.parseMdocDocument(rawCredential) else {
                 return (false, "Received credential could not be read")
             }
             if let reason = verifyIssuedType(
                 format: cred.format,
-                raw: cred.credential,
+                raw: rawCredential,
                 declaredType: mdocDocument.docType
             ) {
                 return (false, reason)
@@ -358,7 +419,7 @@ extension SirosWallet {
             let stored = StoredCredential(
                 id: randomUint32Id(),
                 format: cred.format,
-                raw: cred.credential,
+                raw: rawCredential,
                 kid: index < (attestedKeyIds?.count ?? 0) ? attestedKeyIds?[index] : nil,
                 metadata: metadata,
                 notificationId: cred.notificationId,
@@ -372,7 +433,7 @@ extension SirosWallet {
             return (true, nil)
         }
 
-        guard let payload = CredentialUtils.parseJwtPayload(cred.credential) else {
+        guard let payload = CredentialUtils.parseJwtPayload(rawCredential) else {
             return (false, "Received credential could not be read")
         }
         let exp = payload["exp"] as? Int64
@@ -383,7 +444,7 @@ extension SirosWallet {
 
         if let reason = verifyIssuedType(
             format: cred.format,
-            raw: cred.credential,
+            raw: rawCredential,
             declaredType: payload["vct"] as? String
         ) {
             return (false, reason)
@@ -405,13 +466,13 @@ extension SirosWallet {
         // replaced while the re-resolution was in flight.
         let effectiveVctm = integrity.refreshed?.vctm ?? vctm
         let metadata = offer.flatMap {
-            CredentialUtils.buildMetadata(offer: $0, vctm: effectiveVctm, rawCredential: cred.credential)
+            CredentialUtils.buildMetadata(offer: $0, vctm: effectiveVctm, rawCredential: rawCredential)
         }
 
         let stored = StoredCredential(
             id: randomUint32Id(),
             format: cred.format,
-            raw: cred.credential,
+            raw: rawCredential,
             kid: index < (attestedKeyIds?.count ?? 0) ? attestedKeyIds?[index] : nil,
             metadata: metadata,
             issuedAt: payload["iat"] as? Int64,
