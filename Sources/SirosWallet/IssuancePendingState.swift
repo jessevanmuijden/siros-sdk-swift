@@ -120,6 +120,9 @@ final class IssuanceStartEpoch: @unchecked Sendable {
         lock.lock(); value += 1; lock.unlock()
     }
 
+    /// The attempt that is current now (for a cleanup that must not outlive it).
+    var current: Int { lock.lock(); defer { lock.unlock() }; return value }
+
     func isCurrent(_ epoch: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return value == epoch

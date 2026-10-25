@@ -41,7 +41,7 @@ extension SignResponseSender {
         dpopKeyId: String? = nil,
         dpopProof: String? = nil,
         credentialResponseEncryptionJwk: [String: String]? = nil, credentialCount: Int? = nil,
-        transactionId: String? = nil, interval: Int? = nil, error: String? = nil, errorCode: String? = nil,
+        responseJwe: String? = nil, transactionId: String? = nil, interval: Int? = nil, error: String? = nil, errorCode: String? = nil,
         messageId: String? = nil
     ) {
         sendSignResponse(SignResponseMessage(
@@ -55,7 +55,7 @@ extension SignResponseSender {
             dpopKeyId: dpopKeyId,
             dpopProof: dpopProof,
             credentialResponseEncryptionJwk: credentialResponseEncryptionJwk, credentialCount: credentialCount,
-            transactionId: transactionId, interval: interval, error: error, errorCode: errorCode
+            transactionId: transactionId, interval: interval, responseJwe: responseJwe, error: error, errorCode: errorCode
         ))
     }
 }
@@ -72,7 +72,8 @@ extension WalletEngineSession: SignResponseSender {
             dpopKeyId: message.dpopKeyId,
             dpopProof: message.dpopProof,
             credentialResponseEncryptionJwk: message.credentialResponseEncryptionJwk, credentialCount: message.credentialCount,
-            transactionId: message.transactionId, interval: message.interval, error: message.error, errorCode: message.errorCode,
+            responseJwe: message.responseJwe, transactionId: message.transactionId, interval: message.interval,
+            error: message.error, errorCode: message.errorCode,
             messageId: message.messageId
         )
     }
@@ -343,23 +344,19 @@ extension SirosWallet {
                 let verifier = Self.transactionVerifierLabel(trust: evaluated, fallback: params.audience)
                 return try await trackedTransaction(flowId: flowId) { try await self.wmpTransactionPresentation(flowId: flowId, params: params, verifier: verifier) }
             }
-            // NOTE (pre-existing, separate gap - not addressed by this
-            // change): unlike the legacy engine transport's
-            // SignRequestParams, WMP's SignSubFlowParams carries no
-            // credentials_to_include equivalent at all, so there is no way
-            // for this handler to know which credential(s)
-            // handleWmpMatchRequest matched/the user selected, or to build a
-            // real per-credential vp_token (mso_mdoc/SD-JWT/ZK) for this
-            // transport - it always falls back to the credential-less
-            // legacy signPresentation path below. Fixing this needs a wire
-            // protocol change to SignSubFlowParams, out of scope here.
+            // The WMP path has no credential selection or consent step, so it cannot present the credentials a
+            // request names: an encrypted response for such a request is refused rather than built around a
+            // credential-less token (which would be a wrong vp_token the engine cannot repair inside the JWE).
+            if params.responseEncryption != nil, !(params.credentialsToInclude ?? []).isEmpty {
+                throw SirosError.wallet(message: "WMP sign_presentation cannot present credentials: no selection step")
+            }
             let vpToken = try await keystore.signPresentation(
                 nonce: params.nonce,
                 audience: params.audience,
                 credentialIds: [],
                 kid: nil
             )
-            return SignSubFlowResult(vpToken: vpToken)
+            return try wmpPresentationResult(params: params, parts: [(nil, vpToken)])
 
         // Client authentication, same semantics as the legacy transport's
         // request_attestation / sign_client_auth cases in handleSignRequest:
@@ -764,7 +761,8 @@ extension SirosWallet {
                     lock.lock()
                     let storedMatchResults = pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
                     lock.unlock()
-                    var vpParts: [String] = []
+                    var vpParts: [PresentationPart] = []
+                    var answer: SignResponseMessage?
                     do {
                     for ref in credsToInclude {
                         // A flow that ended (or a logout) while the user decided must not sign.
@@ -772,31 +770,36 @@ extension SirosWallet {
                         // ref.credentialId is the WMP wire-protocol identifier
                         // (String) - parse it back to the numeric
                         // StoredCredential.id it refers to.
-                        guard let cred = allCreds.first(where: { $0.id == Int64(ref.credentialId) }) else { continue }
+                        // A selected credential that is gone from the store is a refusal, not a silently shorter
+                        // presentation: exactly one token per selected reference, or none.
+                        guard let cred = allCreds.first(where: { $0.id == Int64(ref.credentialId) }) else {
+                            throw SirosError.wallet(message: "A selected credential is no longer available")
+                        }
                         let matchResult = storedMatchResults?.first(where: { result in
                             result.queryId == ref.credentialQueryId || result.candidates.contains(where: { $0.id == cred.id })
                         })
-                        vpParts.append(try await buildSignPresentationVpPart(
+                        vpParts.append((ref.credentialQueryId, try await buildSignPresentationVpPart(
                             cred: cred,
                             ref: ref,
                             matchResult: matchResult,
                             nonce: nonce,
                             audience: audience,
-                            msg: msg,
+                            context: SignPresentationContext(msg.params),
                             transactionData: ref.credentialQueryId.flatMap { scaPlan?.bindings[$0] },
                             transactionKid: scaPlan?.kid(for: ref.credentialQueryId, fallback: nil)
-                        ))
+                        )))
                     }
                     // A signer need not observe cancellation: recheck after the FINAL signing await,
                     // so an ended flow's token is never sent and its consent never recorded.
                     try Task.checkCancellation()
+                    // Built here, so a response that cannot be encrypted finalizes the plan as failed.
+                    answer = try presentationAnswer(msg: msg, parts: vpParts)
                     } catch {
                         // A cancelled request is not a signing failure and is not logged as one.
                         if !Task.isCancelled && !(error is CancellationError) { await Self.shielded { await scaPlan?.plan.complete(failedWith: error) } }
                         throw error
                     }
-                    let vpToken = vpParts.joined(separator: "\n")
-                    engine.sendSignResponse(flowId: msg.flowId, vpToken: vpToken, messageId: msg.messageId)
+                    if let answer { engine.sendSignResponse(answer) }
                     // The record of a presentation that was sent must be written even if the flow's
                     // completion cancels this task meanwhile.
                     await Self.shielded { await scaPlan?.plan.complete(signed: true) }
@@ -804,7 +807,7 @@ extension SirosWallet {
                     let vpToken = try await keystore.signPresentation(
                         nonce: nonce, audience: audience, credentialIds: [], kid: nil
                     )
-                    engine.sendSignResponse(flowId: msg.flowId, vpToken: vpToken, messageId: msg.messageId)
+                    try sendPresentationResponse(engine: engine, msg: msg, parts: [(nil, vpToken)])
                 }
 
             case "request_attestation":
@@ -868,6 +871,10 @@ extension SirosWallet {
                 engine.sendSignResponse(flowId: msg.flowId, messageId: msg.messageId)
                 reportSignFailure(flowId: msg.flowId, message: refusal.verifierErrorCode, notifyError: refusal.reason != .declined)
             } else {
+                // The engine waits for an answer to this request: say that it failed (with the original
+                // `message_id`) instead of leaving it to its sign timeout. Nothing of the failure's detail is sent.
+                let code = (error as? PresentationResponseError)?.code ?? "SIGN_ERROR"
+                engine.sendSignResponse(flowId: msg.flowId, error: "the request could not be answered", errorCode: code, messageId: msg.messageId)
                 reportSignFailure(flowId: msg.flowId, message: error.localizedDescription)
             }
         }
@@ -884,13 +891,13 @@ extension SirosWallet {
     /// `nil` if none was cached for this credential (falls back to
     /// `cred.format` alone to decide the branch, same as before this was
     /// extracted).
-    private func buildSignPresentationVpPart(
+    func buildSignPresentationVpPart(
         cred: StoredCredential,
         ref: CredentialRef,
         matchResult: CredentialMatcher.MatchResult?,
         nonce: String,
         audience: String,
-        msg: SignRequestMessage,
+        context: SignPresentationContext,
         transactionData: TransactionDataBinding? = nil,
         transactionKid: String? = nil
     ) async throws -> String {
@@ -935,14 +942,14 @@ extension SirosWallet {
                     // verifier_context binding input for the WS-engine
                     // transport, where (unlike DC API) go-wallet-backend
                     // forwards it from the original request_uri.
-                    sessionId: msg.params.verifierSessionId
+                    sessionId: context.verifierSessionId
                 )
                 : nil
             let sessionTranscript = MdocDeviceResponseBuilder.buildOpenID4VPSessionTranscript(
                 clientId: audience,
                 nonce: nonce,
-                responseUri: msg.params.responseUri ?? "",
-                verifierJwkThumbprint: msg.params.verifierJwkThumbprint
+                responseUri: context.responseUri ?? "",
+                verifierJwkThumbprint: context.verifierJwkThumbprint
             )
             let result = try await system.generateProof(
                 spec: spec,
@@ -979,8 +986,8 @@ extension SirosWallet {
                 disclosedClaims: ref.disclosedClaims,
                 nonce: nonce,
                 audience: audience,
-                responseUri: msg.params.responseUri ?? "",
-                verifierJwkThumbprint: msg.params.verifierJwkThumbprint,
+                responseUri: context.responseUri ?? "",
+                verifierJwkThumbprint: context.verifierJwkThumbprint,
                 kid: cred.kid
             )
             return deviceResponse.base64EncodedString()

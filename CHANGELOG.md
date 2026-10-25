@@ -219,6 +219,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Added
+- **Engine-blind presentation: the wallet builds the `direct_post.jwt` response.** `sign_presentation`
+  for `direct_post.jwt` carries `response_encryption {jwk, alg, enc}`, `state` (only if the request had
+  one) and `verified_request`; the wallet answers `sign_response {response_jwe}` with NO `vp_token`,
+  and the engine posts `response=<jwe>` to the `response_uri` it validated (engine-blind contract
+  section G; go-wallet-backend #471). On BOTH the engine WebSocket and WMP. The JWE is
+  ECDH-ES with A128GCM or A256GCM to the verifier's P-256 key, its protected header carries exactly
+  the requested `alg`/`enc`, the JWK's `kid`, `epk` and `cty: JWT`, and its payload is the JARM claims
+  (`iss` `https://self-issued.me/v2`, `aud`, `iat`, `exp` = `iat` + 300, `vp_token`, `state`). `aud` is
+  `verified_request.client_id` and nothing else: without one nothing is built. `vp_token` is built by
+  the wallet: for DCQL `{queryId: [token, ...]}` grouped in order (every part names its query),
+  otherwise the string. A private or non-P-256 key, `use` other than `enc`, an `alg` other than
+  `ECDH-ES` or an `enc` other than the two GCM variants is refused, and a refused response answers
+  neither `response_jwe` nor `vp_token`. Plain `direct_post`, query and fragment modes are unchanged:
+  the wallet returns `vp_token` and the engine builds the rest. The response is checked before it is
+  sent as the engine will check it (five segments, none empty but the encrypted key of direct ECDH-ES,
+  at most 4 MiB, header `alg`/`enc` the request's and `kid` the JWK's), and is built only for a
+  request the engine verified as `direct_post.jwt`. Over WMP it is `response_jwe` in the `result` of
+  the child flow (https://github.com/sirosfoundation/siros-sdk-swift/pull/220). A `response_encryption`
+  that is present but unusable (malformed, `null`) is an error, never read as absent (which would send a
+  plain `vp_token`); a response that cannot be encrypted finalizes a transaction consent as failed; and a
+  WMP `sign_presentation` (which has no credential selection or consent step, so it signs a
+  credential-less token) refuses an encrypted response for a request that names credentials, instead of
+  building a JWE around a wrong `vp_token`; a response that cannot be built (no validated `client_id`, a bad key, an unsupported pair, too large) and any other sign failure is ANSWERED with an error `sign_response` (the original `message_id`, a code and no detail) instead of left to the engine's sign timeout; a verifier JWK with a malformed member, or any private `d`, is refused rather than filtered; a selected credential that is gone from the store is a refusal, not a shorter presentation; `response_encryption: null` or an unreadable one is refused on the
+  WebSocket too (`ResponseEncryptionMember`). Cross-checked against go-jose
+  v4.1.6, which opens the wallet's JWE (A128GCM and A256GCM, with the `kid`).
 - **`SirosWallet.addPasskey(nickname:authorizer:)`: add a passkey to the
   signed-in account (go-wallet-backend#352, backend PR #453; same shapes as
   siros-sdk-kotlin's).** An account that has a passkey needs one of them to
@@ -707,6 +732,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Fixed
+- **The ready-state restore after a failed issuance can no longer overwrite a later state.** The restore revalidates its
+  flow, generation and issuance attempt, and replaces the state, under one lock acquisition after the awaited store read:
+  a logout's `.disconnected`, a cancellation, or a replacement issuance that began without cancelling the failed one is
+  left alone. The WMP session closes locally whatever the close notification does (see the WMP entry).
+- **A refusal's cleanup no longer outlives its issuance.** When a plain completion is refused after the wallet offered a
+  key, the `credential_failure` send is awaited; if that issuance was cancelled and another began meanwhile, the
+  cleanup (and the restore of the ready state after the awaited store read) runs only if the refused flow still owns the
+  state, decided under the wallet lock. Transaction-bearing `direct_post.jwt` presentations are covered end to end: the
+  `response_jwe` decrypts to the query-grouped `vp_token`, and a response that cannot be built after signing returns
+  nothing and is not recorded as consented.
+- **Presentation encryption: the top-level `response_mode` counts too.** A `direct_post.jwt` there, with neither
+  `verified_request` nor `response_encryption`, is refused on both transports instead of answered with a plaintext
+  `vp_token`. The transaction-data end-to-end fixtures now use plain `direct_post` for their KB-JWT contract checks.
+- **Presentation encryption: handover, header and strict request decoding.** The mdoc `OpenID4VPHandover` thumbprint
+  for a request with `response_encryption` is the RFC 7638 thumbprint of that key (`JwkThumbprint.ec`), never the
+  engine's `verifier_jwk_thumbprint` (both transports, both mdoc builders go through `SignPresentationContext`).
+  The JARM JWE header no longer sets `cty: JWT` (the plaintext is a JSON claims set). A malformed `verified_request`
+  or `state` on a sign request is `INVALID_PARAMS` instead of being read as absent, which with `response_encryption`
+  omitted would have answered a `direct_post.jwt` request with a plaintext `vp_token`.
+- **Blind issuance: frames and requests of replaced or lost sockets, failed and cancelled flows.** Each receive loop
+  labels the frames it delivers with ITS socket's generation, and a frame a replaced socket delivers late is dropped
+  before dispatch. A lost socket advances the generation at once (during the backoff, and when retries are exhausted
+  and no replacement opens), so requests buffered from it are refused. `reportSignFailure` and `cancelCurrentFlow()`
+  mark the flow ended, so a buffered `generate_proof` for it neither recreates its key nor is answered; a decrypt for
+  an ended flow is answered `NO_RESPONSE_KEY`.
 - **Blind issuance: requests of lost or replaced sockets, cancelled and failed flows.** `WalletEngineSession` stamps each
   sign request with the generation (its `epoch`) of the socket that carried it (`SignRequestMessage.socketGeneration`)
   and with a request epoch (`requestEpoch`); `onSocketReplaced` fires, outside every lock, when the connection is lost
