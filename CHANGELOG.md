@@ -195,55 +195,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signForSca(keyId:payload:)` (defaults refuse). The sample app's biometric
   provider is gone.
 
-### Changed
-- **BREAKING: the minimum Swift is now 6.0** (`swift-tools-version: 6.0`, Xcode 16+). SwiftDraw, used for SVG logos, declares tools 6.0, so a 5.10 toolchain could no longer resolve the package. The package stays in the Swift 5 language mode (`swiftLanguageModes: [.v5]`); only the tools version changed.
-
 ### Added
 - **`LogoSanitizer` / `DisplayLogo`: safe rendering of credential and issuer
   display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
   returns `.image(pngBytes)`, `.remote(httpsURL)` or a typed `LogoRejection`
   (fail closed). `data:` logos must be `data:<type>;base64,...` with type
-  `image/png|jpeg|webp|gif|svg+xml`, at most 256 KiB decoded and 2048 px per
-  side; rasters are decoded with ImageIO, checked to be the declared type, and
-  re-encoded as a fresh PNG, so metadata and trailing/polyglot payloads are
-  dropped. **SVG** is first run through a deny-by-default allowlist guard (XMLParser): only
-  `svg` (root), `g`, `defs`, `title`, `desc`, `path`, `rect`, `circle`, `ellipse`,
-  `line`, `polyline`, `polygon`, `linearGradient`, `radialGradient`, `stop` and
-  `clipPath` with validated geometry, paint (`url(#id)` only), stroke, opacity,
-  transform and gradient attributes are accepted; style attributes/elements, text and
-  fonts, `use`, `image`, `pattern`, `mask`, `filter`, `marker`, animation, scripts,
-  links, DOCTYPE/entities, namespaced content and anything not understood are refused,
-  never repaired. (SwiftDraw 0.29.0 crashes or hangs on five input classes we found, so
-  a denylist is not enough.) What passes is rasterized by
-  [SwiftDraw](https://github.com/swhitty/SwiftDraw) (pinned exactly, 0.29.0,
-  zlib licence) to at most 512 px and re-encoded like any raster. Same policy
-  as siros-sdk-kotlin. `LogoSanitizer.fetchAndSanitize` and `LogoCache` fetch
-  and sanitize `https` SVG logos the same way. Only `https:` remote logos pass
-  (`http:` and other schemes are refused). Without ImageIO (Linux) every
-  `data:` logo is refused. `LogoCache` sanitizes off the main actor and caches
-  by URI (a cancelled fetch is not cached); the sample app shows the issuer initial
-  until ready or on failure. Remote fetches validate the URL and every redirect
-  target (https, no userinfo) and stop reading at the 256 KiB cap. SVG `pattern`
-  and `mask` are refused (SwiftDraw 0.29.0 overflows the stack on self-referencing
-  ones), and width/height/viewBox are range-checked before SwiftDraw sees them
-  (it traps on values like `1e30`). Nested `<svg>` is refused (SwiftDraw re-processes
-  nested children at every level: 20 levels took 55 s), and element count (5000) and
-  depth (64) are capped. Remote fetches have one 15 s wall-clock budget for request
-  and body (a non-finite or non-positive `timeout:` is refused, large ones clamped to 120 s),
-  and concurrent resolves of one URI share a single download. `width`/`height` in an
-  `<svg style="...">` are range-checked like the attributes.
-  Path data, transform lists and `points` are validated strictly (SwiftDraw hangs on
-  `d="M0 0Z0"`), 4/8-digit alpha hex and plain `href` are refused (SwiftDraw mis-handles
-  them), and `LogoCache` fetches every https logo and decides raster versus SVG from the
-  response `Content-Type` instead of the file name; the sample app draws only sanitized
-  results. SVG without a `Content-Type` is routed by a content sniff (still guarded);
-  timeouts and network errors are reported as `timedOut`/`networkFailure` and are not cached.
-  Path complexity is capped (5000 segments / 1000 subpaths per path, 20,000 per document):
-  SwiftDraw's close handling is quadratic, 99,000 compact `Z`s did not finish in 25 s.
-  Each clip-path use is charged the clip path's segments (SwiftDraw rebuilds it per use: 5,000
-  segments x 4,000 uses took 9.6 s) and gradient stops x paint uses are capped. The numeric
-  grammar is linear-time (possessive quantifiers).
-  See docs/ISSUER-LOGOS.md.
+  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 2048 px per side; they
+  are decoded with ImageIO, checked to be the declared type, and re-encoded as a
+  fresh PNG, so metadata and trailing/polyglot payloads are dropped. **SVG is
+  refused** (`svgNotSupported`; script, external references, no safe renderer in
+  this SDK); it is tracked in a separate pull request. Only `https:` remote logos
+  pass (`http:` and other schemes are refused). Without ImageIO (Linux) every
+  `data:` logo is refused. Same policy as siros-sdk-kotlin, except that Kotlin
+  also renders SVG.
+  `LogoCache` fetches every `https` logo once (`LogoSanitizer.fetchAndSanitize`),
+  decides raster versus refused-SVG from the response `Content-Type` (untyped bytes
+  are sniffed), caches by URI off the main actor, and shares one download between
+  concurrent callers (the last waiter leaving cancels it). Fetches validate the URL
+  and every redirect target (https, no userinfo), stop reading at the 256 KiB cap,
+  have one wall-clock budget (default 15 s, clamped to 120 s, invalid values
+  refused), report `timedOut`/`networkFailure` for transport problems, and never
+  cache transient failures or cancellations. The sample app shows the issuer initial
+  until the logo is ready or when it fails. See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
   assertion (step-up, valid 2 minutes, single use) and the typed confirmation
