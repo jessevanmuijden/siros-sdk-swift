@@ -197,17 +197,49 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         credentialsKeystore.lock()
     }
 
+    /// Forwarded to `credentialsKeystore`, which owns the PRF-protected
+    /// container (as `exportEncryptedContainer` is).
+    public func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        try await credentialsKeystore.preparePrfKey(
+            credentialId: credentialId, prfOutput: prfOutput, prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo
+        )
+    }
+
+    public func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        try await credentialsKeystore.commitPrfKey(prepared)
+    }
+
+    /// Tags the original passkey's PRF entry in the container this adapter's
+    /// `credentialsKeystore` owns - otherwise a WSCD-backed wallet keeps an
+    /// anonymous original entry that a login on an installation without that
+    /// passkey cached cannot find by credential ID.
+    public func setCredentialId(_ credentialId: Data) {
+        credentialsKeystore.setCredentialId(credentialId)
+    }
+
     /// Plugin whose keys live on an external authenticator. They cannot be
     /// erased by this SDK and are skipped by ``eraseKeyMaterial()``.
     private static let externalAuthenticatorPluginId = "fido2"
 
-    /// Deletes every key the retained `signer` holds, except those on an
-    /// external authenticator. Continues past a failing key and throws one
-    /// error naming each, so the caller can report that key material remains.
+    /// Admits key creation again after ``eraseKeyMaterial()`` closed it. Called by
+    /// the wallet when a NEW session starts, never by an unlock, so an unlock that
+    /// races an erase cannot let a key be created behind its key-list snapshot.
+    /// Deletes nothing.
     public func reopenKeyOperations() {
         keyGate.reopen()
     }
 
+    /// Closes key creation, waits for the creations already admitted, then deletes
+    /// every key the retained `signer` holds except those on an external
+    /// authenticator. Continues past a failing key and throws one error naming
+    /// each, so the caller can report that key material remains. Key creation
+    /// stays closed until ``reopenKeyOperations()``.
     public func eraseKeyMaterial() async throws {
         // No new key may be created from here on, and one being created now is
         // waited for, so the snapshot below cannot miss it.

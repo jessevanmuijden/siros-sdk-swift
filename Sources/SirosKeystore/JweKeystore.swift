@@ -29,6 +29,13 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
     var credentials: [Int64: String] = [:]
     private var presentationRecords: [Int64: String] = [:]
     private var _mainKey: SymmetricKey?
+
+    /// Identifies the current unlocked session of this keystore: replaced on
+    /// every unlock and on lock. A `PreparedPrfKey` carries the one it was
+    /// prepared under, so a commit arriving after the keystore was locked and
+    /// unlocked again - possibly for another account - is refused instead of
+    /// appending one account's PRF entry to another's container.
+    private var unlockToken = UUID()
     private var containerMetadata: ContainerData?
     // Preserve full WalletStateContainer for round-trip fidelity
     var preservedWalletState: [String: Any]?
@@ -200,6 +207,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
                 mainKeyInfo: mainKeyInfo
             )
             _mainKey = unwrappedMainKey
+            unlockToken = UUID()
 
             let jwePayload = try decryptJwe(container.jwe, mainKey: unwrappedMainKey)
             if let jweDict = jwePayload as? [String: Any] {
@@ -221,6 +229,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
             modifiedPresentationIds.removeAll()
             let (newMainKey, newMainKeyInfo) = EncryptedContainer.generateMainKey()
             _mainKey = newMainKey
+            unlockToken = UUID()
 
             let prfKey = EncryptedContainer.derivePrfKey(
                 prfOutput: prfOutput,
@@ -274,6 +283,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         credentialRefreshTokens.removeAll()
         credentialMetadata.removeAll()
         _mainKey = nil
+        unlockToken = UUID()
         containerMetadata = nil
         preservedWalletState = nil
         rewriteRefusal = nil
@@ -558,6 +568,64 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
     public func exportEncryptedContainer() async throws -> Data {
         mutex.lock()
         defer { mutex.unlock() }
+        return try exportContainerLocked(extraPrfKey: nil)
+    }
+
+    public func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        mutex.lock()
+        defer { mutex.unlock() }
+        try requireUnlocked()
+        guard !credentialId.isEmpty else { throw KeystoreError.invalidParameter("Empty credential id") }
+        guard let meta = containerMetadata, let mainKeyInfo = meta.mainKey, let mainKey = _mainKey else {
+            throw KeystoreError.containerMissing("No container metadata")
+        }
+        guard !meta.prfKeys.contains(where: { $0.credentialId == credentialId }) else {
+            throw KeystoreError.invalidParameter("A PRF key for this credential already exists")
+        }
+        let prfKey = EncryptedContainer.derivePrfKey(prfOutput: prfOutput, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)
+        let encapsulation = try EncryptedContainer.wrapMainKey(prfKey: prfKey, mainKey: mainKey, mainKeyInfo: mainKeyInfo)
+        let entry = PrfKeyInfo(
+            credentialId: credentialId,
+            transports: nil,
+            prfSalt: prfSalt,
+            hkdfSalt: hkdfSalt,
+            hkdfInfo: hkdfInfo,
+            algorithm: AesGcmKeyAlgorithm(name: "AES-GCM", length: 256),
+            keypair: encapsulation.keypair,
+            unwrapKey: encapsulation.unwrapKey
+        )
+        return PreparedPrfKey(
+            container: try exportContainerLocked(extraPrfKey: entry), credentialId: credentialId, entry: entry,
+            ownerToken: unlockToken
+        )
+    }
+
+    public func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        mutex.lock()
+        defer { mutex.unlock() }
+        try requireUnlocked()
+        guard var meta = containerMetadata else { throw KeystoreError.containerMissing("No container metadata") }
+        guard let entry = prepared.entry else {
+            throw KeystoreError.invalidParameter("Not a PRF key prepared by this keystore")
+        }
+        guard prepared.ownerToken == unlockToken else {
+            throw KeystoreError.invalidParameter("PRF key was prepared in a different unlocked session of this keystore")
+        }
+        if !meta.prfKeys.contains(where: { $0.credentialId == entry.credentialId }) {
+            meta.prfKeys.append(entry)
+            containerMetadata = meta
+        }
+    }
+
+    /// `exportEncryptedContainer`'s body; the caller holds `mutex`.
+    /// `extraPrfKey` is serialized but not retained.
+    private func exportContainerLocked(extraPrfKey: PrfKeyInfo?) throws -> Data {
         try requireUnlocked()
         try requireRewritable()
 
@@ -583,6 +651,7 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
             pendingExtensionEvents.removeAll()
         }
 
+        if let extraPrfKey { meta.prfKeys.append(extraPrfKey) }
         return try EncryptedContainer.serialize(meta)
     }
 
@@ -1292,97 +1361,6 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         }
     }
 
-    // MARK: - JWE encrypt/decrypt (A256GCMKW / A256GCM)
-
-    /// Decrypt a JWE compact serialization using A256GCMKW / A256GCM.
-    private func decryptJwe(_ jweString: String, mainKey: SymmetricKey) throws -> [String: Any] {
-        let parts = jweString.split(separator: ".").map(String.init)
-        guard parts.count == 5 else {
-            throw KeystoreError.invalidContainer("JWE must have 5 parts")
-        }
-
-        let headerData = EncryptedContainer.base64UrlDecode(parts[0])
-        let encryptedKeyData = EncryptedContainer.base64UrlDecode(parts[1])
-        let ivData = EncryptedContainer.base64UrlDecode(parts[2])
-        let ciphertextData = EncryptedContainer.base64UrlDecode(parts[3])
-        let tagData = EncryptedContainer.base64UrlDecode(parts[4])
-
-        guard let header = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any] else {
-            throw KeystoreError.invalidContainer("Invalid JWE header")
-        }
-
-        // Extract the IV from the header for key unwrapping (A256GCMKW)
-        guard let headerIv = header["iv"] as? String,
-              let headerTag = header["tag"] as? String else {
-            throw KeystoreError.invalidContainer("Missing iv/tag in JWE header for A256GCMKW")
-        }
-
-        let kwIv = EncryptedContainer.base64UrlDecode(headerIv)
-        let kwTag = EncryptedContainer.base64UrlDecode(headerTag)
-
-        // Unwrap the Content Encryption Key (CEK) using A256GCMKW
-        let kwNonce = try AES.GCM.Nonce(data: kwIv)
-        let kwSealedBox = try AES.GCM.SealedBox(nonce: kwNonce, ciphertext: encryptedKeyData, tag: kwTag)
-        let cekData = try AES.GCM.open(kwSealedBox, using: mainKey)
-        let cek = SymmetricKey(data: cekData)
-
-        // Decrypt content with A256GCM using the CEK
-        let contentNonce = try AES.GCM.Nonce(data: ivData)
-        // AAD = base64url-encoded protected header
-        let aadData = Data(parts[0].utf8)
-        let contentSealedBox = try AES.GCM.SealedBox(
-            nonce: contentNonce,
-            ciphertext: ciphertextData,
-            tag: tagData
-        )
-        let plaintext = try AES.GCM.open(contentSealedBox, using: cek, authenticating: aadData)
-
-        guard let json = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any] else {
-            throw KeystoreError.invalidContainer("JWE payload is not valid JSON object")
-        }
-        return json
-    }
-
-    /// Encrypt a payload as JWE compact serialization using A256GCMKW / A256GCM.
-    private func encryptJwe(_ plaintext: Data, mainKey: SymmetricKey) throws -> String {
-        // Generate a random CEK (256-bit)
-        var cekBytes = Data(count: 32)
-        // swiftlint:disable:next force_unwrapping
-        cekBytes.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-        let cek = SymmetricKey(data: cekBytes)
-
-        // Wrap CEK with A256GCMKW
-        let kwNonce = AES.GCM.Nonce()
-        let kwSealed = try AES.GCM.seal(cekBytes, using: mainKey, nonce: kwNonce)
-        let encryptedKey = kwSealed.ciphertext
-        let kwIv = Data(kwNonce)
-        let kwTag = kwSealed.tag
-
-        // Build JWE header
-        let headerObj: [String: Any] = [
-            "alg": "A256GCMKW",
-            "enc": "A256GCM",
-            "iv": EncryptedContainer.base64UrlEncode(kwIv),
-            "tag": EncryptedContainer.base64UrlEncode(kwTag),
-        ]
-        let headerData = try JSONSerialization.data(withJSONObject: headerObj)
-        let headerB64 = EncryptedContainer.base64UrlEncode(headerData)
-
-        // Encrypt content with A256GCM
-        let contentNonce = AES.GCM.Nonce()
-        let aad = Data(headerB64.utf8)
-        let sealed = try AES.GCM.seal(plaintext, using: cek, nonce: contentNonce, authenticating: aad)
-
-        let parts = [
-            headerB64,
-            EncryptedContainer.base64UrlEncode(encryptedKey),
-            EncryptedContainer.base64UrlEncode(Data(contentNonce)),
-            EncryptedContainer.base64UrlEncode(sealed.ciphertext),
-            EncryptedContainer.base64UrlEncode(sealed.tag),
-        ]
-        return parts.joined(separator: ".")
-    }
-
     #else
     // Stub for non-Apple platforms where CryptoKit is unavailable
     public init() {}
@@ -1391,6 +1369,14 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         throw KeystoreError.cryptoError("CryptoKit not available on this platform")
     }
     public func lock() {}
+    public func preparePrfKey(
+        credentialId: Data, prfOutput: Data, prfSalt: Data, hkdfSalt: Data, hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        throw KeystoreError.cryptoError("CryptoKit not available on this platform")
+    }
+    public func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        throw KeystoreError.cryptoError("CryptoKit not available on this platform")
+    }
     public func generateKey(algorithm: String = "ES256") async throws -> String {
         throw KeystoreError.cryptoError("CryptoKit not available on this platform")
     }

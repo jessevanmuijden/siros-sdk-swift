@@ -165,12 +165,24 @@ extension SirosWallet {
         }
     }
 
+    /// The current session generation - see ``SirosWallet/sessionGeneration``'s
+    /// doc comment. A caller that captures this before its own first `await`
+    /// and compares it again right before applying a result locally (e.g.
+    /// `addPasskey`) can tell whether the session it started for is still the
+    /// one now active, rather than one a logout or a login/re-login to a
+    /// different account has since replaced.
+    func currentSessionGeneration() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return sessionGeneration
+    }
+
     /// Ends the current session generation and returns the new one. Call
     /// whenever a session ends or is replaced.
     @discardableResult
     func bumpSessionGeneration() -> Int {
         lock.lock(); defer { lock.unlock() }
         sessionGeneration += 1
+        enrollmentEpoch &+= 1
         reloginDoneForGeneration = false
         // The session (logout, login, account replacement) is over, and so is every
         // issuance of it: an OAuth callback still pending (it keeps its entry, so it
@@ -187,6 +199,25 @@ extension SirosWallet {
         // committing its old offer or dispatching under the next account.
         issuanceStartEpoch.invalidate()
         return sessionGeneration
+    }
+
+    /// Whether an enrolment started under (`generation`, `epoch`) still belongs
+    /// to the live session: no logout or new session finished, and no login,
+    /// register, resume or unlock has started replacing the scope since.
+    /// The caller holds `lock`.
+    func enrollmentIsCurrentLocked(generation: Int, epoch: UInt64) -> Bool {
+        sessionGeneration == generation && enrollmentEpoch == epoch
+    }
+
+    /// Ends every in-flight `addPasskey`'s claim on the session. Called before
+    /// the session scope or the keystore's contents are replaced.
+    func invalidateEnrollment() {
+        lock.lock(); enrollmentEpoch &+= 1; lock.unlock()
+    }
+
+    func currentEnrollmentEpoch() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return enrollmentEpoch
     }
 
     func endSelfDrivenRelogin() {

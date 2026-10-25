@@ -104,6 +104,41 @@ credential offer. Refusals arrive as typed `IDVError`s. See
 [docs/IDENTITY-VERIFICATION.md](docs/IDENTITY-VERIFICATION.md) for the
 facetec-api contract the provider keeps and the error-code table.
 
+### Adding a passkey
+
+```swift
+switch try await wallet.addPasskey(nickname: "Laptop") {
+case .added:
+    break  // the new passkey can now unlock the wallet's data too
+case .sessionChanged:
+    break  // the backend ACCEPTED it for the account it was started for, but the
+           // active session changed meanwhile, so it was not applied locally
+case .notSubmitted:
+    break  // the session changed before it was sent: nothing is enrolled
+case .finishOutcomeUnknown:
+    break  // register-finish failed in transport: the backend may or may not hold
+           // the passkey; it was not rolled back - check the account's passkeys.
+           // Only partially handled: see the issue "Reconcile an unknown register-finish outcome" (#239)
+case .localCommitFailed:
+    break  // the backend accepted it and the cached container has it; the wallet
+           // locked its keystore - unlock again to pick the new entry up
+case .privateDataConflict:
+    break  // nothing changed, but the backend's data changed on another device and this
+           // wallet's copy is stale: an immediate retry sends the same stale snapshot and
+           // conflicts again. Reload through a fresh login (log out, log in), then retry
+case .authorizationRequired, .authorizationFailed, .retryNeeded:
+    break  // nothing changed; call again (the backend's challenge was spent)
+case .authorizerUnavailable, .passkeyCreationUnavailable, .prfUnsupported,
+     .registrationRejected, .walletLocked, .insufficientScope, .sessionRevoked:
+    break  // nothing changed
+}
+```
+
+An existing passkey authorises the addition (from the wallet's `AuthProvider`,
+or the optional `authorizer:` closure); an account with no passkey needs none.
+The keystore must be unlocked: the new passkey is given its own key to the
+container, sent with it.
+
 ### Deleting the account
 
 ```swift
