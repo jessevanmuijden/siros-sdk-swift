@@ -612,6 +612,17 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         wscdCredentials[pluginId] = state
     }
 
+    /// Onboarded = a non-empty `S.wscdCredentials` entry for the plugin, i.e. the
+    /// synced enrollment metadata this keystore itself loaded. Plugins without an
+    /// enrollment step are always fine; anything else with no record is not
+    /// onboarded (fail closed).
+    public func isWscdPluginOnboarded(pluginId: String) async -> Bool {
+        guard WscdPluginCapabilities.onboardingRequiredPluginIds.contains(pluginId) else { return true }
+        mutex.lock()
+        defer { mutex.unlock() }
+        return !(wscdCredentials[pluginId] ?? "").isEmpty
+    }
+
     // MARK: - ExtensionStore
 
     /// One namespace's entries - privatedata-spec §6.1 `S.extensions`.
