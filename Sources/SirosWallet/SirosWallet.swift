@@ -1164,8 +1164,10 @@ public final class SirosWallet: @unchecked Sendable {
             // no longer do.
             try await commitLoginReady(ticket: ticket, session: session)
             await reloadPresentationHistory()
-        } catch is CancellationError where !teardownGate.isValid(ticket) {
-            // An account wipe landed during this login: it stays wiped, and its `.disconnected` state stands.
+        } catch where !teardownGate.isValid(ticket) {
+            // An account wipe landed during this login (or a newer session replaced it): whatever it failed with -
+            // a cancelled passkey, an authorization or HTTP error, a PRF failure - is discarded, and the wipe's
+            // `.disconnected` (or the newer session's) state stands.
             return
         } catch let e as SirosError {
             // A SID-AUTH-06 refusal is a state, not an error: this passkey's
@@ -1383,7 +1385,8 @@ public final class SirosWallet: @unchecked Sendable {
                 assertion: assertion, userId: userId, displayName: displayName
             )
             await reloadPresentationHistory()
-        } catch is CancellationError where !teardownGate.isValid(ticket) {
+        } catch where !teardownGate.isValid(ticket) {
+            // Same as login(): an unlock overtaken by deletion discards any error and never replaces the state.
             return
         } catch {
             if await handleLifecycleRefusal(error, forAccount: unlockingAccountId) { return }

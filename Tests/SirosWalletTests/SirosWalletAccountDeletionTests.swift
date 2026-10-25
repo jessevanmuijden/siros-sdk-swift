@@ -466,8 +466,11 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         var saveGate: ConsentGate?
         /// When set, the first `getAll` AFTER a save parks here: the completion's final credential read.
         var readAfterSaveGate: ConsentGate?
+        /// When set, the first `getAll` parks here (a read that returns a pre-wipe snapshot after the wipe).
+        var firstReadGate: ConsentGate?
         private var saved = false
         func getAll() async -> [StoredCredential] {
+            if let gate = firstReadGate { firstReadGate = nil; await gate.park() }
             if saved, let gate = readAfterSaveGate { saved = false; await gate.park() }
             return await inner.getAll()
         }
@@ -695,6 +698,71 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertEqual(keystore.unlockCalls, 0)
         XCTAssertTrue(registry.listAccounts().isEmpty, "the registry entry must not be recreated after the wipe")
         XCTAssertNil(registry.activeAccountId)
+    }
+
+    /// The WMP match handler's delayed credential read: a pre-wipe snapshot must not repopulate the cleared match cache.
+    func testAWmpMatchRequestWhoseReadResumesAfterTheWipeCachesNothing() async throws {
+        let store = ParkingStore()
+        await store.inner.save(StoredCredential(id: 5, format: "dc+sd-jwt", raw: "a.b.c", kid: "k1", batchId: 5, instanceId: 0))
+        let readGate = ConsentGate()
+        store.firstReadGate = readGate
+        let keystore = RecordingKeystore()
+        keystore.keyIds = ["k1"]
+        let wallet = gateWallet(store: store, keystore: keystore)
+
+        let matching = Task { await wallet.handleWmpMatchRequest(flowId: "flow-w", payload: nil) }
+        while !readGate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        _ = await wallet.wipeLocalState()
+        readGate.release()
+        let result = await matching.value
+
+        wallet.lock.lock(); let cached = wallet.pendingMatchResultsByFlow.count; wallet.lock.unlock()
+        XCTAssertEqual(cached, 0, "the cleared match cache must not be repopulated")
+        XCTAssertTrue(result.matches.isEmpty, "deleted credentials must not be offered")
+    }
+
+    /// A login / unlock overtaken by deletion discards ANY error (not only CancellationError) and never publishes
+    /// `.error` over the wipe's `.disconnected`.
+    private struct Rejected: Error, LocalizedError { var errorDescription: String? { "rejected" } }
+
+    private func parkedAuthServer(_ gate: ConsentGate) -> AuthServerClient {
+        AuthServerClient(baseUrl: "https://as.example.invalid", tenantId: "default") { _, _, _, _ in
+            await gate.park()
+            throw SirosError.auth(message: "passkey cancelled")        // an ordinary error, not a CancellationError
+        }
+    }
+
+    func testALoginOvertakenByTheWipeDiscardsItsOrdinaryError() async throws {
+        let wallet = gateWallet(store: InMemoryCredentialStore(), keystore: RecordingKeystore())
+        let gate = ConsentGate()
+        wallet.authServerClient = parkedAuthServer(gate)
+
+        let logging = Task { try? await wallet.login() }
+        while !gate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        _ = await wallet.wipeLocalState()
+        gate.release()
+        _ = await logging.value
+
+        guard case .disconnected = wallet.state else { return XCTFail("the wipe's state must stand, got \(wallet.state)") }
+    }
+
+    func testAnUnlockOvertakenByTheWipeDiscardsItsOrdinaryErrorAndKeepsANewerState() async throws {
+        let wallet = gateWallet(store: InMemoryCredentialStore(), keystore: RecordingKeystore())
+        let gate = ConsentGate()
+        wallet.authServerClient = parkedAuthServer(gate)
+        wallet.setState(.keystoreLocked(userId: "u", displayName: "U"))
+
+        let unlocking = Task { try? await wallet.unlockKeystore() }
+        while !gate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        _ = await wallet.wipeLocalState()
+        await wallet.reopenForNewSession()                        // a newer session starts ...
+        wallet.setState(.ready(userId: "new", displayName: "N", credentials: []))
+        gate.release()
+        _ = await unlocking.value
+
+        guard case let .ready(userId, _, _, _) = wallet.state, userId == "new" else {
+            return XCTFail("the newer session's state must stand, got \(wallet.state)")
+        }
     }
 
     /// Admission stays closed after the wipe and opens only for a new session.

@@ -393,7 +393,12 @@ extension SirosWallet {
         }
     }
 
-    private func handleWmpMatchRequest(flowId: String, payload: AnyCodable?) async -> MatchResult {
+    func handleWmpMatchRequest(flowId: String, payload: AnyCodable?) async -> MatchResult {
+        // Before the credential read: a snapshot that resumes after an account wipe must not repopulate the cleared
+        // match cache with deleted credentials, nor offer them.
+        guard let token = currentTeardownToken() else {
+            return MatchResult(matches: [], noMatchReason: "The account is being deleted")
+        }
         let allCreds = await credentialStore.getAll()
         // WMP's "matching_credentials"/"match_request" progress step carries
         // the same payload shape as the legacy engine's "credential_selection"
@@ -438,7 +443,13 @@ extension SirosWallet {
         // write-only for the WMP transport, kept for parity/consistency
         // with the other two call sites and so it's ready once that
         // separate gap is closed.
-        lock.lock(); pendingMatchResultsByFlow[flowId] = matchResults; lock.unlock()
+        lock.lock()
+        guard isCurrentLocked(token) else {
+            lock.unlock()
+            return MatchResult(matches: [], noMatchReason: "The account was deleted")
+        }
+        pendingMatchResultsByFlow[flowId] = matchResults
+        lock.unlock()
 
         let matches = eligibleCreds.map { cred -> CredentialMatch in
             let queryId = matchResults.first(where: { result in result.candidates.contains(where: { $0.id == cred.id }) })?.queryId
