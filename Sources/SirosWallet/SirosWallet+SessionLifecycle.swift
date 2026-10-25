@@ -46,6 +46,7 @@ extension SirosWallet {
         // `handleLifecycleRefusal(_:forAccount:)`.
         let replacedAccountId = accountRegistry.activeAccountId
         lock.lock()
+        blindSessionEnded = true
         let engine = engineSession
         // The WMP transport holds its own live WebSocket, and the backend
         // re-checks the cut-off at every flow start - leaving it connected
@@ -59,6 +60,8 @@ extension SirosWallet {
         apiClient = nil
         lock.unlock()
         engine?.disconnect()
+        // Stop the handlers still running for the orchestrator's child flows BEFORE their state is cleared.
+        peer?.shutdownProfiles()
         if let peer { try? await peer.close() }
         cancelEngineTasks()
         authTokens?.clear()
@@ -73,6 +76,7 @@ extension SirosWallet {
         // wallet must not be left holding an unlocked keystore whose
         // credentials are still signable. A successful login() unlocks it
         // again as part of its normal path.
+        clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
         // Same account/session-boundary reasoning as `endSessionLocally()`

@@ -49,7 +49,8 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             erasedKeyMaterial = true
             if let eraseKeyMaterialError { throw eraseKeyMaterialError }
         }
-        func unlock(prfOutput: Data, encryptedContainer: Data, hkdfSalt: Data, hkdfInfo: Data) async throws {}
+        private(set) var unlockCalls = 0
+        func unlock(prfOutput: Data, encryptedContainer: Data, hkdfSalt: Data, hkdfInfo: Data) async throws { unlockCalls += 1 }
         func lock() { locked = true; isUnlocked = false }
         func generateKey(algorithm: String) async throws -> String { "key" }
         func sign(keyId: String, payload: Data, algorithm: String) async throws -> Data { Data() }
@@ -78,7 +79,12 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
             if let clearCredentialsError { throw clearCredentialsError }
             clearedCredentials = true
         }
-        func savePresentationRecord(id: Int64, json: String) async throws { savedPresentationRecords += 1 }
+        /// When set, `savePresentationRecord` parks here (inside the admitted write).
+        var saveRecordGate: ConsentGate?
+        func savePresentationRecord(id: Int64, json: String) async throws {
+            if let saveRecordGate { await saveRecordGate.park() }
+            savedPresentationRecords += 1
+        }
         func getAllPresentationRecords() async throws -> [Int64: String] { [:] }
         func clearPresentationRecords() async throws { clearedPresentationRecords = true }
         func generateKeypairs(count: Int) async throws -> [KeypairInfo] { [] }
@@ -458,11 +464,18 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
     private final class ParkingStore: CredentialStore, @unchecked Sendable {
         let inner = InMemoryCredentialStore()
         var saveGate: ConsentGate?
-        func getAll() async -> [StoredCredential] { await inner.getAll() }
+        /// When set, the first `getAll` AFTER a save parks here: the completion's final credential read.
+        var readAfterSaveGate: ConsentGate?
+        private var saved = false
+        func getAll() async -> [StoredCredential] {
+            if saved, let gate = readAfterSaveGate { saved = false; await gate.park() }
+            return await inner.getAll()
+        }
         func getById(_ id: Int64) async -> StoredCredential? { await inner.getById(id) }
         func save(_ credential: StoredCredential) async {
             if let saveGate { await saveGate.park() }
             await inner.save(credential)
+            saved = true
         }
         func update(_ credential: StoredCredential) async { await inner.update(credential) }
         func delete(_ id: Int64) async { await inner.delete(id) }
@@ -583,6 +596,105 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         XCTAssertNotNil(failure, "the presentation is aborted when it can no longer be recorded")
         XCTAssertTrue(wallet.presentationHistory.isEmpty)
         XCTAssertEqual(keystore.savedPresentationRecords, 0)
+    }
+
+    /// A completion whose save succeeded and whose final credential read resumes after the wipe must not overwrite
+    /// the wipe's `.disconnected` with `.ready`.
+    func testACompletionPausedAfterItsSaveDoesNotOverwriteDisconnectedWithReady() async throws {
+        let store = ParkingStore()
+        let readGate = ConsentGate()
+        store.readAfterSaveGate = readGate
+        let wallet = gateWallet(store: store, keystore: RecordingKeystore())
+        wallet.setState(.ready(userId: "u", displayName: "U", credentials: []))
+
+        let completing = Task { await wallet.handleFlowComplete(msg: completion([["format": "vc+sd-jwt", "credential": jwtCredential()]])) }
+        while !readGate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        _ = await wallet.wipeLocalState()
+        readGate.release()
+        await completing.value
+
+        guard case .disconnected = wallet.state else { return XCTFail("the wipe's state must stand, got \(wallet.state)") }
+    }
+
+    /// An admitted presentation-record save that finishes after the wipe is not reported as recorded, so the
+    /// signed presentation is not returned.
+    func testAPresentationRecordSavedAcrossTheWipeIsNotReportedAsRecorded() async throws {
+        let store = InMemoryCredentialStore()
+        await store.save(StoredCredential(id: 5, format: "mso_mdoc", raw: "YWJj", kid: "k1", batchId: 5, instanceId: 0))
+        let keystore = RecordingKeystore()
+        keystore.keyIds = ["k1"]
+        let recordGate = ConsentGate()
+        keystore.saveRecordGate = recordGate
+        let wallet = gateWallet(store: store, keystore: keystore)
+
+        let signing = Task { () -> Error? in
+            do { _ = try await wallet.signMdocPresentationForProximity(credentialId: 5, disclosedClaims: nil, sessionTranscriptBytes: Data([1])); return nil } catch { return error }
+        }
+        while !recordGate.hasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        // The save is admitted and suspended; the wipe closes the gate and waits for it.
+        let wiping = Task { await wallet.wipeLocalState() }
+        while wallet.currentTeardownToken() != nil { try await Task.sleep(nanoseconds: 5_000_000) }
+        recordGate.release()
+        _ = await wiping.value
+        let failure = await signing.value
+
+        XCTAssertNotNil(failure, "the presentation was signed across the wipe: it must not be returned as recorded")
+    }
+
+    // MARK: Session-start commits
+
+    private func decodeSession() throws -> LoginFinishResult {
+        try JSONDecoder().decode(LoginFinishResult.self, from: Data(#"{"uuid":"user-9","displayName":"U9","tenantId":"default"}"#.utf8))
+    }
+
+    private func assertion() -> SirosWallet.PasskeyAssertion {
+        SirosWallet.PasskeyAssertion(
+            challengeId: "c", credential: ["id": "cHN"], prfOutput: PrfOutput(first: Data([1])), prfSalt: Data([9]),
+            cachedAccount: nil, credentialId: Data("pk-9".utf8)
+        )
+    }
+
+    /// An unlock whose PRF recovery resumed after the wipe restores nothing: no keystore unlock, no `.ready`.
+    func testAKeystoreUnlockResumingAfterTheWipeRestoresNothing() async throws {
+        let keystore = RecordingKeystore()
+        let wallet = gateWallet(store: InMemoryCredentialStore(), keystore: keystore)
+        let ticket = try XCTUnwrap(wallet.teardownGate.ticket())          // taken before the unlock's first await
+        _ = await wallet.wipeLocalState()                                  // ... the wipe lands while it is paused
+
+        do {
+            try await wallet.commitKeystoreUnlock(
+                ticket: ticket, container: Data("c".utf8),
+                resolved: SirosWallet.UnlockKeystorePrfResolution(prfOutput: PrfOutput(first: Data([1])), hkdfSalt: Data([2]), hkdfInfo: Data([3]), recoveredSalt: Data([4])),
+                assertion: assertion(), userId: "user-9", displayName: "U9"
+            )
+            XCTFail("a refused commit must throw")
+        } catch is CancellationError {}
+        XCTAssertEqual(keystore.unlockCalls, 0, "the container's credentials and keys are not restored")
+        guard case .disconnected = wallet.state else { return XCTFail("got \(wallet.state)") }
+    }
+
+    /// The same for login: no unlock, and the account registry entry is not recreated.
+    func testALoginResumingAfterTheWipeRestoresNothingAndCreatesNoRegistryEntry() async throws {
+        let keystore = RecordingKeystore()
+        let registry = AccountRegistry.inMemory()
+        let wallet = SirosWallet(
+            config: WalletConfig(backendUrl: "https://wallet.example.invalid", credentialStore: InMemoryCredentialStore()),
+            authProvider: RecordingAuthProvider(), sessionStore: InMemorySessionStore(), keystore: keystore, accountRegistry: registry
+        )!
+        let ticket = try XCTUnwrap(wallet.teardownGate.ticket())
+        _ = await wallet.wipeLocalState()
+
+        do {
+            try await wallet.commitLoginUnlock(
+                ticket: ticket, privateData: Data("c".utf8),
+                resolved: SirosWallet.LoginPrfResolution(prfOutput: PrfOutput(first: Data([1])), prfSalt: Data([9]), hkdfSalt: Data([2]), hkdfInfo: Data([3]), recoveredSalt: nil),
+                accountId: "default:user-9", session: try decodeSession(), assertion: assertion()
+            )
+            XCTFail("a refused commit must throw")
+        } catch is CancellationError {}
+        XCTAssertEqual(keystore.unlockCalls, 0)
+        XCTAssertTrue(registry.listAccounts().isEmpty, "the registry entry must not be recreated after the wipe")
+        XCTAssertNil(registry.activeAccountId)
     }
 
     /// Admission stays closed after the wipe and opens only for a new session.

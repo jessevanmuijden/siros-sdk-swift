@@ -114,9 +114,27 @@ extension SirosWallet {
         if let reset { _state = reset }
         let conts = reset == nil ? [] : Array(stateContinuations.values)
         let engine = engineSession
+        let peer = wmpPeer
+        // Only the issuance being cancelled holds response keys; a flow that ends for other reasons drops
+        // its own state per flow id, and an unrelated presentation ending must not touch it.
+        credentialResponseKeys.removeAll()
+        decryptedCredentialResponses.removeAll()
+        credentialResponseEpoch += 1
+        // The requests the engine session has received so far belong to what was just cancelled, even before any
+        // progress named a flow (the wallet may still be `.ready`): they are refused when handled.
+        engine?.invalidateBufferedRequests()
         resetIssuanceGuardsLocked()
         lock.unlock()
-        if let cancelFlowId { try? engine?.cancelFlow(flowId: cancelFlowId) }
+        if let cancelFlowId {
+            try? engine?.cancelFlow(flowId: cancelFlowId)
+            // The flow is over for this wallet: marked ended, so a request for it still buffered on the legacy
+            // WebSocket is refused instead of recreating its key.
+            cancelTransactionTasks(flowId: cancelFlowId)
+        }
+        // On WMP the parents and their sign/match children live in the peer, and the wallet state need not say a flow
+        // is active (nothing sets it there): everything the peer is running for flows stops here, before this
+        // returns, whatever the state was.
+        peer?.cancelAllFlowsNow()
         if let reset { for c in conts { c.yield(reset) } }
     }
 
@@ -278,13 +296,20 @@ extension SirosWallet {
     /// Release all resources. Instance must not be reused after this.
     public func destroy() {
         lock.lock()
+        blindSessionEnded = true
         let engine = engineSession
+        let peer = wmpPeer
+        wmpPeer = nil
         engineSession = nil
         credentialNotifier = nil
         apiClient = nil
         lock.unlock()
         engine?.disconnect()
+        // The WMP session goes too, and its child-flow handlers stop before their state is cleared.
+        peer?.shutdownProfiles()
+        if let peer { Task { try? await peer.close() } }
         cancelEngineTasks()
+        clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
         // Same reason as logout()'s: a self-driven re-login still awaiting the
@@ -486,6 +511,9 @@ extension SirosWallet {
         flowEndSeq.removeAll()
         legacyFlowSnapshotQueue.removeAll()
         legacyFlowSnapshots.removeAll()
+        credentialResponseKeys.removeAll()
+        decryptedCredentialResponses.removeAll()
+        credentialResponseEpoch += 1
         lock.unlock()
         for cancel in consentTasks { cancel() }
     }

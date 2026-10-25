@@ -160,6 +160,28 @@ public final class WmpPeer: WmpPeerContext, @unchecked Sendable {
         try await notify(method: WmpMethods.flowCancel, params: params)
     }
 
+    /// Cancels `flowId` from a synchronous caller: this side's work for it (the flow's child flows included) stops
+    /// BEFORE this returns, so nothing it was doing can answer or recreate state afterwards; the cancel
+    /// notification goes out on a task. Application callbacks are not run (they could land after a replacement
+    /// flow has begun).
+    public func cancelFlowNow(flowId: String, reason: String? = nil) {
+        registry.cancelLocally(flowId: flowId)
+        removeFlowType(flowId: flowId)
+        Task { [self] in
+            guard let params = try? codec.encodeParams(FlowCancelParams(wmp: WmpMeta(), flowId: flowId, reason: reason)) else { return }
+            try? await notify(method: WmpMethods.flowCancel, params: params)
+        }
+    }
+
+    /// Cancels every flow this peer is running for the wallet (its parent flows; their sign/match children stop with
+    /// them), from a synchronous caller: see ``cancelFlowNow(flowId:reason:)``.
+    public func cancelAllFlowsNow(reason: String? = nil) {
+        flowTypeLock.lock()
+        let parents = flowTypeMap.filter { $0.value != WmpSubFlowTypes.sign && $0.value != WmpSubFlowTypes.match }.keys
+        flowTypeLock.unlock()
+        for flowId in parents { cancelFlowNow(flowId: flowId, reason: reason) }
+    }
+
     // MARK: - Dispatch Loop
 
     /// Stops the profiles' in-flight work (child flows running application handlers) and keeps them from

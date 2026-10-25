@@ -72,6 +72,28 @@ public final class SirosWallet: @unchecked Sendable {
     // Enablement records per flow / WMP session, consent flows in progress, log-store bookkeeping.
     var legacyFlowSnapshotQueue: [(effective: Bool, at: Date)] = []
     var legacyFlowSnapshots: [String: Bool] = [:]
+    // Engine-blind issuance (see `SirosWallet+CredentialResponseEncryption.swift`): the wallet's
+    // per-flow response-encryption key (memory only) and the Credential Responses decrypted for
+    // the flow, awaiting `flow_complete`. Both are dropped on every terminal path.
+    var credentialResponseKeys: [String: CredentialResponseKey] = [:]
+    var decryptedCredentialResponses: [String: [DecryptedCredentialResponse]] = [:]
+    /// Bumped when the session is torn down or the current flow is cancelled, so a late `generate_proof`
+    /// result cannot recreate a key for a flow that is gone.
+    var credentialResponseEpoch = 0
+    /// The engine session and socket generation each WebSocket response key was created on (WMP keys have none).
+    /// The flows a response key was OFFERED for, as a fact of its own: it outlives the key (a lost socket's cleanup removes
+    /// the key but not this), so a plain `flow_complete` that was already queued is still recognised as a downgrade and
+    /// refused. Removed when the flow ends and when the session does.
+    var offeredResponseKeyFlows: Set<String> = []
+    var responseKeyOrigin: [String: (engine: ObjectIdentifier, generation: Int)] = [:]
+    /// The issuance epoch in force when a WMP flow first asked this wallet for its response key: the tag a
+    /// completion over WMP is processed under (the WebSocket carries it as `FlowCompleteMessage.startTag`, which has
+    /// no wire form). Removed with the flow's other blind-issuance state.
+    var wmpFlowIssuanceEpochs: [String: Int] = [:]
+    /// Set when the session ends (logout, destroy, a refused installation); a new connection clears it.
+    var blindSessionEnded = false
+    /// Validates and splits a decrypted response's `credential_metadata` (see `CredentialMetadataReceiver`).
+    public var credentialMetadataReceiver: CredentialMetadataReceiver?
     var wmpSessionSnapshot = false
     var transactionTasks: [UUID: (flowId: String, cancel: @Sendable () -> Void)] = [:]
     var transactionLogStoreIsDefault = false
@@ -622,79 +644,6 @@ public final class SirosWallet: @unchecked Sendable {
         return _presentationHistory
     }
 
-    /// Filters `instances` down to the ones this wallet's own
-    /// `credentialConsumptionPolicy` and `presentationHistory` currently
-    /// consider eligible (i.e. not yet consumed), AND whose bound signing
-    /// key still actually exists in `keystore` - the same computation this
-    /// class performs internally before every presentation, exposed as a
-    /// convenience so consent/selection UI doesn't need to thread policy,
-    /// history, and live key availability through
-    /// `CredentialUtils.eligibleInstances` itself.
-    ///
-    /// The key-availability half of this check exists because a real,
-    /// recurring bug (found via live proximity-presentation testing) let a
-    /// credential whose signing key was silently lost (e.g. a sync that
-    /// never folded a software key into the persisted container - see
-    /// privatedata-spec#1/siros-wscd-manager#68 for the deeper architectural
-    /// fix) keep reporting "available" under
-    /// `CredentialConsumptionPolicy.neverConsume` forever, right up until a
-    /// live presentation attempt failed deep inside key selection with no
-    /// user-facing signal at all.
-    ///
-    /// - Parameter isZkPresentation: Per-candidate: will THIS presentation be
-    ///   a ZK proof? Callers that know the matched query's format (the DC API
-    ///   and engine paths) pass it so `CredentialConsumptionPolicy.consumeNonZkp`
-    ///   can tell ZK from raw; the default falls back to the stored format,
-    ///   which is never ZK - see `CredentialUtils.eligibleInstances`.
-    public func eligibleInstances(
-        from instances: [StoredCredential],
-        isZkPresentation: ((StoredCredential) -> Bool)? = nil
-    ) -> [StoredCredential] {
-        let eligible = policyEligibleInstances(from: instances, isZkPresentation: isZkPresentation)
-        // A container this build must not rewrite is read-only: a consumption would
-        // be recorded in memory only, and reopening would make the used instance
-        // eligible again (a one-time-use credential presented twice). So an
-        // instance whose presentation would be consumed is not offered.
-        guard keystore.unsupportedSchemaVersion != nil else { return eligible }
-        switch credentialConsumptionPolicy {
-        case .neverConsume: return eligible
-        case .consumeAll: return []
-        case .consumeNonZkp: return eligible.filter { isZkPresentation?($0) ?? false }
-        }
-    }
-
-    private func policyEligibleInstances(
-        from instances: [StoredCredential],
-        isZkPresentation: ((StoredCredential) -> Bool)?
-    ) -> [StoredCredential] {
-        let keyIds = availableKeyIds
-        if let isZkPresentation {
-            return CredentialUtils.eligibleInstances(
-                instances: instances,
-                policy: credentialConsumptionPolicy,
-                presentationHistory: presentationHistory,
-                availableKeyIds: keyIds,
-                isZkPresentation: isZkPresentation
-            )
-        }
-        return CredentialUtils.eligibleInstances(
-            instances: instances,
-            policy: credentialConsumptionPolicy,
-            presentationHistory: presentationHistory,
-            availableKeyIds: keyIds
-        )
-    }
-
-    /// The `kid`s this wallet's keystore can currently sign with - exposed so
-    /// consent/selection UI (e.g. a consent screen's exhausted-query
-    /// precheck) can compute eligibility ahead of time without a full
-    /// `eligibleInstances(from:)` round trip per candidate list. Read live
-    /// from `keystore.listKeys()` on every access, never cached: the whole
-    /// point of the check is to notice a key that has gone missing.
-    public var availableKeyIds: Set<String> {
-        Set(keystore.listKeys().map(\.keyId))
-    }
-
     /// Record a new presentation: adds it to the in-memory history and
     /// persists it into the encrypted container (privatedata-spec's
     /// `S.presentations[]`) so `CredentialUtils.groupForDisplay`'s
@@ -729,7 +678,10 @@ public final class SirosWallet: @unchecked Sendable {
         guard applied == true else { return false }
         if keystore.isUnlocked { await persistAndSyncKeystore() }
         await checkRenewThresholds(consumedCredentialIds: record.credentialIds)
-        return true
+        // The awaits above can finish after an account wipe: a record that was admitted but then wiped must not be
+        // reported as recorded (the callers return a signed presentation only for a recorded one).
+        lock.lock(); let stillCurrent = isCurrentLocked(token); lock.unlock()
+        return stillCurrent
     }
 
     /// Per-credential-configuration-id override for
@@ -1150,6 +1102,9 @@ public final class SirosWallet: @unchecked Sendable {
         }
         // A new session: admits writes again if an account wipe had closed them (waits for one still running).
         await reopenForNewSession()
+        // The admission ticket for this login, taken before its first await: every commit below re-checks it, so a
+        // wipe that lands meanwhile is never undone (credentials, keys, registry entry or `.ready` state restored).
+        guard let ticket = teardownGate.ticket() else { return }
         setState(.connecting)
         // See logout()'s identical reset: a WIA still cached from another
         // account (or from before a re-enrollment) must not be what identifies
@@ -1181,43 +1136,37 @@ public final class SirosWallet: @unchecked Sendable {
             // into the active scope. The registry's active account is only
             // moved once the unlock has succeeded.
             let accountId = "\(config.tenantId):\(session.uuid)"
-            sessionStore.activeAccountId = accountId
-            // Now the server has named the account, so a refusal from anything
-            // below this line is unambiguously about it.
-            loginAccountId = accountId
-
-            setupApiClientWithTokens(tokens)
+            try await admittedCommit(ticket) {
+                sessionStore.activeAccountId = accountId
+                // Now the server has named the account, so a refusal from anything
+                // below this line is unambiguously about it.
+                loginAccountId = accountId
+                setupApiClientWithTokens(tokens)
+            }
             let privateData = try await fetchPrivateData()
 
             // PRF/HKDF parameters, normal or recovered - see `resolveLoginPrf`.
             let cached = assertion.cachedAccount.flatMap { $0.accountId == accountId ? $0 : nil }
             let resolved = try await resolveLoginPrf(assertion: assertion, privateData: privateData, cachedAccount: cached)
 
-            try await keystore.unlock(
-                prfOutput: resolved.prfOutput.first,
-                encryptedContainer: privateData,
-                hkdfSalt: resolved.hkdfSalt,
-                hkdfInfo: resolved.hkdfInfo,
-                prfSalt: resolved.prfSalt
+            // The unlock restores the container's credentials and keys, and the bookkeeping creates the registry
+            // entry: one admitted commit. Records credentialId/salts and heals the account cache on recovery.
+            try await commitLoginUnlock(
+                ticket: ticket, privateData: privateData, resolved: resolved,
+                accountId: accountId, session: session, assertion: assertion
             )
 
-            // Records credentialId/salts and heals the account cache on
-            // recovery - see `recordSuccessfulLogin`.
-            recordSuccessfulLogin(
-                accountId: accountId, session: session, assertion: assertion,
-                prfSaltBytes: resolved.prfSalt, hkdfSalt: resolved.hkdfSalt, hkdfInfo: resolved.hkdfInfo,
-                recoveredSalt: resolved.recoveredSalt
-            )
-
+            try requireAdmitted(ticket)
             try await connectEngineWithToken(tokens)
 
             // A new session: a cut-off met on THIS one deserves its own
             // self-driven re-login, and the 401s of the session it replaced
             // no longer do.
-            bumpSessionGeneration()
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: session.uuid, displayName: session.displayName, credentials: creds))
+            try await commitLoginReady(ticket: ticket, session: session)
             await reloadPresentationHistory()
+        } catch is CancellationError where !teardownGate.isValid(ticket) {
+            // An account wipe landed during this login: it stays wiped, and its `.disconnected` state stands.
+            return
         } catch let e as SirosError {
             // A SID-AUTH-06 refusal is a state, not an error: this passkey's
             // wallet instance is suspended or the wallet was deactivated, and
@@ -1313,6 +1262,7 @@ public final class SirosWallet: @unchecked Sendable {
     /// refused this installation.
     func endSessionLocally() {
         lock.lock()
+        blindSessionEnded = true
         let engine = engineSession
         let peer = wmpPeer
         engineSession = nil
@@ -1321,9 +1271,11 @@ public final class SirosWallet: @unchecked Sendable {
         apiClient = nil
         lock.unlock()
         engine?.disconnect()
+        peer?.shutdownProfiles()
         if let peer { Task { try? await peer.close() } }
         cancelEngineTasks()
         releaseZkProvers()
+        clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
         sessionStore.clear()  // clears active account's session only
@@ -1393,6 +1345,8 @@ public final class SirosWallet: @unchecked Sendable {
     public func unlockKeystore() async throws {
         guard case .keystoreLocked(let userId, let displayName) = state,
               let asClient = authServerClient else { return }
+        // Taken before the first await: an unlock that resumes after an account wipe must restore nothing.
+        guard let ticket = teardownGate.ticket() else { return }
         // The account being unlocked, captured before the ceremony: a refusal
         // arrives after it, and the registry is mutable in between. See
         // `handleLifecycleRefusal(_:forAccount:)`.
@@ -1424,24 +1378,13 @@ public final class SirosWallet: @unchecked Sendable {
             let storedContainer = Data(storedJwe.utf8)
             let resolved = try await resolveUnlockKeystorePrf(assertion: assertion, storedContainer: storedContainer)
 
-            try await keystore.unlock(
-                prfOutput: resolved.prfOutput.first,
-                encryptedContainer: storedContainer,
-                hkdfSalt: resolved.hkdfSalt,
-                hkdfInfo: resolved.hkdfInfo
+            try await commitKeystoreUnlock(
+                ticket: ticket, container: storedContainer, resolved: resolved,
+                assertion: assertion, userId: userId, displayName: displayName
             )
-
-            if let recoveredSalt = resolved.recoveredSalt, let accountId = sessionStore.activeAccountId {
-                healAccountCache(
-                    accountId: accountId, userId: userId, displayName: displayName,
-                    credentialId: assertion.credentialId, prfSalt: recoveredSalt,
-                    hkdfSalt: resolved.hkdfSalt, hkdfInfo: resolved.hkdfInfo
-                )
-            }
-
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
             await reloadPresentationHistory()
+        } catch is CancellationError where !teardownGate.isValid(ticket) {
+            return
         } catch {
             if await handleLifecycleRefusal(error, forAccount: unlockingAccountId) { return }
             setState(.error(message: error.localizedDescription))
