@@ -656,6 +656,57 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertEqual(px[0], 255); XCTAssertEqual(px[3], 255, "inherited stops paint the rect")
     }
 
+    /// SwiftDraw rebuilds a clip path for every user (5,000 segments x 4,000 uses = 9.6 s, 20,000 uses > 30 s on a
+    /// release build) and walks a gradient's stops per paint use: each use is charged against the budgets.
+    func testReferenceExpandedWorkIsBoundedBeforeRendering() {
+        func clipDoc(segments: Int, uses: Int) -> String {
+            let d = "M0 0 " + String(repeating: "L1 1 ", count: segments)
+            return svg("<defs><clipPath id=\"c\"><path d=\"\(d)\"/></clipPath></defs>"
+                       + String(repeating: "<rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>", count: uses))
+        }
+        XCTAssertEqual(guardCheck(clipDoc(segments: 4000, uses: 4000)), .tooLarge)
+        XCTAssertEqual(guardCheck(clipDoc(segments: 4000, uses: 6)), .tooLarge, "4000 x 6 > 20,000")
+        XCTAssertEqual(guardCheck(clipDoc(segments: 1, uses: 20_001)), .tooLarge, "element cap or budget, either way refused") // 5000-element cap
+        XCTAssertNil(guardCheck(clipDoc(segments: 200, uses: 20)), "ordinary clip use stays fine")
+        // Forward references (use before definition) are charged too.
+        let d = "M0 0 " + String(repeating: "L1 1 ", count: 4000)
+        let fwd = svg(String(repeating: "<rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>", count: 10)
+                      + "<defs><clipPath id=\"c\"><path d=\"\(d)\"/></clipPath></defs>")
+        XCTAssertEqual(guardCheck(fwd), .tooLarge)
+
+        func gradDoc(stops: Int, uses: Int, link: Bool = false) -> String {
+            let st = String(repeating: "<stop offset=\"0.5\" stop-color=\"red\"/>", count: stops)
+            let inherit = link ? "<linearGradient id=\"h\" xlink:href=\"#g\"/>" : ""
+            return svg("<defs><linearGradient id=\"g\">\(st)</linearGradient>\(inherit)</defs>"
+                       + String(repeating: "<rect width=\"4\" height=\"4\" fill=\"url(#\(link ? "h" : "g"))\"/>", count: uses))
+        }
+        XCTAssertEqual(guardCheck(gradDoc(stops: 2000, uses: 2000)), .tooLarge)
+        XCTAssertEqual(guardCheck(gradDoc(stops: 1200, uses: 1200, link: true)), .tooLarge, "stops inherited through href are charged")
+        XCTAssertNil(guardCheck(gradDoc(stops: 10, uses: 50)))
+    }
+
+    /// Adjacent variable-length digit runs backtrack quadratically on long invalid input; rejection must stay linear.
+    func testLongInvalidNumericAttributesAreRejectedInLinearTime() {
+        let digits = String(repeating: "1", count: 300_000)
+        let cases: [(String, String)] = [("width", digits + "x"), ("stroke-width", digits + "x"), ("opacity", digits + "x"),
+                                          ("x", digits + "." + digits + "x"), ("offset", digits + "%x"), ("fill", "rgb(" + digits + "x"),
+                                          ("stroke-miterlimit", digits + "e"), ("viewBox", digits + " 0 1 1x")]
+        // Run on a worker with a watchdog: a backtracking regression fails cleanly instead of hanging the suite.
+        let done = DispatchSemaphore(value: 0)
+        let results = LogoRemoteSvgTests.Locked<[Bool]>([])
+        let t0 = Date()
+        Thread {
+            for (attr, value) in cases {
+                results.modify { $0.append(SvgActiveContentGuard.attributeProblem(element: "rect", [attr: value], isRoot: false) != nil) }
+            }
+            done.signal()
+        }.start()
+        let finished = done.wait(timeout: .now() + 5) == .success
+        XCTAssertTrue(finished, "eight 300 KB invalid values must be rejected in linear time (backtracking regression?)")
+        XCTAssertEqual(results.value, Array(repeating: true, count: cases.count))
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 2.0)
+    }
+
     func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
         let s = svg("<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs><rect width=\"64\" height=\"32\" fill=\"url(#g)\"/>")
         guard case .success(.image) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
@@ -732,32 +783,64 @@ final class LogoCacheTests: XCTestCase {
 #if canImport(ImageIO)
 /// https SVG logos are fetched, guarded and rendered (stubbed network).
 final class LogoRemoteSvgTests: XCTestCase {
-    final class StubProtocol: URLProtocol {
-        nonisolated(unsafe) static var body = Data()
-        nonisolated(unsafe) static var type = "image/svg+xml"
-        nonisolated(unsafe) static var status = 200
-        nonisolated(unsafe) static var declaredLength: Int?
-        nonisolated(unsafe) static var delay: TimeInterval = 0
-        nonisolated(unsafe) static var redirects: [String: String] = [:]
-        nonisolated(unsafe) static var requested: [String] = []
+    /// Lock-protected box: the stub's state is touched from URLSession callback queues and the test thread.
+    final class Locked<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: T
+        init(_ value: T) { stored = value }
+        var value: T {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+        }
+        @discardableResult func modify<R>(_ body: (inout T) -> R) -> R { lock.lock(); defer { lock.unlock() }; return body(&stored) }
+    }
+
+    final class StubProtocol: URLProtocol, @unchecked Sendable {
+        private static let _body = Locked(Data())
+        private static let _type = Locked("image/svg+xml")
+        private static let _status = Locked(200)
+        private static let _declaredLength = Locked<Int?>(nil)
+        private static let _delay = Locked<TimeInterval>(0)
+        private static let _redirects = Locked<[String: String]>([:])
+        private static let _requested = Locked<[String]>([])
+        private static let _trickleChunks = Locked(0)
+        private static let _trickleInterval = Locked<TimeInterval>(0.05)
+        private static let _chunksSent = Locked(0)
+        private static let _stopLoadingCalls = Locked(0)
+        private static let _failWith = Locked<URLError.Code?>(nil)
+        /// Bumped by reset(): a delayed callback from an earlier test sees a different generation and does nothing.
+        private static let _generation = Locked(0)
+
+        static var body: Data { get { _body.value } set { _body.value = newValue } }
+        static var type: String { get { _type.value } set { _type.value = newValue } }
+        static var status: Int { get { _status.value } set { _status.value = newValue } }
+        static var declaredLength: Int? { get { _declaredLength.value } set { _declaredLength.value = newValue } }
+        static var delay: TimeInterval { get { _delay.value } set { _delay.value = newValue } }
+        static var redirects: [String: String] { get { _redirects.value } set { _redirects.value = newValue } }
+        static var requested: [String] { _requested.value }
         /// >0: send the body as this many 1-byte chunks, `trickleInterval` apart.
-        nonisolated(unsafe) static var trickleChunks = 0
-        nonisolated(unsafe) static var trickleInterval: TimeInterval = 0.05
-        nonisolated(unsafe) static var chunksSent = 0
-        nonisolated(unsafe) static var stopLoadingCalls = 0
-        nonisolated(unsafe) static var failWith: URLError.Code?
+        static var trickleChunks: Int { get { _trickleChunks.value } set { _trickleChunks.value = newValue } }
+        static var trickleInterval: TimeInterval { get { _trickleInterval.value } set { _trickleInterval.value = newValue } }
+        static var chunksSent: Int { _chunksSent.value }
+        static var stopLoadingCalls: Int { _stopLoadingCalls.value }
+        static var failWith: URLError.Code? { get { _failWith.value } set { _failWith.value = newValue } }
 
         static func reset() {
+            _generation.modify { $0 += 1 }
             body = Data(); type = "image/svg+xml"; status = 200; declaredLength = nil
-            delay = 0; redirects = [:]; requested = []
-            trickleChunks = 0; trickleInterval = 0.05; chunksSent = 0; stopLoadingCalls = 0; failWith = nil
+            delay = 0; redirects = [:]; _requested.value = []
+            trickleChunks = 0; trickleInterval = 0.05; _chunksSent.value = 0; _stopLoadingCalls.value = 0; failWith = nil
         }
+
+        private let generation = StubProtocol._generation.value
+        private let stopped = Locked(false)
+        private var live: Bool { !stopped.value && generation == Self._generation.value }
 
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {
             let url = request.url!
-            Self.requested.append(url.absoluteString)
+            Self._requested.modify { $0.append(url.absoluteString) }
             if let code = Self.failWith {
                 client?.urlProtocol(self, didFailWithError: URLError(code))
                 return
@@ -768,42 +851,48 @@ final class LogoRemoteSvgTests: XCTestCase {
                 // If the delegate refused the redirect nobody calls stopLoading;
                 // like a real HTTP stack, then deliver the 3xx as the final answer.
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [self] in
-                    guard !stopped else { return }
+                    guard live else { return }
                     client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
                     client?.urlProtocolDidFinishLoading(self)
                 }
                 return
             }
+            // Snapshot the fixture now: a delayed delivery must not read a later test's state.
+            let body = Self.body, type = Self.type, status = Self.status, declared = Self.declaredLength
+            let chunks = Self.trickleChunks, interval = Self.trickleInterval, delay = Self.delay
             let work = { [self] in
-                var headers = ["Content-Type": Self.type]
-                if let n = Self.declaredLength { headers["Content-Length"] = String(n) }
-                let r = HTTPURLResponse(url: url, statusCode: Self.status, httpVersion: nil, headerFields: headers)!
+                guard live else { return }
+                var headers = ["Content-Type": type]
+                if let n = declared { headers["Content-Length"] = String(n) }
+                let r = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
                 client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
-                if Self.trickleChunks > 0 { self.trickle(remaining: Self.trickleChunks); return }
-                client?.urlProtocol(self, didLoad: Self.body)
+                if chunks > 0 { trickle(remaining: chunks, interval: interval); return }
+                client?.urlProtocol(self, didLoad: body)
                 client?.urlProtocolDidFinishLoading(self)
             }
-            if Self.delay > 0 {
-                DispatchQueue.global().asyncAfter(deadline: .now() + Self.delay, execute: work)
+            if delay > 0 {
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
             } else { work() }
         }
-        nonisolated(unsafe) private var stopped = false
-        override func stopLoading() { stopped = true; Self.stopLoadingCalls += 1 }
 
-        private func trickle(remaining: Int) {
-            guard !stopped, remaining > 0 else {
-                if !stopped { client?.urlProtocolDidFinishLoading(self) }
-                return
-            }
+        override func stopLoading() {
+            stopped.value = true
+            if generation == Self._generation.value { Self._stopLoadingCalls.modify { $0 += 1 } }
+        }
+
+        private func trickle(remaining: Int, interval: TimeInterval) {
+            guard live else { return }
+            guard remaining > 0 else { client?.urlProtocolDidFinishLoading(self); return }
             client?.urlProtocol(self, didLoad: Data([0x41]))
-            Self.chunksSent += 1
-            DispatchQueue.global().asyncAfter(deadline: .now() + Self.trickleInterval) { [self] in
-                trickle(remaining: remaining - 1)
+            Self._chunksSent.modify { $0 += 1 }
+            DispatchQueue.global().asyncAfter(deadline: .now() + interval) { [self] in
+                trickle(remaining: remaining - 1, interval: interval)
             }
         }
     }
 
     override func setUp() { StubProtocol.reset() }
+    override func tearDown() { StubProtocol.reset() } // also invalidates any still-pending delayed callbacks
 
     /// Condition-based wait (no fixed sleeps): polls until `condition` holds or `timeout` passes.
     private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {

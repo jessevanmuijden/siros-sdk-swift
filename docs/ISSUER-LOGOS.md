@@ -79,7 +79,7 @@ Refused, never repaired:
 | Raster edge | 2048 px |
 | SVG rendered size | at most 512 px on the longest edge; width, height, viewBox and every number at most 1,000,000 |
 | SVG elements / nesting depth | 5000 / 64 |
-| SVG path complexity | at most 5000 segments (commands plus implicit repeats, `Z` included) and 1000 subpaths per path; 20,000 segments per document |
+| SVG path complexity | at most 5000 segments (commands plus implicit repeats, `Z` included) and 1000 subpaths per path; 20,000 segments per document; every `clip-path="url(#id)"` use is charged the clip path's segments against that document budget, and gradient stops x paint uses (including stops inherited through `xlink:href`) are capped at 1,000,000 |
 | Remote fetch | 15 s wall-clock for request and body by default, 120 s maximum (larger values are clamped, NaN/infinite/non-positive are refused) |
 | Redirects | followed only to `https` URLs without credentials; any other target is not followed |
 

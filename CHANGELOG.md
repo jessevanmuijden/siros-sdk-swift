@@ -240,6 +240,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeouts and network errors are reported as `timedOut`/`networkFailure` and are not cached.
   Path complexity is capped (5000 segments / 1000 subpaths per path, 20,000 per document):
   SwiftDraw's close handling is quadratic, 99,000 compact `Z`s did not finish in 25 s.
+  Each clip-path use is charged the clip path's segments (SwiftDraw rebuilds it per use: 5,000
+  segments x 4,000 uses took 9.6 s) and gradient stops x paint uses are capped. The numeric
+  grammar is linear-time (possessive quantifiers).
   See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey

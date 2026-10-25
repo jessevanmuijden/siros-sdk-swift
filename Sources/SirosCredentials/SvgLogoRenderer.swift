@@ -31,6 +31,8 @@ enum SvgActiveContentGuard {
 
     /// Bounds on document complexity (the byte cap alone allows ~25k elements).
     static let maxElements = 5000
+    /// Gradient stops x paint uses (a few hundred KB of work at most).
+    static let maxGradientWork = 1_000_000
     static let maxDepth = 64
 
     /// Largest magnitude accepted for any number. SwiftDraw traps (Float to
@@ -43,7 +45,9 @@ enum SvgActiveContentGuard {
         // swiftlint:disable:next force_try
         try! NSRegularExpression(pattern: pattern)
     }
-    private static let numberPattern = "[+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?"
+    // Possessive quantifiers and a fractional run that exists only after the point: no two
+    // adjacent variable-length digit runs, so a 300 KB run of digits is rejected in linear time.
+    private static let numberPattern = "[+-]?+(?:\\d++(?:\\.\\d*+)?+|\\.\\d++)(?:[eE][+-]?+\\d++)?+"
     private static let lengthPattern = re("^(" + numberPattern + ")(px|pt|pc|mm|cm|in|em|ex|%)?$")
     private static let numberRe = re("^" + numberPattern + "$")
     private static let idPattern = "[A-Za-z_][A-Za-z0-9_.:-]{0,63}"
@@ -222,6 +226,12 @@ enum SvgActiveContentGuard {
         return nil
     }
 
+    /// The id in `url(#id)` (with an optional trailing colour), or nil.
+    static func referencedId(_ value: String) -> String? {
+        guard value.hasPrefix("url(#"), let close = value.firstIndex(of: ")") else { return nil }
+        return String(value[value.index(value.startIndex, offsetBy: 5)..<close])
+    }
+
     /// viewBox: four finite numbers, positive size.
     static func viewBoxProblem(_ raw: String) -> LogoRejection? {
         let nums = raw.split(whereSeparator: { " ,\t\r\n".contains($0) }).compactMap { Double($0) }
@@ -236,6 +246,15 @@ enum SvgActiveContentGuard {
         private var elementCount = 0
         private var depth = 0
         private var pathSegments = 0
+        /// Reference-expanded work. SwiftDraw rebuilds a clip path for every element that uses it
+        /// (5,000 segments x 4,000 uses took 9.6 s on a release build) and walks a gradient's stops for
+        /// every paint use, so each use is charged the referenced work and bounded before rendering.
+        private var containers: [(name: String, id: String?)] = []
+        private var clipSegments: [String: Int] = [:]
+        private var clipUses: [String: Int] = [:]
+        private var stopCounts: [String: Int] = [:]
+        private var gradientHref: [String: String] = [:]
+        private var paintUses: [String: Int] = [:]
         private var stack: [String] = []
 
         private func refuse(_ parser: XMLParser, _ r: LogoRejection) {
@@ -263,14 +282,44 @@ enum SvgActiveContentGuard {
             if let bad = SvgActiveContentGuard.attributeProblem(element: elementName, attributeDict, isRoot: isRoot) {
                 return refuse(parser, bad)
             }
+            var ownSegments = 1
             if let d = attributeDict["d"], let counts = SvgPathData.analyze(d, maxNumber: SvgActiveContentGuard.maxSvgNumber) {
+                ownSegments = max(1, counts.segments)
                 pathSegments += counts.segments
                 if pathSegments > SvgPathData.maxDocumentSegments { return refuse(parser, .tooLarge) }
+            }
+            if let clipId = containers.last(where: { $0.name == "clipPath" })?.id { clipSegments[clipId, default: 0] += ownSegments }
+            if let gradId = containers.last(where: { $0.name.hasSuffix("Gradient") })?.id, elementName == "stop" { stopCounts[gradId, default: 0] += 1 }
+            if ["clipPath", "linearGradient", "radialGradient"].contains(elementName) {
+                containers.append((elementName, attributeDict["id"]))
+                if let id = attributeDict["id"] {
+                    if elementName == "clipPath" { clipSegments[id, default: 0] += 0 }
+                    if let h = attributeDict["xlink:href"] { gradientHref[id] = String(h.dropFirst()) }
+                }
+            }
+            for (key, value) in attributeDict {
+                guard let id = SvgActiveContentGuard.referencedId(value) else { continue }
+                if key == "clip-path" { clipUses[id, default: 0] += 1 } else if key == "fill" || key == "stroke" { paintUses[id, default: 0] += 1 }
             }
             stack.append(elementName)
         }
 
+        func parserDidEndDocument(_ parser: XMLParser) {
+            guard refusal == nil else { return }
+            var clipWork = 0
+            for (id, uses) in clipUses { clipWork += uses * max(1, clipSegments[id] ?? 1) }
+            if pathSegments + clipWork > SvgPathData.maxDocumentSegments { refusal = .tooLarge; return }
+            var gradientWork = 0
+            for (id, uses) in paintUses {
+                var stops = 0, cur: String? = id, hops = 0
+                while let g = cur, hops < 8 { stops += stopCounts[g] ?? 0; cur = gradientHref[g]; hops += 1 }
+                gradientWork += uses * max(1, stops)
+            }
+            if gradientWork > SvgActiveContentGuard.maxGradientWork { refusal = .tooLarge }
+        }
+
         func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+            if ["clipPath", "linearGradient", "radialGradient"].contains(elementName) { _ = containers.popLast() }
             depth -= 1
             _ = stack.popLast()
         }
