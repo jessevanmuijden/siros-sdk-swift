@@ -653,6 +653,22 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertEqual(svgRejection(big), .tooLarge)
     }
 
+    // (1) SVG without a declared type is routed by a content sniff, still through the guard.
+    func testSvgWithoutDeclaredTypeIsRoutedToTheSvgPath() {
+        let plain = Data(svg("<rect width=\"64\" height=\"32\" fill=\"#f00\"/>").utf8)
+        let decorated = Data([0xEF, 0xBB, 0xBF] + Array("<?xml version=\"1.0\"?>\n<!-- made by x -->\n".utf8) + Array(plain))
+        for d in [plain, decorated] {
+            guard case .success(.image) = LogoSanitizer.sanitize(imageData: d) else { return XCTFail("untyped svg must render") }
+        }
+        // The sniff only routes: an evil SVG still dies in the guard, and non-SVG junk is still undecodable.
+        let evil = Data(svg("<script>alert(1)</script>").utf8)
+        if case .failure(.activeContent) = LogoSanitizer.sanitize(imageData: evil) {} else { XCTFail("evil untyped svg") }
+        if case .failure(.undecodable) = LogoSanitizer.sanitize(imageData: Data("<html><svg/></html>".utf8)) {} else { XCTFail("html is not svg") }
+        if case .failure(.undecodable) = LogoSanitizer.sanitize(imageData: Data("<svgfoo/>".utf8)) {} else { XCTFail("<svgfoo> is not svg") }
+        XCTAssertTrue(LogoSanitizer.looksLikeSvg(Data("<svg>".utf8)))
+        XCTAssertFalse(LogoSanitizer.looksLikeSvg(Data("PNG".utf8)))
+    }
+
     func testSvgImageDataPathUsesSameGuard() {
         let evil = Data(svg("<script>alert(1)</script>").utf8)
         if case .failure(.activeContent) = LogoSanitizer.sanitize(imageData: evil, declaredMediaType: "image/svg+xml") {} else {
@@ -708,11 +724,12 @@ final class LogoRemoteSvgTests: XCTestCase {
         nonisolated(unsafe) static var trickleInterval: TimeInterval = 0.05
         nonisolated(unsafe) static var chunksSent = 0
         nonisolated(unsafe) static var stopLoadingCalls = 0
+        nonisolated(unsafe) static var failWith: URLError.Code?
 
         static func reset() {
             body = Data(); type = "image/svg+xml"; status = 200; declaredLength = nil
             delay = 0; redirects = [:]; requested = []
-            trickleChunks = 0; trickleInterval = 0.05; chunksSent = 0; stopLoadingCalls = 0
+            trickleChunks = 0; trickleInterval = 0.05; chunksSent = 0; stopLoadingCalls = 0; failWith = nil
         }
 
         override class func canInit(with request: URLRequest) -> Bool { true }
@@ -720,6 +737,10 @@ final class LogoRemoteSvgTests: XCTestCase {
         override func startLoading() {
             let url = request.url!
             Self.requested.append(url.absoluteString)
+            if let code = Self.failWith {
+                client?.urlProtocol(self, didFailWithError: URLError(code))
+                return
+            }
             if let target = Self.redirects[url.absoluteString], let t = URL(string: target) {
                 let r = HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil, headerFields: ["Location": target])!
                 client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: t), redirectResponse: r)
@@ -821,6 +842,59 @@ final class LogoRemoteSvgTests: XCTestCase {
         StubProtocol.type = "image/svg+xml"; StubProtocol.body = Data("<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>".utf8)
         let evil = await cache.resolve("https://example.org/evil")
         XCTAssertNil(evil)
+    }
+
+    // (1) a fetched SVG without Content-Type
+    func testFetchedSvgWithoutContentTypeIsStillSanitized() async {
+        StubProtocol.type = ""; StubProtocol.body = okSvg
+        guard case .success(.image) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/logo")!, session: session) else { return XCTFail() }
+        StubProtocol.body = Data("<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>".utf8)
+        if case .failure(.activeContent) = await LogoSanitizer.fetchAndSanitize(URL(string: "https://example.org/logo")!, session: session) {} else { XCTFail() }
+    }
+
+    // (2) transport errors keep their meaning
+    func testTimeoutAndTransportErrorsAreNotReportedAsUndecodable() async {
+        let url = URL(string: "https://example.org/logo.svg")!
+        StubProtocol.failWith = .timedOut
+        if case .failure(.timedOut) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("timedOut") }
+        StubProtocol.failWith = .notConnectedToInternet
+        if case .failure(.networkFailure) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("offline") }
+        StubProtocol.failWith = nil; StubProtocol.status = 503
+        if case .failure(.networkFailure) = await LogoSanitizer.fetchAndSanitize(url, session: session) {} else { XCTFail("503") }
+        XCTAssertTrue(LogoRejection.timedOut.isTransient); XCTAssertTrue(LogoRejection.networkFailure.isTransient)
+        for definitive in [LogoRejection.undecodable, .activeContent, .tooLarge, .unsupportedMediaType, .invalidSvg, .platformUnsupported] {
+            XCTAssertFalse(definitive.isTransient, "\(definitive)")
+        }
+    }
+
+    // (3) only permanent outcomes are cached
+    func testTransientFailuresAreNotCachedButDefinitiveOnesAre() async {
+        let cache = LogoCache(session: session)
+        let uri = "https://example.org/logo.svg"
+        StubProtocol.failWith = .notConnectedToInternet
+        let offline = await cache.resolve(uri)
+        XCTAssertNil(offline)
+        StubProtocol.failWith = .timedOut
+        let slow = await cache.resolve(uri)
+        XCTAssertNil(slow)
+        StubProtocol.failWith = nil; StubProtocol.status = 502
+        let bad = await cache.resolve(uri)
+        XCTAssertNil(bad)
+        StubProtocol.status = 200; StubProtocol.body = okSvg
+        let ok = await cache.resolve(uri) // retried after three transient failures
+        guard case .image? = ok else { return XCTFail("must retry after transient failures") }
+        XCTAssertEqual(StubProtocol.requested.count, 4)
+        _ = await cache.resolve(uri)
+        XCTAssertEqual(StubProtocol.requested.count, 4, "success is cached")
+
+        // A definitive rejection is cached: no second request.
+        StubProtocol.reset()
+        StubProtocol.body = Data("<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>".utf8)
+        let evilUri = "https://example.org/evil.svg"
+        let first = await cache.resolve(evilUri)
+        let second = await cache.resolve(evilUri)
+        XCTAssertNil(first); XCTAssertNil(second)
+        XCTAssertEqual(StubProtocol.requested.count, 1, "definitive rejection is cached")
     }
 
     // (6) same authority validation as sanitize(_:), before any request

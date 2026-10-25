@@ -20,7 +20,7 @@ caches the result by URI and shares one fetch between concurrent callers.
 - `LogoCache` fetches every `https` logo once (`LogoSanitizer.fetchAndSanitize`)
   and sanitizes the bytes: the response `Content-Type` (`image/png`, `image/jpeg`,
   `image/webp`, `image/gif` or `image/svg+xml`) decides raster versus SVG, not the
-  file name, and anything else is refused. The result is always clean PNG bytes,
+  file name (a response with no `Content-Type` is sniffed for `<svg` and still goes through the SVG guard), and anything else is refused. The result is always clean PNG bytes,
   never a URL for an unchecked image loader. (`LogoSanitizer.sanitize(_:)` on its
   own still returns `.remote(url)` for hosts that do their own loading.)
 
@@ -85,8 +85,9 @@ Refused, never repaired:
 ## Fail-closed and platform behaviour
 
 Any parse, decode, size, timeout or validation problem is a `LogoRejection`;
-nothing is passed through. A cancelled fetch is not cached, so the next
-resolve retries. Without ImageIO (Linux) every `data:` logo, SVG included, is
+nothing is passed through. Timeouts, network errors, non-2xx answers and
+cancellation (`timedOut`, `networkFailure`) are transient and never cached, so the next
+resolve retries; accepted logos and definitive rejections are cached. Without ImageIO (Linux) every `data:` logo, SVG included, is
 refused with `platformUnsupported`; `https` URLs still pass through.
 
 ## Guidance for issuers

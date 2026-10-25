@@ -214,7 +214,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `d="M0 0Z0"`), 4/8-digit alpha hex and plain `href` are refused (SwiftDraw mis-handles
   them), and `LogoCache` fetches every https logo and decides raster versus SVG from the
   response `Content-Type` instead of the file name; the sample app draws only sanitized
-  results. See docs/ISSUER-LOGOS.md.
+  results. SVG without a `Content-Type` is routed by a content sniff (still guarded);
+  timeouts and network errors are reported as `timedOut`/`networkFailure` and are not cached.
+  See docs/ISSUER-LOGOS.md.
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`

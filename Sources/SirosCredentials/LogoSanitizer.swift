@@ -48,10 +48,19 @@ public enum LogoRejection: Error, Sendable, Equatable {
     case dimensionsTooLarge
     /// A remote logo fetch did not finish within `fetchTimeout`.
     case timedOut
+    /// A remote logo could not be fetched (offline, DNS/TLS failure, non-2xx answer,
+    /// cancelled transport). Transient: callers should retry later, not cache it.
+    case networkFailure
     /// `fetchAndSanitize` was given a timeout that is not finite or not positive.
     case invalidTimeout
     /// No ImageIO on this platform (Linux): data: logos fail closed.
     case platformUnsupported
+}
+
+extension LogoRejection {
+    /// True for outcomes that say nothing about the logo itself (timeout, network
+    /// failure); everything else is a verdict on the bytes or the URI and is final.
+    public var isTransient: Bool { self == .timedOut || self == .networkFailure }
 }
 
 /// Turns an issuer/credential display logo URI into something safe to draw.
@@ -107,8 +116,27 @@ public enum LogoSanitizer {
             declared = t
         }
         guard imageData.count <= maxDecodedBytes else { return .failure(.tooLarge) }
-        if declared == "image/svg+xml" { return sanitizeSvg(imageData) }
+        // No declared type (e.g. a response without Content-Type): the sniff only routes
+        // to the SVG path, which is still the full allowlist guard.
+        if declared == "image/svg+xml" || (declared == nil && looksLikeSvg(imageData)) { return sanitizeSvg(imageData) }
         return reencode(imageData, declaredMediaType: declared)
+    }
+
+    /// Cheap routing sniff: optional BOM, whitespace, XML declaration and comments, then `<svg`.
+    /// Never trusted for anything but choosing the path.
+    static func looksLikeSvg(_ data: Data) -> Bool {
+        var b = Array(data.prefix(4096))
+        if b.starts(with: [0xEF, 0xBB, 0xBF]) { b.removeFirst(3) }
+        var text = String(decoding: b, as: UTF8.self)
+        while true {
+            text = String(text.drop(while: { $0.isWhitespace }))
+            if text.hasPrefix("<?"), let end = text.range(of: "?>") { text = String(text[end.upperBound...]); continue }
+            if text.hasPrefix("<!--"), let end = text.range(of: "-->") { text = String(text[end.upperBound...]); continue }
+            break
+        }
+        guard text.hasPrefix("<svg") else { return false }
+        let next = text.dropFirst(4).first
+        return next == nil || next == ">" || next == "/" || next!.isWhitespace
     }
 
     /// Downloads an `https` logo and sanitizes the bytes (SVG and raster alike)
@@ -131,9 +159,9 @@ public enum LogoSanitizer {
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 policy.cancel() // stop the download itself, not just our wait
-                return .failure(Task.isCancelled ? .undecodable : .timedOut)
+                return .failure(Task.isCancelled ? .networkFailure : .timedOut)
             }
-            let first = await group.next() ?? .failure(.undecodable)
+            let first = await group.next() ?? .failure(.networkFailure)
             group.cancelAll()
             policy.cancel()
             return first
@@ -155,16 +183,19 @@ public enum LogoSanitizer {
         defer { policy.cancel() }
         do {
             let (stream, response) = try await session.bytes(for: request, delegate: policy)
+            // Any non-2xx answer says nothing definitive about the logo: transient.
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return .failure(.undecodable)
+                return .failure(.networkFailure)
             }
             if http.expectedContentLength > Int64(maxDecodedBytes) { return .failure(.tooLarge) }
             guard let data = try await collect(stream, limit: maxDecodedBytes) else { return .failure(.tooLarge) }
             let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "")
                 .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
             return sanitize(imageData: data, declaredMediaType: type.isEmpty ? nil : type)
+        } catch let error as URLError where error.code == .timedOut {
+            return .failure(.timedOut)
         } catch {
-            return .failure(.undecodable)
+            return .failure(.networkFailure) // transport error or cancellation
         }
     }
     #endif
@@ -450,8 +481,12 @@ public actor LogoCache {
                 let fetched = await LogoSanitizer.fetchAndSanitize(url, session: session)
                 if Task.isCancelled { await self.finish(uri, id: id, result: nil, cache: false); return nil }
                 var logo: DisplayLogo?
-                if case .success(let l) = fetched { logo = l }
-                await self.finish(uri, id: id, result: logo, cache: true)
+                var transient = false
+                switch fetched {
+                case .success(let l): logo = l
+                case .failure(let r): transient = r.isTransient // offline, timeout, 5xx: retry later
+                }
+                await self.finish(uri, id: id, result: logo, cache: !transient)
                 return logo
             }
             flights[uri] = Flight(id: id, task: task, waiters: 0)
