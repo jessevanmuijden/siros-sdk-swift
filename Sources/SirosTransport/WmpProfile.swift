@@ -93,3 +93,10 @@ public protocol WmpResumeProfile: AnyObject {
     /// The session resumed: send what could not be sent.
     func sessionResumed()
 }
+
+/// A profile that can stop its own work for one flow at once, without the asynchronous cancel path (which also
+/// runs application callbacks later, when a replacement flow may already be running).
+public protocol WmpLocalCancelProfile: AnyObject {
+    /// Stop the work in flight for `flowId` and its children; answer nothing more for them.
+    func cancelLocally(flowId: String)
+}

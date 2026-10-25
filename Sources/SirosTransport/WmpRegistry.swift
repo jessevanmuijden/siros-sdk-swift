@@ -72,6 +72,14 @@ final class WmpRegistry: @unchecked Sendable {
         for case let profile as WmpResumeProfile in all { profile.sessionResumed() }
     }
 
+    /// Stops every profile's in-flight work for one flow, synchronously.
+    func cancelLocally(flowId: String) {
+        lock.lock()
+        let all = profiles
+        lock.unlock()
+        for case let profile as WmpLocalCancelProfile in all { profile.cancelLocally(flowId: flowId) }
+    }
+
     func allCapabilities() -> [String] {
         lock.lock()
         defer { lock.unlock() }
