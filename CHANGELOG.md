@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not-applied, and the README, SampleApp strings (en, sv) and switches follow. `addPasskey` ceremonies are serialised and
   `ASAuthorizationAuthProvider` rejects a second concurrent request instead of overwriting the first's continuation.
   `persistKeystoreOrThrow` takes `keystoreContainerLock` like `persistAndSyncKeystore`. The `WscdKeystoreAdapter` erase/reopen
-  doc comments are corrected.
+  doc comments are corrected. An enrolment whose `register-finish` response was lost is reconciled against the backend's
+  private data: adopted (`.added`) when it holds the new PRF entry, rolled back (`.notSubmitted`) when it does not, and
+  otherwise left pending with the keystore locked and ordinary exports/syncs blocked until `reconcilePendingEnrolment()`
+  (or the next unlock/login) settles it. The ordinary private-data write carries no `If-Match` precondition.
 - **Add passkey: review fixes (#197).** Enrolment is one transaction under the keystore-container lock (prepare, the
   matching ETag, finish, commit and cache publication), so overlapping enrolments and queued syncs cannot send an
   older snapshot under a newer tag; it is invalidated before login, register, resume and unlock replace the session

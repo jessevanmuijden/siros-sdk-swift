@@ -495,7 +495,7 @@ extension SirosWallet {
     }
 
     func persistAndSyncKeystore() async {
-        guard keystore.isUnlocked else { return }
+        guard keystore.isUnlocked, !enrolmentSyncBlocked else { return }
         do {
             // Shares `keystoreContainerLock` with `addPasskey()`'s prepare/
             // finish/commit sequence - see that property's doc comment for
@@ -521,6 +521,9 @@ extension SirosWallet {
     /// cannot be recalled; it carries the old account's container through the old account's client.
     func exportAndSyncKeystore(generation: Int) async throws {
         try await keystorePersistMutex.withLock {
+            // An export would drop the PRF entry the backend may hold for an unreconciled enrolment, and the write
+            // carries no If-Match: blocked until it is settled.
+            guard !enrolmentSyncBlocked else { throw TransactionLogError("an add-passkey enrolment awaits reconciliation") }
             lock.lock()
             let client = apiClient
             let sameAccount = transactionLogGeneration == generation

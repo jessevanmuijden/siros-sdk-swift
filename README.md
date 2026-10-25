@@ -116,8 +116,10 @@ case .sessionChanged:
 case .notSubmitted:
     break  // the session changed before it was sent: nothing is enrolled
 case .finishOutcomeUnknown:
-    break  // register-finish failed in transport: the backend may or may not hold
-           // the passkey; it was not rolled back - check the account's passkeys
+    break  // register-finish failed in transport and the backend could not be asked:
+           // the passkey was not rolled back and syncs are blocked until
+           // `wallet.reconcilePendingEnrolment()` (also run at the next unlock/login)
+           // settles it
 case .localCommitFailed:
     break  // the backend accepted it and the cached container has it; the wallet
            // locked its keystore - unlock again to pick the new entry up
