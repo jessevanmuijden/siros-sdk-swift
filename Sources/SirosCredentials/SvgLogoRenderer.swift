@@ -49,13 +49,12 @@ enum SvgActiveContentGuard {
     private static let idPattern = "[A-Za-z_][A-Za-z0-9_.:-]{0,63}"
     private static let idRe = re("^" + idPattern + "$")
     private static let fragmentRe = re("^#" + idPattern + "$")
-    private static let hexColorRe = re("^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+    // 3- and 6-digit only: SwiftDraw 0.29.0 mis-parses 4- and 8-digit alpha hex (verified: #ff000080 renders opaque navy). Use rgba().
+    private static let hexColorRe = re("^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
     private static let rgbRe = re("^rgba?\\(\\s*[0-9.%]+(?:\\s*,\\s*[0-9.%]+){2,3}\\s*\\)$")
     private static let namedColorRe = re("^[A-Za-z]{3,20}$")
     private static let paintUrlRe = re("^url\\(#" + idPattern + "\\)$")
-    private static let pathDataRe = re("^[MmZzLlHhVvCcSsQqTtAa0-9eE+\\-.,\\s]{1,100000}$")
-    private static let transformRe = re(
-        "^\\s*(?:(?:matrix|translate|scale|rotate|skewX|skewY)\\s*\\([0-9eE+\\-.,\\s]{0,200}\\)\\s*,?\\s*){1,16}$")
+    private static let transformFnRe = re("\\G\\s*(matrix|translate|scale|rotate|skewX|skewY)\\s*\\(([^()]*)\\)\\s*,?")
     private static let aspectRe = re("^(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max))(?: (?:meet|slice))?$")
 
     private static func matches(_ r: NSRegularExpression, _ v: String) -> Bool {
@@ -76,6 +75,94 @@ enum SvgActiveContentGuard {
     private static func isLengthList(_ v: String) -> Bool {
         let parts = v.split(whereSeparator: { " ,\t\r\n".contains($0) })
         return !parts.isEmpty && parts.count <= 64 && parts.allSatisfy { lengthProblem(String($0)) == nil }
+    }
+
+    /// Strict SVG path data: commands with exactly the right argument counts, well-formed
+    /// numbers, nothing after `Z`/`z` but a command. SwiftDraw 0.29.0 loops forever (and
+    /// grows memory) on `M0 0Z0` because it re-applies the close command without consuming
+    /// the number, so only a full match is passed on.
+    static func isValidPathData(_ d: String) -> Bool {
+        let c = Array(d.unicodeScalars.map(Character.init))
+        guard c.count <= 100_000 else { return false }
+        var i = 0
+        func skipSeparators() { while i < c.count, c[i] == " " || c[i] == "," || c[i] == "\t" || c[i] == "\n" || c[i] == "\r" { i += 1 } }
+        func number() -> Bool {
+            let start = i
+            if i < c.count, c[i] == "+" || c[i] == "-" { i += 1 }
+            var digits = 0
+            while i < c.count, c[i].isASCII, c[i].isNumber { i += 1; digits += 1 }
+            if i < c.count, c[i] == "." { i += 1; while i < c.count, c[i].isASCII, c[i].isNumber { i += 1; digits += 1 } }
+            guard digits > 0 else { i = start; return false }
+            if i < c.count, c[i] == "e" || c[i] == "E" {
+                var j = i + 1
+                if j < c.count, c[j] == "+" || c[j] == "-" { j += 1 }
+                var exp = 0
+                while j < c.count, c[j].isASCII, c[j].isNumber { j += 1; exp += 1 }
+                if exp > 0 { i = j }
+            }
+            return isNumber(String(c[start..<i]))
+        }
+        func flag() -> Bool { // arc flags may be written without separators
+            guard i < c.count, c[i] == "0" || c[i] == "1" else { return false }
+            i += 1
+            return true
+        }
+        let argCounts: [Character: Int] = ["M": 2, "L": 2, "T": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "A": 7, "Z": 0]
+        skipSeparators()
+        guard i < c.count, c[i] == "M" || c[i] == "m" else { return false }
+        while true {
+            skipSeparators()
+            if i >= c.count { return true }
+            let cmd = c[i]
+            guard let n = argCounts[Character(cmd.uppercased())], cmd.isLetter else { return false }
+            i += 1
+            if n == 0 { // Z/z: no arguments, and no number may follow before the next command
+                skipSeparators()
+                if i < c.count, !c[i].isLetter { return false }
+                continue
+            }
+            var groups = 0
+            while true {
+                skipSeparators()
+                if i >= c.count || c[i].isLetter { break }
+                for k in 0..<n {
+                    skipSeparators()
+                    let ok = (Character(cmd.uppercased()) == "A" && (k == 3 || k == 4)) ? flag() : number()
+                    guard ok else { return false }
+                }
+                groups += 1
+                guard groups <= 20_000 else { return false }
+            }
+            guard groups >= 1 else { return false }
+        }
+    }
+
+    /// Transform list with exact argument counts per function.
+    static func isValidTransform(_ t: String) -> Bool {
+        let ns = t as NSString
+        var pos = 0
+        var count = 0
+        while pos < ns.length {
+            guard let m = transformFnRe.firstMatch(in: t, options: [.anchored], range: NSRange(location: pos, length: ns.length - pos)),
+                  m.range.location == pos else {
+                return ns.substring(from: pos).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && count > 0
+            }
+            let fn = ns.substring(with: m.range(at: 1))
+            let args = ns.substring(with: m.range(at: 2)).split(whereSeparator: { " ,\t\r\n".contains($0) }).map(String.init)
+            guard args.allSatisfy(isNumber) else { return false }
+            let ok: Bool
+            switch fn {
+            case "matrix": ok = args.count == 6
+            case "translate", "scale": ok = args.count == 1 || args.count == 2
+            case "rotate": ok = args.count == 1 || args.count == 3
+            default: ok = args.count == 1 // skewX, skewY
+            }
+            guard ok else { return false }
+            count += 1
+            guard count <= 16 else { return false }
+            pos = m.range.location + m.range.length
+        }
+        return count > 0
     }
 
     private static func isOpacity(_ v: String) -> Bool {
@@ -122,10 +209,10 @@ enum SvgActiveContentGuard {
         "x1": { lengthProblem($0) == nil }, "y1": { lengthProblem($0) == nil },
         "x2": { lengthProblem($0) == nil }, "y2": { lengthProblem($0) == nil },
         "fx": { lengthProblem($0) == nil }, "fy": { lengthProblem($0) == nil }, "fr": { lengthProblem($0) == nil },
-        "offset": { lengthProblem($0) == nil },
-        "points": { isNumberList($0) },
-        "d": { matches(pathDataRe, $0) },
-        "transform": { matches(transformRe, $0) }, "gradientTransform": { matches(transformRe, $0) },
+        "offset": isOpacity,
+        "points": { isNumberList($0) && $0.split(whereSeparator: { " ,\t\r\n".contains($0) }).count % 2 == 0 },
+        "d": { isValidPathData($0) },
+        "transform": { isValidTransform($0) }, "gradientTransform": { isValidTransform($0) },
         "viewBox": { isNumberList($0, max: 4) && $0.split(whereSeparator: { " ,\t\r\n".contains($0) }).count == 4 },
         "preserveAspectRatio": { matches(aspectRe, $0) },
         "version": { isEnum($0, ["1.0", "1.1", "2.0"]) },
@@ -173,7 +260,11 @@ enum SvgActiveContentGuard {
                 guard isRoot, value == "http://www.w3.org/2000/svg" else { return .activeContent }
             case "xmlns:xlink":
                 guard isRoot, value == "http://www.w3.org/1999/xlink" else { return .activeContent }
-            case "href", "xlink:href":
+            case "href":
+                // SwiftDraw 0.29.0 reads only xlink:href, so a plain href would silently not
+                // inherit (verified); refused rather than rewritten.
+                return .activeContent
+            case "xlink:href":
                 // Same-document gradient inheritance only.
                 guard ["linearGradient", "radialGradient"].contains(element),
                       matches(fragmentRe, value) else { return .activeContent }

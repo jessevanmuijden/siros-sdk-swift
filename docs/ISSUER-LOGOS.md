@@ -17,9 +17,12 @@ caches the result by URI and shares one fetch between concurrent callers.
 - Rasters are decoded with ImageIO, checked to be the declared type, and
   re-encoded as a fresh PNG, so metadata and trailing bytes cannot survive.
   Animated GIFs keep their first frame.
-- `https` SVG logos are fetched by `LogoCache` (`LogoSanitizer.fetchAndSanitize`)
-  and go through the same SVG path as a `data:` SVG. Other `https` logos are
-  handed back as a URL for the host's image loader.
+- `LogoCache` fetches every `https` logo once (`LogoSanitizer.fetchAndSanitize`)
+  and sanitizes the bytes: the response `Content-Type` (`image/png`, `image/jpeg`,
+  `image/webp`, `image/gif` or `image/svg+xml`) decides raster versus SVG, not the
+  file name, and anything else is refused. The result is always clean PNG bytes,
+  never a URL for an unchecked image loader. (`LogoSanitizer.sanitize(_:)` on its
+  own still returns `.remote(url)` for hosts that do their own loading.)
 
 ## SVG: deny by default
 
@@ -27,7 +30,9 @@ SVG is never passed on as XML. A guard accepts a document only if every
 element, attribute and value is on an allowlist, then SwiftDraw (pinned to an
 exact version) rasterizes it to at most 512 px and the PNG is re-encoded like
 any raster. The allowlist exists because the renderer has crashed or hung on
-inputs a denylist did not anticipate.
+inputs a denylist did not anticipate (self-referencing patterns, nested `svg`,
+huge sizes, `@font-face` fonts, a path with a number after `Z`), and mis-renders
+alpha hex colours and plain `href`.
 
 Accepted elements: `svg` (root only), `g`, `defs`, `title`, `desc`, `path`,
 `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `linearGradient`,
@@ -36,12 +41,18 @@ Accepted elements: `svg` (root only), `g`, `defs`, `title`, `desc`, `path`,
 Accepted attributes, each with a strict value grammar: `id`; geometry (`x`, `y`,
 `width`, `height`, `cx`, `cy`, `r`, `rx`, `ry`, `x1`..`y2`, `fx`, `fy`, `fr`,
 `offset`, `points`, `d`); `viewBox`, `preserveAspectRatio`; `transform` and
-`gradientTransform`; paint and stroke (`fill`, `stroke`, `stop-color`,
+`gradientTransform` (a strict list of `matrix`, `translate`, `scale`, `rotate`,
+`skewX`, `skewY` with the right number of arguments); path data `d` (strict SVG
+syntax: valid commands with exactly the right argument counts, nothing after
+`Z`); `points` (an even number of coordinates); paint and stroke (`fill`, `stroke`, `stop-color`,
 `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
 `stroke-dasharray`, `stroke-dashoffset`, `fill-rule`, `clip-rule`); opacity
 attributes; `clip-path`; `display`; gradient `gradientUnits`, `spreadMethod`,
 `clipPathUnits`; and `href`/`xlink:href` on gradients. The only references
-accepted are same-document `url(#id)` and `#id`: no whitespace inside `url(`,
+accepted are same-document `url(#id)` and `#id`; gradient inheritance must be
+written `xlink:href` (a plain `href` is refused); colours are `#rgb`, `#rrggbb`,
+`rgb()`, `rgba()`, named colours, `none` and `currentColor` (4- and 8-digit
+alpha hex such as `#ff000080` is refused, use `rgba()` or `*-opacity`): no whitespace inside `url(`,
 no quotes, no comments, no `data:` or external URLs. The only `xmlns` values
 accepted are the SVG and xlink namespaces on the root.
 
@@ -54,6 +65,8 @@ Refused, never repaired:
   `a`, `view`, animation, `script`, `foreignObject`
 - editor metadata and any namespaced element or attribute (`sodipodi:*`,
   `inkscape:*`, `xml:space`, `metadata`, ...)
+- 4- and 8-digit hex colours, a plain `href`, malformed path data or transforms,
+  odd `points` counts
 - a nested `<svg>` (only the root is allowed)
 - text content anywhere except inside `title` and `desc`
 - malformed XML, a root that is not `svg`, or any value outside its grammar
@@ -78,10 +91,10 @@ refused with `platformUnsupported`; `https` URLs still pass through.
 
 ## Guidance for issuers
 
-- Prefer a PNG, or an `https` URL. For SVG, keep to simple shapes and
+- Prefer a PNG, or an `https` URL that serves the right `Content-Type`. For SVG, keep to simple shapes and
   gradients.
 - Convert text to outlines; fonts are not supported.
-- Use presentation attributes (`fill="#0a84ff"`) instead of `style` or CSS.
+- Use presentation attributes (`fill="#0a84ff"`) instead of `style` or CSS, `rgba()`/`fill-opacity` instead of alpha hex, and `xlink:href` for gradient inheritance.
 - Strip editor metadata (Inkscape/Illustrator namespaces, DOCTYPE,
   `enable-background`, `xml:space`) and avoid `use`, filters, masks and
   patterns.

@@ -517,6 +517,65 @@ final class LogoSanitizerImageTests: XCTestCase {
         }
     }
 
+    // MARK: Path data / transform / points / colour / href: SwiftDraw 0.29.0 behaviours (verified on the Mac mini)
+
+    /// `M0 0Z0` makes SwiftDraw loop forever (hang + memory growth). Tested on the validator, never through SwiftDraw.
+    func testPathDataIsValidatedStrictly() {
+        let good = ["M0 0 L8 0 L8 8 Z", "M0,0 4,0 4,4 8,8", "m1 1 h4 v4 z m2 2 l1 1", "M0 0 C1 1 2 2 3 3 S4 4 5 5 Q1 1 2 2 T3 3",
+                    "M0 0 A4 4 0 0 1 4 4", "M0 0 a1 1 0 00.5.5", "M-1.5e2 .5 L+3 -.25z", "M0 0Z", "M0 0 Z M1 1 L2 2",
+                    "M0 0 L1 1 2 2 3 3"]
+        for d in good { XCTAssertTrue(SvgActiveContentGuard.isValidPathData(d), d) }
+        let bad = ["M0 0Z0", "M0 0 L4 0 L4 4 Z 5", "M0 0 z,1", "", " ", "L0 0", "M0", "M0 0 L1", "M0 0 H", "M0 0 C1 1 2 2 3",
+                   "M0 0 A4 4 0 0 1 4", "M0 0 A4 4 0 2 1 4 4", "M0 0 L1 1 e", "M0 0 L1e 1", "M0 0 L1 1 x", "M0 0 L1e30 1",
+                   "M0 0 L--1 1", "M0 0 L1..2 1", "M0 0 <", "M0 0 L1 1 2"]
+        for d in bad { XCTAssertFalse(SvgActiveContentGuard.isValidPathData(d), d) }
+        // The guard (no SwiftDraw involved) refuses the hanging documents.
+        for d in ["M0 0Z0", "M0 0 L4 0 L4 4 Z 5"] {
+            XCTAssertEqual(guardCheck(svg("<path d=\"\(d)\" fill=\"red\"/>")), .activeContent, d)
+        }
+        XCTAssertNil(guardCheck(svg("<path d=\"M0 0 L8 0 L8 8 Z\" fill=\"red\"/>")))
+    }
+
+    func testTransformAndPointsAreValidatedStrictly() {
+        for t in ["scale(2)", "scale(2 3)", "translate(1,2) rotate(45)", "rotate(10 4 4)", "matrix(1 0 0 1 5 5)", "skewX(10) skewY(5)",
+                  " translate( 1 , 2 ) "] { XCTAssertTrue(SvgActiveContentGuard.isValidTransform(t), t) }
+        for t in ["", "scale(", "scale()", "scale(1 2 3)", "rotate(1 2)", "matrix(1 2 3)", "translate(1 2 3)", "skewX(1 2)", "evil(1)",
+                  "scale(1) junk", "scale(1e30)", "scale(1)/**/", "scale(a)"] { XCTAssertFalse(SvgActiveContentGuard.isValidTransform(t), t) }
+        XCTAssertNil(guardCheck(svg("<polygon points=\"0,0 8,0 4,8\" fill=\"red\"/>")))
+        for pts in ["0,0 4,4 5", "1 2 3", "1,2,x", "", "1 2 1e30 3"] {
+            XCTAssertNotNil(guardCheck(svg("<polyline points=\"\(pts)\"/>")), pts) // odd count / bad number
+        }
+        XCTAssertNotNil(guardCheck(svg("<defs><linearGradient id=\"g\"><stop offset=\"abc\" stop-color=\"red\"/></linearGradient></defs>")))
+    }
+
+    /// SwiftDraw 0.29.0 reads #ff000080 as opaque navy and #f008 as opaque green; rgba() is correct.
+    func testAlphaHexColoursRefusedRgbaAccepted() {
+        for c in ["#ff000080", "#f008", "#FF0000FF"] {
+            XCTAssertEqual(guardCheck(svg("<rect width=\"8\" height=\"8\" fill=\"\(c)\"/>")), .activeContent, c)
+            XCTAssertEqual(guardCheck(svg("<rect width=\"8\" height=\"8\" stop-color=\"\(c)\"/>")), .activeContent, c)
+        }
+        for c in ["#f00", "#ff0000", "rgba(255,0,0,0.5)", "rgb(255, 0, 0)"] {
+            XCTAssertNil(guardCheck(svg("<rect width=\"8\" height=\"8\" fill=\"\(c)\"/>")), c)
+        }
+        guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(svg("<rect width=\"64\" height=\"32\" fill=\"rgba(255,0,0,0.5)\"/>"))) else { return XCTFail() }
+        let px = pixel(data, x: 10, y: 10)
+        XCTAssertEqual(px[0], px[3], accuracy: 2, "half transparent red (premultiplied)")
+        XCTAssertEqual(px[1], 0); XCTAssertEqual(px[2], 0)
+        XCTAssertGreaterThan(px[3], 100); XCTAssertLessThan(px[3], 160)
+    }
+
+    /// SwiftDraw 0.29.0 reads only xlink:href: a plain href silently stops inheriting.
+    func testGradientInheritanceViaXlinkHrefWorksPlainHrefRefused() {
+        func doc(_ link: String) -> String {
+            svg("<defs><linearGradient id=\"a\" x1=\"0\" x2=\"1\"><stop offset=\"0\" stop-color=\"#ff0000\"/><stop offset=\"1\" stop-color=\"#ff0000\"/></linearGradient><linearGradient id=\"b\" \(link)=\"#a\"/></defs><rect width=\"64\" height=\"32\" fill=\"url(#b)\"/>")
+        }
+        XCTAssertEqual(guardCheck(doc("href")), .activeContent)
+        XCTAssertNil(guardCheck(doc("xlink:href")))
+        guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(doc("xlink:href"))) else { return XCTFail() }
+        let px = pixel(data, x: 10, y: 10)
+        XCTAssertEqual(px[0], 255); XCTAssertEqual(px[3], 255, "inherited stops paint the rect")
+    }
+
     func testSvgSameDocumentFragmentsAndInternalUrlAllowed() {
         let s = svg("<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs><rect width=\"64\" height=\"32\" fill=\"url(#g)\"/>")
         guard case .success(.image) = LogoSanitizer.sanitize(svgUri(s)) else { return XCTFail() }
@@ -553,24 +612,22 @@ final class LogoSanitizerImageTests: XCTestCase {
 final class LogoCacheTests: XCTestCase {
     func testResultIsCachedByUriIncludingRejections() async {
         let cache = LogoCache(capacity: 8)
-        let good = "https://example.org/a.png"
         let bad = "javascript:alert(1)"
-        let first = await cache.resolve(good)
-        let again = await cache.resolve(good)
-        XCTAssertEqual(first, again)
-        XCTAssertNotNil(first)
+        let bad2 = "http://example.org/a.png"
         let r1 = await cache.resolve(bad)
         let r2 = await cache.resolve(bad)
+        let r3 = await cache.resolve(bad2)
         XCTAssertNil(r1)
         XCTAssertNil(r2)
+        XCTAssertNil(r3)
         let count = await cache.sanitizeCount
         XCTAssertEqual(count, 2, "each distinct URI sanitized once")
     }
 
     func testCacheIsBounded() async {
         let cache = LogoCache(capacity: 2)
-        for i in 0..<5 { _ = await cache.resolve("https://example.org/\(i).png") }
-        _ = await cache.resolve("https://example.org/0.png") // evicted, sanitized again
+        for i in 0..<5 { _ = await cache.resolve("javascript:\(i)") }
+        _ = await cache.resolve("javascript:0") // evicted, sanitized again
         let count = await cache.sanitizeCount
         XCTAssertEqual(count, 6)
     }
@@ -682,6 +739,30 @@ final class LogoRemoteSvgTests: XCTestCase {
     }
 
     private let okSvg = Data("<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8'/></svg>".utf8)
+
+    // (2) https logos are decided by the response, not the file name
+    func testExtensionlessHttpsSvgAndRasterLogosAreSanitizedByContentType() async {
+        let cache = LogoCache(session: session)
+        StubProtocol.type = "image/svg+xml"; StubProtocol.body = okSvg
+        let svgLogo = await cache.resolve("https://example.org/logo")
+        guard case .image? = svgLogo else { return XCTFail("extensionless svg must render") }
+
+        let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, ctx.makeImage()!, nil); CGImageDestinationFinalize(dest)
+        StubProtocol.type = "image/png"; StubProtocol.body = out as Data
+        let pngLogo = await cache.resolve("https://example.org/logo.png")
+        guard case .image? = pngLogo else { return XCTFail("https raster logos are fetched and re-encoded too") }
+
+        StubProtocol.type = "text/html"; StubProtocol.body = Data("<html/>".utf8)
+        let html = await cache.resolve("https://example.org/not-an-image")
+        XCTAssertNil(html)
+        StubProtocol.type = "image/svg+xml"; StubProtocol.body = Data("<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>".utf8)
+        let evil = await cache.resolve("https://example.org/evil")
+        XCTAssertNil(evil)
+    }
 
     // (6) same authority validation as sanitize(_:), before any request
     func testFetchRejectsUserinfoWithoutRequest() async {

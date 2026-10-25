@@ -189,6 +189,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and body (a non-finite or non-positive `timeout:` is refused, large ones clamped to 120 s),
   and concurrent resolves of one URI share a single download. `width`/`height` in an
   `<svg style="...">` are range-checked like the attributes.
+  Path data, transform lists and `points` are validated strictly (SwiftDraw hangs on
+  `d="M0 0Z0"`), 4/8-digit alpha hex and plain `href` are refused (SwiftDraw mis-handles
+  them), and `LogoCache` fetches every https logo and decides raster versus SVG from the
+  response `Content-Type` instead of the file name; the sample app draws only sanitized
+  results. See docs/ISSUER-LOGOS.md.
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
   `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
   not match the photo stored on the document's chip

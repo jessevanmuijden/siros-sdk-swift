@@ -460,19 +460,10 @@ private struct IssuerLogoBadge: View {
                 } else {
                     initialBadge
                 }
-            case .remote(let url):
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    case .empty, .failure:
-                        initialBadge
-                    @unknown default:
-                        initialBadge
-                    }
-                }
-                .frame(width: 32, height: 32)
-                .clipShape(Circle())
+            case .remote:
+                // LogoCache fetches and sanitizes every https logo, so it never hands
+                // out a bare URL; if one ever appears, it is not drawn unchecked.
+                initialBadge
             case nil:
                 initialBadge
             }

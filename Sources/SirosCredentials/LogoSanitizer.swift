@@ -439,9 +439,10 @@ public actor LogoCache {
         sanitizeCount += 1
         var result: DisplayLogo?
         if case .success(let logo) = LogoSanitizer.sanitize(uri) { result = logo }
-        // https SVG cannot be drawn by AsyncImage: fetch it and run the same
-        // guard + rasterize path as a data: SVG, once, however many callers ask.
-        if case .remote(let url)? = result, url.path.lowercased().hasSuffix(".svg") {
+        // Every https logo is fetched once and sanitized (raster or SVG, decided by
+        // the response, not the file name), however many callers ask. The result is
+        // always clean PNG bytes or nil, never a URL for an unchecked image loader.
+        if case .remote(let url)? = result {
             nextFlightId += 1
             let id = nextFlightId
             let session = self.session
