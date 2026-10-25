@@ -48,7 +48,7 @@ final class SirosWalletNotificationTests: XCTestCase {
 
     private func makeWallet(store: InMemoryCredentialStore) -> SirosWallet {
         let config = WalletConfig(backendUrl: "https://example.invalid", credentialStore: store)
-        let wallet = SirosWallet(config: config, authProvider: StubAuthProvider())
+        let wallet = SirosWallet(config: config, authProvider: StubAuthProvider(), accountRegistry: .inMemory())
         XCTAssertNotNil(wallet, "wallet should initialise with default keystore on CryptoKit platforms")
         return wallet!
     }

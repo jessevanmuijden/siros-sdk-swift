@@ -765,6 +765,17 @@ final class SirosWalletAccountDeletionTests: XCTestCase {
         }
     }
 
+    /// Hermeticity guard: under a test run the DEFAULT account registry must never be the real Keychain / UserDefaults
+    /// one, or a fixture that forgot to inject one would delete real accounts when it reaches `wipeLocalState()`.
+    func testTheDefaultAccountRegistryIsNeverPersistentUnderTest() {
+        XCTAssertFalse(AccountRegistry().isPersistent, "the default registry must be in-memory under a test run")
+        let wallet = SirosWallet(
+            config: WalletConfig(backendUrl: "https://wallet.example.invalid", credentialStore: InMemoryCredentialStore()),
+            authProvider: RecordingAuthProvider(), keystore: RecordingKeystore()
+        )!
+        XCTAssertFalse(wallet.accountRegistry.isPersistent, "a wallet built without a registry must not reach the real one")
+    }
+
     /// Admission stays closed after the wipe and opens only for a new session.
     func testAdmissionReopensOnlyForANewSession() async throws {
         let store = InMemoryCredentialStore()
