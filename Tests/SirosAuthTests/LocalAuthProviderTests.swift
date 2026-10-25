@@ -19,6 +19,14 @@ import Security
 /// "not available on this platform" everywhere else (see the cross-platform
 /// test below), so there is nothing to harden there.
 final class LocalAuthProviderTests: XCTestCase {
+    /// A relying party that requires verification (the account-deletion
+    /// step-up) rejects an UP-only assertion. Every key is created with
+    /// `.userPresence` access control, so UV is enforced and must be reported.
+    func testAssertionFlagsReportUserPresenceAndVerification() {
+        XCTAssertEqual(LocalAuthProvider.assertionFlags & 0x01, 0x01, "UP")
+        XCTAssertEqual(LocalAuthProvider.assertionFlags & 0x04, 0x04, "UV")
+    }
+
     #if canImport(Security)
     func testRegisteredKeyIsGatedByAccessControlRequiringUserPresence() async throws {
         let provider = LocalAuthProvider()

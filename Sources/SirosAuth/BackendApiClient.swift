@@ -21,24 +21,15 @@ public final class BackendApiClient: @unchecked Sendable {
     private let httpFn: HttpFunction
     private let lock = NSLock()
     private var _appToken: String?
-    /// Waits, in seconds, between the attempts of a `409 ERASURE_INCOMPLETE`
-    /// retry (see `revokeAllWalletInstances(reason:)`). One more attempt is
-    /// made than there are entries here, so the default is five attempts over
-    /// about 15 s - long enough for a transient backend failure to clear,
-    /// short enough that the OS will not suspend the app mid-loop. Tests pass
-    /// zeros.
-    private let erasureRetryDelays: [TimeInterval]
 
     /// Create a client with a custom HTTP function (for testing).
     public init(
         baseUrl: String,
         tenantId: String = "default",
-        erasureRetryDelays: [TimeInterval] = [1, 2, 4, 8],
         httpFn: @escaping HttpFunction
     ) {
         self.baseUrl = baseUrl
         self.tenantId = tenantId
-        self.erasureRetryDelays = erasureRetryDelays
         self.httpFn = httpFn
     }
 
@@ -46,10 +37,9 @@ public final class BackendApiClient: @unchecked Sendable {
     /// Create a client using URLSession for HTTP.
     public convenience init(
         baseUrl: String,
-        tenantId: String = "default",
-        erasureRetryDelays: [TimeInterval] = [1, 2, 4, 8]
+        tenantId: String = "default"
     ) {
-        self.init(baseUrl: baseUrl, tenantId: tenantId, erasureRetryDelays: erasureRetryDelays) { method, url, headers, body in
+        self.init(baseUrl: baseUrl, tenantId: tenantId) { method, url, headers, body in
             var request = URLRequest(url: url)
             request.httpMethod = method
             request.httpBody = body
@@ -387,154 +377,57 @@ public final class BackendApiClient: @unchecked Sendable {
         return raw.compactMap(WalletInstance.init(json:))
     }
 
-    /// PUT /user/session/instances/{id}/status — suspend, reactivate or revoke
-    /// one of this user's instances. Throws `SirosError.backendApi` with code
-    /// 404 for an instance that is not the caller's and 409 for an invalid
-    /// transition (e.g. reactivating a revoked instance).
+    // MARK: - Account deletion (go-wallet-backend#352)
+
+    /// POST /user/session/delete-begin - start the step-up for deleting the
+    /// account: returns the single-use challenge and the WebAuthn assertion
+    /// options for the caller's own passkeys (`400 NO_PASSKEY` when the
+    /// account has none, `403` when the token lacks the `w` scope, both thrown
+    /// as `SirosError.backendApi`). The assertion must be sent to
+    /// `deleteAccount(challengeId:credential:confirm:)` within 2 minutes.
+    public func deleteAccountBegin() async throws -> AccountDeletionChallenge {
+        // Same `{"$b64u": ...}` binary encoding as the login options.
+        let result = TaggedBinary.decode(try await post("/user/session/delete-begin", body: [:]))
+        return try AccountDeletionChallenge(json: result)
+    }
+
+    /// DELETE /user/session - delete the account, authorised by the passkey
+    /// assertion for `challengeId` and the typed confirmation (`"DELETE"`).
     ///
-    /// Revoking the caller's last instance deactivates the wallet, so this
-    /// request runs the same erasure cascade as
-    /// `revokeAllWalletInstances(reason:)` and can answer `409
-    /// ERASURE_INCOMPLETE`; it is retried here on the same budget. If the
-    /// erasure is still unfinished when the budget runs out the recorded
-    /// status is returned anyway (it stands - only the cascade is unfinished)
-    /// and the residual is logged for an administrator.
-    public func setWalletInstanceStatus(instanceId: String, status: WalletInstance.Status, reason: String? = nil) async throws -> WalletInstance {
-        var body: [String: Any] = ["status": status.rawValue]
-        if let reason, !reason.isEmpty { body["reason"] = reason }
-        let attempted = try await retryWhileErasureIncomplete(
-            "setWalletInstanceStatus(\(instanceId), \(status.rawValue))"
-        ) { () -> WalletInstance in
-            let result = try await self.put("\(Self.pathInstances)/\(instanceId)/status", body: body)
-            // Today the backend answers {id, status}; decode the whole object
-            // when it sends more, so callers see every field it returns.
-            if let full = WalletInstance(json: result) {
-                return full
-            }
-            guard let newStatus = (result["status"] as? String).flatMap(WalletInstance.Status.init(rawValue:)) else {
-                throw SirosError.backendApi(code: 0, message: "Missing status in response", body: "")
-            }
-            return WalletInstance(id: result["id"] as? String ?? instanceId, status: newStatus)
+    /// Every outcome the backend defines is an `AccountDeletionResponse`; this
+    /// throws only for transport failures and responses outside the contract.
+    /// A `401` carrying a step-up code does not count against the session
+    /// token (see `request`): the token is fine, the assertion was not.
+    public func deleteAccount(
+        challengeId: String,
+        credential: [String: Any],
+        confirm: String
+    ) async throws -> AccountDeletionResponse {
+        let body: [String: Any] = [
+            "challengeId": challengeId,
+            "credential": credential,
+            "confirm": confirm,
+        ]
+        let data: Data
+        do {
+            data = try await request(
+                "DELETE", path: "/user/session",
+                body: try JSONSerialization.data(withJSONObject: body),
+                tokenStillValidOn: Self.stepUpErrorCodes
+            )
+        } catch let error as SirosError {
+            if let mapped = AccountDeletionResponse(failure: error) { return mapped }
+            throw error
         }
-        // A 409 that outlived the retries, or a 401 that dropped the acting
-        // token with the erased key material, both leave the recorded status
-        // standing - report it rather than failing a change that took effect.
-        return attempted.value ?? WalletInstance(id: instanceId, status: status)
-    }
-
-    /// POST /user/session/instances/revoke-all — deactivate the wallet: every
-    /// instance revoked, wallet data erased server-side, new enrollment
-    /// required.
-    ///
-    /// The backend records the revocations before it erases, so it can answer
-    /// `409 ERASURE_INCOMPLETE`; repeating the identical request re-runs the
-    /// erasure. This does that on the documented budget (five attempts, 1 s →
-    /// 8 s) and reports what happened in `DeactivationOutcome.complete`. A
-    /// `401` after such a `409` means the acting token was dropped together
-    /// with the erased key material, which is the erasure having succeeded -
-    /// it counts as complete.
-    public func revokeAllWalletInstances(reason: String? = nil) async throws -> DeactivationOutcome {
-        var body: [String: Any] = [:]
-        if let reason, !reason.isEmpty { body["reason"] = reason }
-        // The first attempt reports how many instances it revoked; a repeat
-        // answers 0 because there is nothing left to revoke. Keep the largest
-        // count seen (the 409 body carries it too) so the caller can tell the
-        // user what actually happened.
-        let seen = RevokedCounter()
-        let attempted = try await retryWhileErasureIncomplete(
-            "revokeAllWalletInstances",
-            onIncomplete: { error in
-                if case let .backendApi(_, _, incompleteBody) = error,
-                   let incompleteBody,
-                   let data = incompleteBody.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let revoked = json["revoked"] as? Int {
-                    seen.record(revoked)
-                }
-            }
-        ) { () -> Int in
-            let result = try await self.post("\(Self.pathInstances)/revoke-all", body: body)
-            guard let revoked = result["revoked"] as? Int else {
-                throw SirosError.backendApi(code: 0, message: "Missing revoked count in response", body: "")
-            }
-            return revoked
+        guard let response = AccountDeletionResponse(success: try parseJsonObject(data)) else {
+            throw SirosError.backendApi(code: 0, message: "Unrecognised delete-account response", body: String(data: data, encoding: .utf8))
         }
-        return DeactivationOutcome(
-            revoked: max(seen.value, attempted.value ?? 0),
-            complete: attempted.complete
-        )
+        return response
     }
 
-    /// Largest `revoked` count seen across the attempts of one erasure retry.
-    private final class RevokedCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _value = 0
-        var value: Int { lock.lock(); defer { lock.unlock() }; return _value }
-        func record(_ count: Int) { lock.lock(); _value = max(_value, count); lock.unlock() }
-    }
-
-    private struct Attempted<T> {
-        let value: T?
-        let complete: Bool
-    }
-
-    /// Run `request`, repeating it while the backend answers `409
-    /// ERASURE_INCOMPLETE` (SID-AUTH-06): the status change is already
-    /// recorded, only the erasure cascade needs re-running, and the protocol
-    /// says to repeat the identical request until it answers `200`.
-    ///
-    /// Ends with `complete == false` when the budget runs out, and with
-    /// `complete == true, value == nil` on a `401` that follows such a `409` -
-    /// that is the acting token being dropped along with the erased key
-    /// material, i.e. the erasure got far enough that the wallet is gone. A
-    /// `401` on the very first attempt is an ordinary authentication failure
-    /// and is rethrown.
-    private func retryWhileErasureIncomplete<T>(
-        _ what: String,
-        onIncomplete: (SirosError) -> Void = { _ in },
-        request: () async throws -> T
-    ) async throws -> Attempted<T> {
-        let attempts = erasureRetryDelays.count + 1
-        var sawIncomplete = false
-        var lastBody: String?
-        for attempt in 0..<attempts {
-            if attempt > 0 {
-                let seconds = erasureRetryDelays[attempt - 1]
-                if seconds > 0 {
-                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                }
-            }
-            do {
-                return Attempted(value: try await request(), complete: true)
-            } catch let error as SirosError {
-                guard case let .backendApi(code, _, body) = error else { throw error }
-                if code == 409, error.apiErrorCode == errorErasureIncomplete {
-                    sawIncomplete = true
-                    lastBody = body
-                    onIncomplete(error)
-                    print("[SirosAuth] \(what): ERASURE_INCOMPLETE (attempt \(attempt + 1)/\(attempts)) — repeating the request")
-                } else if code == 401, sawIncomplete {
-                    print("[SirosAuth] \(what): acting token dropped with the erased key material — erasure complete")
-                    return Attempted(value: nil, complete: true)
-                } else {
-                    throw error
-                }
-            }
-        }
-        print("""
-            [SirosAuth] \(what): still ERASURE_INCOMPLETE after \(attempts) attempts — the status change \
-            stands, residual data must be cleaned up by an administrator: \(lastBody ?? "")
-            """)
-        return Attempted(value: nil, complete: false)
-    }
+    private static let stepUpErrorCodes: Set<String> = [errorStepUpRequired, errorStepUpFailed]
 
     // MARK: - HTTP primitives
-
-    private func put(_ path: String, body: [String: Any]) async throws -> [String: Any] {
-        let bodyData = try JSONSerialization.data(withJSONObject: body)
-        let data = try await request("PUT", path: path, body: bodyData)
-        return try parseJsonObject(data)
-    }
 
     private func get(_ path: String) async throws -> [String: Any] {
         let data = try await request("GET", path: path)
@@ -557,7 +450,15 @@ public final class BackendApiClient: @unchecked Sendable {
         return try parseJsonObject(data)
     }
 
-    private func request(_ method: String, path: String, body: Data? = nil) async throws -> Data {
+    /// - Parameter tokenStillValidOn: `401` error codes that say something
+    ///   other than "the token is rejected", so they are not registered as a
+    ///   token rejection.
+    private func request(
+        _ method: String,
+        path: String,
+        body: Data? = nil,
+        tokenStillValidOn: Set<String> = []
+    ) async throws -> Data {
         guard let url = URL(string: "\(baseUrl)\(path)") else {
             throw SirosError.network(message: "Invalid URL: \(baseUrl)\(path)")
         }
@@ -583,7 +484,8 @@ public final class BackendApiClient: @unchecked Sendable {
             // looking "connected" indefinitely. Only applies to the
             // `AuthTokens`-managed path: the legacy bare `appToken` path has
             // no `AuthTokens` instance to register against.
-            if let tokens, case let SirosError.backendApi(code, _, _) = error, code == 401 {
+            if let tokens, case let SirosError.backendApi(code, _, _) = error, code == 401,
+               !((error as? SirosError)?.apiErrorCode.map(tokenStillValidOn.contains) ?? false) {
                 tokens.registerTokenRejection(AuthTokens.tokenBackend)
             }
             throw error

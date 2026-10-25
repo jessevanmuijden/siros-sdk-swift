@@ -83,6 +83,15 @@ public final class LocalAuthProvider: AuthProvider, @unchecked Sendable {
 
     public init() {}
 
+    /// Authenticator-data flags of an assertion: UP (0x01) and UV (0x04).
+    /// Every signing key is created with `.userPresence` access control, so
+    /// the keychain refuses to sign until the user passed biometry or the
+    /// device passcode: verification is enforced for every assertion this
+    /// provider produces, whatever the relying party asked for, and the UV
+    /// bit is therefore truthful. Without it a relying party that requires
+    /// verification (the account-deletion step-up does) rejects the assertion.
+    static let assertionFlags: UInt8 = 0x01 | 0x04
+
     #if canImport(Security)
     public func register(options: RegisterOptions) async throws -> RegisterResult {
         // Generate a random credential ID
@@ -227,7 +236,7 @@ public final class LocalAuthProvider: AuthProvider, @unchecked Sendable {
 
         // Build authenticator data
         let rpIdHash = sha256(Data(options.rpId.utf8))
-        let flags: UInt8 = 0x01 // UP
+        let flags = Self.assertionFlags
         var signCount = found.signCount.bigEndian
         let signCountBytes = withUnsafeBytes(of: &signCount) { Data($0) }
 

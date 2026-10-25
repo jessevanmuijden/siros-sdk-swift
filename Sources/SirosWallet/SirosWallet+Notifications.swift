@@ -35,6 +35,11 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // The admission ticket is taken ONCE, before any await, and passed to
+        // every credential save: a wipe that lands while the first credential
+        // awaits its metadata refuses the whole batch. While a wipe has closed
+        // the gate no completion may start at all.
+        guard let ticket = teardownGate.ticket() else { return }
         // A flow that already failed or was cancelled is not revived by a late completion (its key is gone, so the plain
         // path below would otherwise accept it as a successful plain issuance).
         if flowAlreadyEnded(msg.flowId) { return }
@@ -128,8 +133,10 @@ extension SirosWallet {
                 let outcome = await storeIssuedCredential(
                     cred, index: index, flowId: msg.flowId, offer: offer, vctm: vctm,
                     vctmDocument: vctmDocument,
-                    attestedKeyIds: attestedKeyIds, batchId: batchId
+                    attestedKeyIds: attestedKeyIds, batchId: batchId, ticket: ticket
                 )
+                // A completion the account deletion overtook is dropped whole.
+                if outcome.failureReason == Self.wipedDuringIssuance { return }
                 if outcome.stored { storedCount += 1 }
                 if let reason = outcome.failureReason { storeFailureReason = reason }
             }
@@ -141,12 +148,19 @@ extension SirosWallet {
         // credential(s) actually parsed/validated) would destroy the user's
         // only copy on a failed renewal. See snapshotRenewalSourceBatch's
         // doc comment.
-        if storedCount > 0, let oldBatchId {
-            await deleteRenewalSourceBatch(oldBatchId)
+        //
+        // These mutate the keystore (the old batch's entries, the new batch's refresh token and DPoP key): admitted
+        // writes, so a wipe that began meanwhile either waits for them or refuses them, and neither is restored
+        // into a wiped (even locked) keystore.
+        if storedCount > 0 {
+            let applied: Bool? = await teardownGate.admit(ticket) { [self] in
+                if let oldBatchId { await deleteRenewalSourceBatch(oldBatchId) }
+                // A refresh token belongs to a batch that exists: with nothing stored there is no batch to attach it to.
+                await captureRefreshTokenIfPresent(msg: msg, offer: offer, batchId: batchId)
+                return true
+            }
+            if applied == nil { return }
         }
-
-        // A refresh token belongs to a batch that exists: with nothing stored there is no batch to attach it to.
-        if storedCount > 0 { await captureRefreshTokenIfPresent(msg: msg, offer: offer, batchId: batchId) }
         await notifyRenewalAttributeDiffIfNeeded(wasRenewal: wasRenewal, oldClaims: oldRenewedClaims, batchId: batchId)
 
         // Terminal path for this issuance - see `resetIssuanceGuards()`.
@@ -159,6 +173,8 @@ extension SirosWallet {
         // issuance's guards and invalidate its own tag.
         if msg.startTag != nil { resetIssuanceGuards() }
 
+        // Nothing below may report or publish for an account that was wiped meanwhile.
+        guard teardownGate.isValid(ticket) else { return }
         await persistAndSyncKeystore()
 
         // The engine considers this flow successfully finished, but if it
@@ -169,6 +185,7 @@ extension SirosWallet {
         // UI's error handling fires, matching how any other flow failure is
         // handled.
         let expectedCredentials = credentialsToStore?.count ?? 0
+        guard teardownGate.isValid(ticket) else { return }
         lock.lock(); let listener = eventListener; lock.unlock()
         if expectedCredentials > 0 && storedCount == 0 {
             listener?.onFlowError(flowId: msg.flowId, errorMessage: storeFailureReason ?? "Credential could not be processed", redirectUri: nil)
@@ -176,7 +193,7 @@ extension SirosWallet {
             listener?.onFlowComplete(flowId: msg.flowId, redirectUri: msg.redirectUri)
         }
 
-        await restoreReadyState()
+        await restoreReadyState(ticket: ticket)
     }
 
     /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
@@ -375,8 +392,11 @@ extension SirosWallet {
         vctm: Vctm?,
         vctmDocument: VctmDocument?,
         attestedKeyIds: [String]?,
-        batchId: Int64
+        batchId: Int64,
+        ticket capturedTicket: TeardownGate.Ticket? = nil
     ) async -> (stored: Bool, failureReason: String?) {
+        // A caller that handles a whole batch passes the ticket it took once up front.
+        guard let ticket = capturedTicket ?? teardownGate.ticket() else { return (false, Self.wipedDuringIssuance) }
         // A container this build must not rewrite is read-only. Storing would be
         // silently discarded (`CredentialStore.save` does not throw), and the
         // issuer would then be told the credential was accepted.
@@ -428,7 +448,7 @@ extension SirosWallet {
                 batchId: batchId,
                 instanceId: index
             )
-            await credentialStore.save(stored)
+            guard await saveUnlessWiped(stored, ticket: ticket) else { return (false, Self.wipedDuringIssuance) }
             notifyCredentialAccepted(cred, flowId: flowId, stored: stored)
             return (true, nil)
         }
@@ -483,13 +503,25 @@ extension SirosWallet {
             batchId: batchId,
             instanceId: index
         )
-        await credentialStore.save(stored)
+        guard await saveUnlessWiped(stored, ticket: ticket) else { return (false, Self.wipedDuringIssuance) }
 
         // OID4VCI §10: confirm acceptance to the issuer (via the backend)
         // while the issuance access token is still valid. The backend
         // forwards using ephemeral flow state; nothing is stored there.
         notifyCredentialAccepted(cred, flowId: flowId, stored: stored)
         return (true, nil)
+    }
+
+    static let wipedDuringIssuance = "The account was deleted while the credential was being issued"
+
+    /// Save `stored` as an admitted write: refused when the gate was closed (a
+    /// wipe began) after `ticket` was taken. See `TeardownGate`.
+    private func saveUnlessWiped(_ stored: StoredCredential, ticket: TeardownGate.Ticket) async -> Bool {
+        let saved: Bool? = await teardownGate.admit(ticket) { [self] in
+            await credentialStore.save(stored)
+            return true
+        }
+        return saved == true
     }
 
     private func notifyCredentialAccepted(_ cred: CredentialResult, flowId: String, stored: StoredCredential) {

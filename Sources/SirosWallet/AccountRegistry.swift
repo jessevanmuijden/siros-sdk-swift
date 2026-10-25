@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 
 import Foundation
+import SirosCredentials
 #if canImport(Security)
 import Security
 #endif
@@ -22,16 +23,39 @@ public final class AccountRegistry: @unchecked Sendable {
 
     /// Registry persisted in the Keychain under `service` (UserDefaults on
     /// Linux). Survives logout and app reinstall-with-keychain-restore.
-    public init(service: String = "org.siros.wallet.accounts") {
+    ///
+    /// Under a test run (XCTest loaded) the default registry is in-memory, never the real Keychain service or
+    /// `UserDefaults`: a fixture that forgot to inject one, and then reaches `wipeLocalState()`, must not delete
+    /// the real accounts of a developer's Mac or a CI machine. A test that wants a persistent registry passes an
+    /// explicit `service`.
+    public init(service: String? = nil) {
+        if service == nil, Self.runningUnderTests {
+            self.storage = InMemoryAccountRegistryStorage()
+            self.isPersistent = false
+            return
+        }
+        self.isPersistent = true
         #if canImport(Security)
-        self.storage = KeychainAccountRegistryStorage(service: service)
+        self.storage = KeychainAccountRegistryStorage(service: service ?? "org.siros.wallet.accounts")
         #else
         self.storage = UserDefaultsAccountRegistryStorage()
         #endif
     }
 
+    /// Whether this registry writes to the Keychain / `UserDefaults`. False for `inMemory()` and for the
+    /// test-run default. Exposed for the hermeticity guard test.
+    let isPersistent: Bool
+
+    static var runningUnderTests: Bool {
+        // XCTest on Apple platforms, and the `.xctest` test runner on Linux (no Objective-C runtime there).
+        NSClassFromString("XCTestCase") != nil
+            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || (CommandLine.arguments.first?.contains(".xctest") ?? false)
+    }
+
     init(storage: AccountRegistryStorage) {
         self.storage = storage
+        self.isPersistent = !(storage is InMemoryAccountRegistryStorage)
     }
 
     /// A registry that persists nothing - for tests and previews, and for
@@ -94,7 +118,14 @@ public final class AccountRegistry: @unchecked Sendable {
     /// Remove all cached accounts (factory reset).
     public func clear() {
         lock.lock(); defer { lock.unlock() }
-        deleteAll()
+        try? storage.eraseAll()
+    }
+
+    /// ``clear()`` that reports a storage failure, so an account wipe can tell
+    /// the host that cached accounts may remain.
+    public func eraseAll() throws {
+        lock.lock(); defer { lock.unlock() }
+        try storage.eraseAll()
     }
 
     // MARK: - Active Account
@@ -149,7 +180,6 @@ public final class AccountRegistry: @unchecked Sendable {
     }
 
     private func deleteKey(_ key: String) { storage.deleteKey(key) }
-    private func deleteAll() { storage.deleteAll() }
 
     private enum Keys {
         static let accounts = "siros_cached_accounts"
@@ -164,6 +194,12 @@ protocol AccountRegistryStorage: Sendable {
     func writeData(_ key: String, _ data: Data)
     func deleteKey(_ key: String)
     func deleteAll()
+    /// ``deleteAll()`` that surfaces a failure; defaults to it.
+    func eraseAll() throws
+}
+
+extension AccountRegistryStorage {
+    func eraseAll() throws { deleteAll() }
 }
 
 final class InMemoryAccountRegistryStorage: AccountRegistryStorage, @unchecked Sendable {
@@ -174,6 +210,13 @@ final class InMemoryAccountRegistryStorage: AccountRegistryStorage, @unchecked S
     func writeData(_ key: String, _ data: Data) { lock.withLock { items[key] = data } }
     func deleteKey(_ key: String) { lock.withLock { _ = items.removeValue(forKey: key) } }
     func deleteAll() { lock.withLock { items.removeAll() } }
+
+    /// Test seam: make ``eraseAll()`` fail the way a Keychain store can.
+    var eraseFailure: Error?
+    func eraseAll() throws {
+        if let eraseFailure { throw eraseFailure }
+        deleteAll()
+    }
 }
 
 #if canImport(Security)
@@ -218,12 +261,17 @@ final class KeychainAccountRegistryStorage: AccountRegistryStorage {
         SecItemDelete(query as CFDictionary)
     }
 
-    func deleteAll() {
+    func deleteAll() { try? eraseAll() }
+
+    func eraseAll() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SirosError.keystore(message: "Keychain account registry could not be erased (status \(status))")
+        }
     }
 }
 #else

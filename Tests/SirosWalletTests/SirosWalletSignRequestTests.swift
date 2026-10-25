@@ -357,10 +357,8 @@ final class SirosWalletSignRequestTests: XCTestCase {
 
 // MARK: - Wallet instance lifecycle facade (SID-AUTH-06)
 
-/// `SirosWallet.listWalletInstances()` / `setWalletInstanceStatus(...)`: the
-/// facade refuses when not logged in and otherwise forwards to the backend
-/// client. `deactivateWallet` is not covered here: its local half touches the
-/// Keychain-backed account registry.
+/// `SirosWallet.listWalletInstances()`: the facade refuses when not logged in
+/// and otherwise forwards to the backend client.
 final class SirosWalletLifecycleFacadeTests: XCTestCase {
     private func makeWallet() -> SirosWallet {
         let config = WalletConfig(backendUrl: "https://backend.example.invalid", redirectUri: "https://wallet.example.invalid/cb")
@@ -396,29 +394,16 @@ final class SirosWalletLifecycleFacadeTests: XCTestCase {
             XCTFail("expected SirosError.auth")
         } catch SirosError.auth { }
         catch { XCTFail("unexpected \(error)") }
-        do {
-            _ = try await wallet.setWalletInstanceStatus(instanceId: "x", status: .suspended)
-            XCTFail("expected SirosError.auth")
-        } catch SirosError.auth { }
-        catch { XCTFail("unexpected \(error)") }
     }
 
     func testFacadeForwardsToTheBackendClient() async throws {
         let wallet = makeWallet()
         let recorder = Recorder([
             "/user/session/instances": #"{"instances":[{"id":"jkt-1","status":"active","credential_id":"pk-1"}]}"#,
-            "/user/session/instances/jkt-1/status": #"{"id":"jkt-1","status":"suspended"}"#,
         ])
         let client = BackendApiClient(baseUrl: "https://backend.example.invalid", tenantId: "default", httpFn: recorder.httpFn)
         client.setAppToken("t")
         wallet.apiClient = client
-        // A status write re-logs in (SID-AUTH-06: the change cuts this
-        // session's tokens off), so give the AS a stub that fails locally
-        // instead of letting the re-login reach for a real network.
-        wallet.authServerClient = AuthServerClient(
-            baseUrl: "https://backend.example.invalid", tenantId: "default"
-        ) { _, _, _, _ in throw SirosError.network(message: "offline in tests") }
-
         let instances = try await wallet.listWalletInstances()
         XCTAssertEqual(instances.map(\.id), ["jkt-1"])
         let listCalls = recorder.calls(to: "/user/session/instances")
@@ -427,13 +412,5 @@ final class SirosWalletLifecycleFacadeTests: XCTestCase {
         // No WIA was obtainable here (the stubbed challenge answers `{}`), so
         // no row can be marked as this device - and the listing still works.
         XCTAssertFalse(instances[0].isThisDevice)
-
-        let updated = try await wallet.setWalletInstanceStatus(instanceId: "jkt-1", status: .suspended, reason: "lost")
-        XCTAssertEqual(updated.status, .suspended)
-        let statusCalls = recorder.calls(to: "/user/session/instances/jkt-1/status")
-        XCTAssertEqual(statusCalls.count, 1)
-        XCTAssertEqual(statusCalls[0].method, "PUT")
-        XCTAssertEqual(statusCalls[0].body?["status"] as? String, "suspended")
-        XCTAssertEqual(statusCalls[0].body?["reason"] as? String, "lost")
     }
 }

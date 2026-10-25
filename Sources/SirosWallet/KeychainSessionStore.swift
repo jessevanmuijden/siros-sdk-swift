@@ -3,6 +3,7 @@
 #if canImport(Security)
 import Foundation
 import Security
+import SirosCredentials
 
 /// Keychain-backed session store for iOS/macOS.
 ///
@@ -149,13 +150,24 @@ public final class KeychainSessionStore: SessionStoreProtocol, @unchecked Sendab
     }
 
     public func clearAll() {
+        try? eraseAll()
+    }
+
+    /// Removes every item under `service`; an absent item is success, any
+    /// other Keychain status is thrown. The active account is forgotten
+    /// either way.
+    public func eraseAll() throws {
         lock.lock(); defer { lock.unlock() }
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
         ]
-        SecItemDelete(query as CFDictionary)
+        if let group = accessGroup { query[kSecAttrAccessGroup as String] = group }
+        let status = SecItemDelete(query as CFDictionary)
         activeAccountId = nil
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SirosError.keystore(message: "Keychain session store could not be erased (status \(status))")
+        }
     }
 
     public func clear() { clearAccount() }

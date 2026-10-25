@@ -48,7 +48,7 @@ final class SirosWalletNotificationTests: XCTestCase {
 
     private func makeWallet(store: InMemoryCredentialStore) -> SirosWallet {
         let config = WalletConfig(backendUrl: "https://example.invalid", credentialStore: store)
-        let wallet = SirosWallet(config: config, authProvider: StubAuthProvider())
+        let wallet = SirosWallet(config: config, authProvider: StubAuthProvider(), accountRegistry: .inMemory())
         XCTAssertNotNil(wallet, "wallet should initialise with default keystore on CryptoKit platforms")
         return wallet!
     }
@@ -183,6 +183,40 @@ final class SirosWalletNotificationTests: XCTestCase {
         XCTAssertNil(tokens[77], "the old refresh token goes with its batch")
         XCTAssertEqual(tokens.values.first?.refreshToken, "new-rt")
         XCTAssertTrue(listener.errors.isEmpty)
+    }
+
+    /// Blocks the completion's thread right after its credential was saved (the listener's synchronous
+    /// `onCredentialReceived`), so the test can run the whole wipe while the completion is paused.
+    private final class PausingListener: WalletEventListener, @unchecked Sendable {
+        let entered = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        func onCredentialSelectionRequired(request: PresentationRequest) async -> [Int64] { [] }
+        func onCredentialReceived(credential: StoredCredential) {
+            entered.signal()
+            resume.wait()
+        }
+    }
+
+    /// A completion paused after a successful save must not, once the wipe is over, restore its refresh token and
+    /// DPoP key into the (locked) keystore.
+    func testACompletionPausedAfterItsSaveDoesNotRestoreItsRefreshTokenAfterTheWipe() async throws {
+        let now = Int64(Date().timeIntervalSince1970)
+        let wallet = makeWallet(store: InMemoryCredentialStore())
+        let listener = PausingListener()
+        wallet.eventListener = listener
+        var msg = makeFlowComplete(flowId: "rt", credentials: [["format": "vc+sd-jwt", "credential": makeJwt(exp: now + 3600, iat: now)]])
+        msg.refreshToken = "must-not-survive"
+        msg.credentialIssuer = "https://i.example"
+        msg.selectedCredentialConfigurationId = "pid"
+
+        let completing = Task { await wallet.handleFlowComplete(msg: msg) }
+        await Task.detached { listener.entered.wait() }.value          // the credential is saved; the completion is paused
+        _ = await wallet.wipeLocalState()
+        listener.resume.signal()
+        await completing.value
+
+        let tokens = await wallet.exportCredentialRefreshTokens()
+        XCTAssertTrue(tokens.isEmpty, "a refresh token and DPoP key must not be restored after the wipe: \(tokens)")
     }
 
     /// A completion whose credentials are all rejected (here: expired) stores nothing, so no refresh token is

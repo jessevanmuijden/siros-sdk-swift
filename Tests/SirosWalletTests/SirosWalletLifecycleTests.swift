@@ -12,8 +12,7 @@ import SirosKeystore
 
 /// Wallet instance lifecycle (SID-AUTH-06, go-wallet-backend#319/#340) at the
 /// facade: the blocked state and which of its three refusals forgets the
-/// cached account, the once-only re-login guard, `isThisDevice`, and the
-/// `DeactivationOutcome` a deactivation reports.
+/// cached account, the once-only re-login guard, `isThisDevice`.
 ///
 /// Uses a stub `KeystoreManager` (like `SirosWalletRegistryUrlTests`) so it
 /// runs identically on Linux and Apple platforms, without CryptoKit.
@@ -274,7 +273,7 @@ final class SirosWalletLifecycleTests: XCTestCase {
     /// `WALLET_REVOKED` at scope `wallet` is the one refusal that is terminal
     /// for the whole wallet: every instance is revoked and the data erased
     /// server-side, so the cached account decrypts a vault that no longer
-    /// exists. The SDK forgets it - the same thing `deactivateWallet()` does -
+    /// exists. The SDK forgets it, as `forgetAccount(accountId:)` does,
     /// and the blocked state it publishes no longer lists the account.
     func testDeactivatedRefusalForgetsTheCachedAccount()async {
         let registry = seededRegistry()
@@ -298,7 +297,7 @@ final class SirosWalletLifecycleTests: XCTestCase {
         XCTAssertEqual(accounts.count, 0, "a deactivated wallet leaves nothing to log back in to")
         XCTAssertEqual(
             registry.listLoginableAccounts().count, 0,
-            "the cached account is forgotten, exactly as deactivateWallet() forgets it"
+            "the cached account is forgotten, exactly as forgetAccount(accountId:) forgets it"
         )
         XCTAssertNil(registry.activeAccountId)
         XCTAssertEqual(listener.blocked?.reason, .deactivated)
@@ -781,38 +780,6 @@ final class SirosWalletLifecycleTests: XCTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     }
 
-    /// Every status write records a cut-off, and the acting token's exemption
-    /// does not reach `POST /auth/token` or an engine flow start - so the
-    /// facade re-logs in rather than letting the next flow discover it as a
-    /// 401. Suspending this device's own instance therefore ends in
-    /// `.lifecycleBlocked(reason: .suspended, ...)`, which is the truthful
-    /// state.
-    func testSuspendingThisDeviceRelogsInAndLandsInTheBlockedState() async throws {
-        let registry = seededRegistry()
-        let wallet = makeWallet(registry: registry)
-        let (asClient, loginAttempts) = refusingAuthServer("WALLET_SUSPENDED", message: "This device is suspended")
-        wallet.authServerClient = asClient
-        let server = StubHttpServer()
-        server.enqueue(#"{"id":"jkt-self","status":"suspended"}"#)
-        let client = BackendApiClient(baseUrl: "https://wallet.example.invalid", httpFn: server.httpFunction)
-        client.setAppToken("t")
-        wallet.apiClient = client
-        wallet.setState(.ready(userId: "user-1", displayName: "Alice", credentials: []))
-
-        let updated = try await wallet.setWalletInstanceStatus(
-            instanceId: "jkt-self", status: .suspended, reason: "lost phone"
-        )
-
-        XCTAssertEqual(updated.status, .suspended)
-        XCTAssertEqual(loginAttempts(), 1, "exactly one self-driven re-login, never a loop")
-        guard case let .lifecycleBlocked(reason, message, _) = wallet.state else {
-            return XCTFail("expected .lifecycleBlocked, got \(wallet.state)")
-        }
-        XCTAssertEqual(reason, .suspended)
-        XCTAssertEqual(message, "This device is suspended")
-        XCTAssertEqual(registry.listLoginableAccounts().count, 1, "a suspended instance keeps its account")
-    }
-
     /// The token cut-off: after a lifecycle change made elsewhere every
     /// request is refused with 401, the SDK's reauthentication signal fires,
     /// and the SDK itself attempts exactly one login - which the AS refuses
@@ -979,51 +946,5 @@ final class SirosWalletLifecycleTests: XCTestCase {
         XCTAssertEqual(sessionStore.credentialId, "pk-1", "a link the backend accepted is kept")
         XCTAssertEqual(server.requestCount, 2)
         XCTAssertEqual(server.bodies[1]?["credential_id"] as? String, "pk-1")
-    }
-
-    // MARK: - Deactivation
-
-    /// `deactivateWallet` reports what the backend actually did and forgets the
-    /// local account - the vault it decrypts no longer exists.
-    func testDeactivateWalletReportsTheOutcomeAndForgetsTheAccount() async throws {
-        let registry = seededRegistry()
-        let wallet = makeWallet(registry: registry)
-        let server = StubHttpServer()
-        server.enqueue(#"{"revoked":2}"#)
-        let client = BackendApiClient(baseUrl: "https://wallet.example.invalid", httpFn: server.httpFunction)
-        client.setAppToken("t")
-        wallet.apiClient = client
-
-        let outcome = try await wallet.deactivateWallet(reason: "device stolen")
-
-        XCTAssertEqual(outcome, DeactivationOutcome(revoked: 2, complete: true))
-        XCTAssertTrue(registry.listLoginableAccounts().isEmpty)
-    }
-
-    /// An erasure the backend could not finish still deactivated the wallet -
-    /// the revocations stand and the keys are gone or going - so the local
-    /// account is forgotten either way; `complete` is only what the app tells
-    /// the user.
-    func testDeactivateWalletForgetsTheAccountEvenWhenTheErasureIsIncomplete() async throws {
-        let registry = seededRegistry()
-        let wallet = makeWallet(registry: registry)
-        let server = StubHttpServer()
-        for _ in 0..<5 {
-            server.enqueueFailure(code: 409, body: #"{"error":"ERASURE_INCOMPLETE","revoked":2}"#)
-        }
-        let client = BackendApiClient(
-            baseUrl: "https://wallet.example.invalid",
-            tenantId: "default",
-            erasureRetryDelays: [0, 0, 0, 0],
-            httpFn: server.httpFunction
-        )
-        client.setAppToken("t")
-        wallet.apiClient = client
-
-        let outcome = try await wallet.deactivateWallet()
-
-        XCTAssertEqual(outcome, DeactivationOutcome(revoked: 2, complete: false))
-        XCTAssertEqual(server.requestCount, 5)
-        XCTAssertTrue(registry.listLoginableAccounts().isEmpty)
     }
 }

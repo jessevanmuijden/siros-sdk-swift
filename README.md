@@ -104,6 +104,23 @@ credential offer. Refusals arrive as typed `IDVError`s. See
 [docs/IDENTITY-VERIFICATION.md](docs/IDENTITY-VERIFICATION.md) for the
 facetec-api contract the provider keeps and the error-code table.
 
+### Deleting the account
+
+```swift
+switch await wallet.deleteAccount(confirmation: "DELETE") {
+case .deleted, .cleanupPending, .operatorRequired:
+    break  // the account is gone (or being removed); local state was wiped
+case .retryNeeded(let reason):
+    break  // nothing was wiped; call again, a new passkey assertion is asked for
+case .failed(let failure):
+    break  // nothing was wiped
+}
+```
+
+A fresh passkey assertion from the wallet's `AuthProvider` (or the optional
+`stepUp:` closure) authorises the deletion. Only an accepted deletion wipes the
+local state; the `LocalWipeReport` lists anything that could not be removed.
+
 ## Two APIs: orchestrated and low-level
 
 `SirosWallet` runs the whole wallet for you. Hosts that already run the
