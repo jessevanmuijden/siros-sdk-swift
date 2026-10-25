@@ -102,11 +102,11 @@ extension SirosWallet {
 
         let result: EnrolmentTransaction
         do {
-            result = try await runEnrolmentTransaction(
+            result = try await runEnrolmentTransaction(EnrolmentContext(
                 client: client, challenge: challenge, created: created, prfOutput: prfOutput, authorization: authorization,
                 nickname: nickname, prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo,
                 startGeneration: startGeneration, startEpoch: startEpoch
-            )
+            ))
         } catch {
             // Nothing above throws any more except the lock itself failing, before anything was sent.
             rollbackLocalCredential(credentialId: created.credentialId)
@@ -149,19 +149,11 @@ extension SirosWallet {
     }
 
     /// The locked transaction itself; see the comment on its body.
-    private func runEnrolmentTransaction(
-        client: BackendApiClient,
-        challenge: PasskeyEnrollmentChallenge,
-        created: RegisterResult,
-        prfOutput: PrfOutput,
-        authorization: AuthenticateResult?,
-        nickname: String,
-        prfSalt: Data,
-        hkdfSalt: Data,
-        hkdfInfo: Data,
-        startGeneration: Int,
-        startEpoch: UInt64
-    ) async throws -> EnrolmentTransaction {
+    private func runEnrolmentTransaction(_ context: EnrolmentContext) async throws -> EnrolmentTransaction {
+        let client = context.client, challenge = context.challenge, created = context.created
+        let prfOutput = context.prfOutput, authorization = context.authorization, nickname = context.nickname
+        let prfSalt = context.prfSalt, hkdfSalt = context.hkdfSalt, hkdfInfo = context.hkdfInfo
+        let startGeneration = context.startGeneration, startEpoch = context.startEpoch
         // ONE transaction under `keystoreContainerLock` (shared with
         // `persistAndSyncKeystore()`, see its doc comment): the snapshot the
         // backend is sent, the precondition matching that snapshot, the
@@ -223,10 +215,7 @@ extension SirosWallet {
 
             // Check and publish as one step under the wallet lock, which a
             // login, logout or unlock also takes to move the scope.
-            let published = publishAcceptedEnrollment(
-                prepared: prepared, client: client, created: created, prfSalt: prfSalt,
-                nickname: nickname, generation: startGeneration, epoch: startEpoch
-            )
+            let published = publishAcceptedEnrollment(prepared: prepared, context: context)
             guard published else { return .sessionChanged(accepted: true) }
             if let commitError {
                 // A keystore that lacks the accepted entry must not export
@@ -247,15 +236,9 @@ extension SirosWallet {
     /// Writes an accepted enrolment's container, tag and passkey to the local
     /// caches, but only while the session it was started for is still the
     /// live one. The check and the writes are one step under the wallet lock.
-    private func publishAcceptedEnrollment(
-        prepared: PreparedPrfKey,
-        client: BackendApiClient,
-        created: RegisterResult,
-        prfSalt: Data,
-        nickname: String,
-        generation: Int,
-        epoch: UInt64
-    ) -> Bool {
+    private func publishAcceptedEnrollment(prepared: PreparedPrfKey, context: EnrolmentContext) -> Bool {
+        let client = context.client, created = context.created, prfSalt = context.prfSalt
+        let nickname = context.nickname, generation = context.startGeneration, epoch = context.startEpoch
         lock.lock(); defer { lock.unlock() }
         guard enrollmentIsCurrentLocked(generation: generation, epoch: epoch) else { return false }
         sessionStore.privateDataJwe = String(data: prepared.container, encoding: .utf8)
@@ -316,3 +299,17 @@ private enum EnrolmentTransaction {
     case acceptedButNotCommitted(credentialId: String?, error: Error)
 }
 
+/// Everything one locked enrolment transaction needs, bundled to keep the helper signatures short.
+private struct EnrolmentContext {
+    let client: BackendApiClient
+    let challenge: PasskeyEnrollmentChallenge
+    let created: RegisterResult
+    let prfOutput: PrfOutput
+    let authorization: AuthenticateResult?
+    let nickname: String
+    let prfSalt: Data
+    let hkdfSalt: Data
+    let hkdfInfo: Data
+    let startGeneration: Int
+    let startEpoch: UInt64
+}
