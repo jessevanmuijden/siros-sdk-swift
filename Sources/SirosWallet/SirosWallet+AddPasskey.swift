@@ -100,112 +100,27 @@ extension SirosWallet {
             return .prfUnsupported(message: "PRF not supported by authenticator - cannot encrypt wallet data")
         }
 
-        // What one locked prepare-finish-commit-publish attempt produced.
-        enum Transaction {
-            /// The backend refused it (or left the account unchanged for any
-            /// other reason) - nothing was committed.
-            case refused(AddPasskeyOutcome)
-            /// The session moved on, either before anything was prepared (the
-            /// backend was never asked) or after the backend accepted it. In
-            /// the second case the passkey is real but is deliberately not
-            /// applied to whatever keystore and account are active now.
-            case sessionChanged(accepted: Bool)
-            /// The keystore could not prepare the new entry: nothing was sent.
-            case preparationFailed(Error)
-            /// The request to register-finish failed in transport (timeout, lost response, 5xx): whether the backend
-            /// stored the passkey is UNKNOWN, so the credential must not be rolled back.
-            case finishOutcomeUnknown(Error)
-            /// Accepted, committed into the live keystore and published to the
-            /// local caches.
-            case committed(credentialId: String?)
-            /// Accepted and published to the caches, but the live keystore
-            /// refused the entry.
-            case acceptedButNotCommitted(credentialId: String?, error: Error)
-        }
-
-        let result: Transaction
+        let result: EnrolmentTransaction
         do {
-            // ONE transaction under `keystoreContainerLock` (shared with
-            // `persistAndSyncKeystore()`, see its doc comment): the snapshot the
-            // backend is sent, the precondition matching that snapshot, the
-            // finish, the keystore commit and the cache publication. Anything
-            // narrower lets another enrolment or a queued sync move the
-            // container or its ETag in between, so the backend ends up with an
-            // older snapshot under a newer tag and a passkey's PRF entry is
-            // erased, or a stale container is cached under the wrong tag.
-            result = try await keystoreContainerLock.withLock {
-                // Nothing may be prepared from, or sent for, a session that has
-                // already moved on: the keystore now holds another account.
-                guard currentEnrollmentIsLive(generation: startGeneration, epoch: startEpoch) else {
-                    return .sessionChanged(accepted: false)
-                }
-                let prepared: PreparedPrfKey
-                do {
-                    prepared = try await keystore.preparePrfKey(
-                        credentialId: created.credentialId, prfOutput: prfOutput.first,
-                        prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo
-                    )
-                } catch {
-                    return .preparationFailed(error)
-                }
-                // Read inside the same transaction as the snapshot above, so it
-                // is the tag of exactly that state. After a session resume
-                // `client` is a fresh `BackendApiClient` with no ETag of its
-                // own (see `BackendApiClient.privateDataEtag`'s doc comment):
-                // fall back to the one persisted with the cached container.
-                let ifMatch = client.privateDataEtag ?? sessionStore.privateDataEtag
-                // A definitive refusal comes back as a value; anything thrown here (timeout, lost response, 5xx)
-                // leaves the backend's state unknown.
-                let outcome: AddPasskeyOutcome
-                do {
-                    outcome = try await client.passkeyRegisterFinish(
-                        challengeId: challenge.challengeId,
-                        credential: created,
-                        nickname: nickname,
-                        privateData: prepared.container,
-                        authorization: authorization,
-                        ifMatch: ifMatch
-                    )
-                } catch {
-                    return .finishOutcomeUnknown(error)
-                }
-                guard case let .added(credentialId) = outcome else { return .refused(outcome) }
-
-                // From here the backend has accepted the passkey: nothing below
-                // may roll the authenticator credential back.
-                // The one operation that mutates the (single, reused)
-                // keystore: skipped when the session moved on while the
-                // backend round trip was in flight. A switch landing after
-                // this check is caught by the keystore itself, which refuses a
-                // key prepared in another unlocked session.
-                guard currentEnrollmentIsLive(generation: startGeneration, epoch: startEpoch) else {
-                    return .sessionChanged(accepted: true)
-                }
-                var commitError: Error?
-                do { try await keystore.commitPrfKey(prepared) } catch { commitError = error }
-
-                // Check and publish as one step under the wallet lock, which a
-                // login, logout or unlock also takes to move the scope.
-                let published = publishAcceptedEnrollment(
-                    prepared: prepared, client: client, created: created, prfSalt: prfSalt,
-                    nickname: nickname, generation: startGeneration, epoch: startEpoch
-                )
-                guard published else { return .sessionChanged(accepted: true) }
-                if let commitError {
-                    // A keystore that lacks the accepted entry must not export
-                    // and push a container without it: lock it, so the next
-                    // unlock reads the cached container that has the entry.
-                    keystore.lock()
-                    return .acceptedButNotCommitted(credentialId: credentialId, error: commitError)
-                }
-                return .committed(credentialId: credentialId)
-            }
+            result = try await runEnrolmentTransaction(
+                client: client, challenge: challenge, created: created, prfOutput: prfOutput, authorization: authorization,
+                nickname: nickname, prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo,
+                startGeneration: startGeneration, startEpoch: startEpoch
+            )
         } catch {
             // Nothing above throws any more except the lock itself failing, before anything was sent.
             rollbackLocalCredential(credentialId: created.credentialId)
             throw error
         }
 
+        return try settleEnrolment(result, created: created, startGeneration: startGeneration, startEpoch: startEpoch)
+    }
+
+    /// Turns one locked transaction's outcome into the public result, rolling the new credential back only where
+    /// nothing reached the backend (or it definitively refused).
+    private func settleEnrolment(
+        _ result: EnrolmentTransaction, created: RegisterResult, startGeneration: Int, startEpoch: UInt64
+    ) throws -> AddPasskeyResult {
         switch result {
         case let .refused(outcome):
             rollbackLocalCredential(credentialId: created.credentialId)
@@ -230,6 +145,97 @@ extension SirosWallet {
                 setState(.keystoreLocked(userId: userId, displayName: sessionStore.displayName))
             }
             return .localCommitFailed(credentialId: credentialId, message: error.localizedDescription)
+        }
+    }
+
+    /// The locked transaction itself; see the comment on its body.
+    private func runEnrolmentTransaction(
+        client: BackendApiClient,
+        challenge: PasskeyEnrollmentChallenge,
+        created: RegisterResult,
+        prfOutput: PrfOutput,
+        authorization: AuthenticateResult?,
+        nickname: String,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data,
+        startGeneration: Int,
+        startEpoch: UInt64
+    ) async throws -> EnrolmentTransaction {
+        // ONE transaction under `keystoreContainerLock` (shared with
+        // `persistAndSyncKeystore()`, see its doc comment): the snapshot the
+        // backend is sent, the precondition matching that snapshot, the
+        // finish, the keystore commit and the cache publication. Anything
+        // narrower lets another enrolment or a queued sync move the
+        // container or its ETag in between, so the backend ends up with an
+        // older snapshot under a newer tag and a passkey's PRF entry is
+        // erased, or a stale container is cached under the wrong tag.
+        return try await keystoreContainerLock.withLock {
+            // Nothing may be prepared from, or sent for, a session that has
+            // already moved on: the keystore now holds another account.
+            guard currentEnrollmentIsLive(generation: startGeneration, epoch: startEpoch) else {
+                return .sessionChanged(accepted: false)
+            }
+            let prepared: PreparedPrfKey
+            do {
+                prepared = try await keystore.preparePrfKey(
+                    credentialId: created.credentialId, prfOutput: prfOutput.first,
+                    prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo
+                )
+            } catch {
+                return .preparationFailed(error)
+            }
+            // Read inside the same transaction as the snapshot above, so it
+            // is the tag of exactly that state. After a session resume
+            // `client` is a fresh `BackendApiClient` with no ETag of its
+            // own (see `BackendApiClient.privateDataEtag`'s doc comment):
+            // fall back to the one persisted with the cached container.
+            let ifMatch = client.privateDataEtag ?? sessionStore.privateDataEtag
+            // A definitive refusal comes back as a value; anything thrown here (timeout, lost response, 5xx)
+            // leaves the backend's state unknown.
+            let outcome: AddPasskeyOutcome
+            do {
+                outcome = try await client.passkeyRegisterFinish(
+                    challengeId: challenge.challengeId,
+                    credential: created,
+                    nickname: nickname,
+                    privateData: prepared.container,
+                    authorization: authorization,
+                    ifMatch: ifMatch
+                )
+            } catch {
+                return .finishOutcomeUnknown(error)
+            }
+            guard case let .added(credentialId) = outcome else { return .refused(outcome) }
+
+            // From here the backend has accepted the passkey: nothing below
+            // may roll the authenticator credential back.
+            // The one operation that mutates the (single, reused)
+            // keystore: skipped when the session moved on while the
+            // backend round trip was in flight. A switch landing after
+            // this check is caught by the keystore itself, which refuses a
+            // key prepared in another unlocked session.
+            guard currentEnrollmentIsLive(generation: startGeneration, epoch: startEpoch) else {
+                return .sessionChanged(accepted: true)
+            }
+            var commitError: Error?
+            do { try await keystore.commitPrfKey(prepared) } catch { commitError = error }
+
+            // Check and publish as one step under the wallet lock, which a
+            // login, logout or unlock also takes to move the scope.
+            let published = publishAcceptedEnrollment(
+                prepared: prepared, client: client, created: created, prfSalt: prfSalt,
+                nickname: nickname, generation: startGeneration, epoch: startEpoch
+            )
+            guard published else { return .sessionChanged(accepted: true) }
+            if let commitError {
+                // A keystore that lacks the accepted entry must not export
+                // and push a container without it: lock it, so the next
+                // unlock reads the cached container that has the entry.
+                keystore.lock()
+                return .acceptedButNotCommitted(credentialId: credentialId, error: commitError)
+            }
+            return .committed(credentialId: credentialId)
         }
     }
 
@@ -286,3 +292,27 @@ extension SirosWallet {
         accountRegistry.upsertAccount(account)
     }
 }
+
+// What one locked prepare-finish-commit-publish attempt produced.
+private enum EnrolmentTransaction {
+    /// The backend refused it (or left the account unchanged for any
+    /// other reason) - nothing was committed.
+    case refused(AddPasskeyOutcome)
+    /// The session moved on, either before anything was prepared (the
+    /// backend was never asked) or after the backend accepted it. In
+    /// the second case the passkey is real but is deliberately not
+    /// applied to whatever keystore and account are active now.
+    case sessionChanged(accepted: Bool)
+    /// The keystore could not prepare the new entry: nothing was sent.
+    case preparationFailed(Error)
+    /// The request to register-finish failed in transport (timeout, lost response, 5xx): whether the backend
+    /// stored the passkey is UNKNOWN, so the credential must not be rolled back.
+    case finishOutcomeUnknown(Error)
+    /// Accepted, committed into the live keystore and published to the
+    /// local caches.
+    case committed(credentialId: String?)
+    /// Accepted and published to the caches, but the live keystore
+    /// refused the entry.
+    case acceptedButNotCommitted(credentialId: String?, error: Error)
+}
+
