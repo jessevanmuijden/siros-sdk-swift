@@ -36,7 +36,9 @@ public enum AddPasskeyResult: Sendable, Equatable {
     /// The challenge expired or was already used. Call `addPasskey` again.
     case retryNeeded(reason: String?)
     /// The private data changed on the backend (another device) since this one
-    /// read it. Sync, then try again.
+    /// read it. This wallet's copy is stale, so an immediate retry sends the same
+    /// snapshot and conflicts again: reload the data through a fresh login, then
+    /// try again.
     case privateDataConflict(message: String?)
     /// The backend refused the new passkey (it did not verify, or its
     /// authenticator is not allowed).

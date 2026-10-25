@@ -66,6 +66,7 @@ extension WalletViewModel {
             case .authorizationRequired, .authorizationFailed:
                 addPasskeyError = L10n.string("devices.addPasskeyAuthorizationFailed")
             case .privateDataConflict:
+                // Not an immediate-retry case: the text tells the user to reload through a fresh login first.
                 addPasskeyError = L10n.string("devices.addPasskeyConflict")
             case .retryNeeded:
                 addPasskeyError = L10n.string("devices.addPasskeyExpired")

@@ -562,7 +562,14 @@ extension SirosWallet {
             hkdfSalt: Self.b64Encode(hkdfSalt),
             hkdfInfo: Self.b64Encode(hkdfInfo)
         )
-        account.passkeys = (existing?.passkeys.filter { $0.credentialId != credIdStr } ?? []) + [healedPasskey]
+        // Updated IN PLACE when the passkey is already cached: its position is meaningful (the verified-anonymous-entry
+        // fallback treats the FIRST cached passkey as the account's original one), so removing and appending it
+        // would move a healed original passkey behind the passkeys added since.
+        if let index = account.passkeys.firstIndex(where: { $0.credentialId == credIdStr }) {
+            account.passkeys[index].prfSalt = healedPasskey.prfSalt
+        } else {
+            account.passkeys.append(healedPasskey)
+        }
         accountRegistry.upsertAccount(account)
     }
 }

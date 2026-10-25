@@ -373,7 +373,7 @@
     "addPasskeyNickname": "Namn",
     "addPasskeyDone": "Passkey tillagd: %1$@",
     "addPasskeyAuthorizationFailed": "Godkännandet från din befintliga passkey godtogs inte. Försök igen.",
-    "addPasskeyConflict": "Dina plånboksdata ändrades på en annan enhet. Försök igen.",
+    "addPasskeyConflict": "Dina plånboksdata ändrades på en annan enhet. Logga ut och in igen för att hämta de senaste uppgifterna och försök sedan igen.",
     "addPasskeyExpired": "Begäran har gått ut. Försök igen.",
     "addPasskeyLocked": "Lås upp plånboken först och lägg sedan till passkey.",
     "addPasskeyNotPermitted": "Den här sessionen får inte lägga till en passkey.",

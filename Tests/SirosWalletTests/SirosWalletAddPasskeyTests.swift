@@ -668,6 +668,54 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         XCTAssertEqual(resolved.hkdfInfo, Data("first info".utf8))
     }
 
+    /// Healing the original passkey's cached salt must update it IN PLACE: the verified-anonymous-entry fallback
+    /// treats the FIRST cached passkey as the original one, so removing and appending it would move it behind the
+    /// passkeys added since and make the original passkey unlock with the wrong HKDF parameters.
+    func testHealingTheOriginalPasskeyKeepsItFirstSoBothPasskeysUnlockWithTheirOwnParameters() async throws {
+        let f = makeFixture()
+        let originalId = Data("pk-1".utf8), secondId = Data("pk-2".utf8)
+        let originalHkdf = Data(repeating: 0x11, count: 32), secondHkdf = Data(repeating: 0x22, count: 32)
+        // The legacy shape: the original passkey's entry in the container has no credential id.
+        let container = try twoPasskeyContainer(first: Data(), second: secondId, firstSalt: originalHkdf, secondSalt: secondHkdf)
+        f.registry.upsertAccount(CachedAccount(
+            userId: "user-1", tenantId: "default", displayName: "user-1", backendUrl: "https://wallet.example.invalid",
+            passkeys: [
+                CachedPasskey(credentialId: SirosWallet.b64UrlEncode(originalId), prfSalt: "c3RhbGU=", nickname: "Phone"),
+                CachedPasskey(credentialId: SirosWallet.b64UrlEncode(secondId), prfSalt: Data([9]).base64EncodedString()),
+            ]
+        ))
+        // The session cache holds the SECOND passkey's parameters, as after a login with it.
+        f.sessionStore.hkdfSalt = secondHkdf.base64EncodedString()
+        f.sessionStore.hkdfInfo = Data("second info".utf8).base64EncodedString()
+
+        // Recovery gave the original passkey's real salt: healed.
+        f.wallet.healAccountCache(
+            accountId: "default:user-1", userId: "user-1", displayName: "user-1", credentialId: originalId,
+            prfSalt: Data([9]), hkdfSalt: originalHkdf, hkdfInfo: Data("first info".utf8)
+        )
+        let healed = try XCTUnwrap(f.registry.findAccount(accountId: "default:user-1"))
+        XCTAssertEqual(healed.passkeys.map(\.credentialId), [SirosWallet.b64UrlEncode(originalId), SirosWallet.b64UrlEncode(secondId)],
+                       "the healed passkey keeps its position")
+        XCTAssertEqual(healed.passkeys.first?.prfSalt, Data([9]).base64EncodedString())
+        XCTAssertEqual(healed.passkeys.first?.nickname, "Phone", "the nickname is kept")
+
+        // Login with the ADDED passkey: its own entry's parameters.
+        let added = SirosWallet.PasskeyAssertion(
+            challengeId: "c", credential: [:], prfOutput: PrfOutput(first: Data([1])), prfSalt: Data([9]),
+            cachedAccount: healed, credentialId: secondId
+        )
+        let login = try await f.wallet.resolveLoginPrf(assertion: added, privateData: container, cachedAccount: healed)
+        XCTAssertEqual(login.hkdfSalt, secondHkdf)
+        // Unlock with the ORIGINAL passkey: the verified anonymous entry, not the session's second-passkey salt.
+        let original = SirosWallet.PasskeyAssertion(
+            challengeId: "c", credential: [:], prfOutput: PrfOutput(first: Data([1])), prfSalt: Data([9]),
+            cachedAccount: healed, credentialId: originalId
+        )
+        let unlock = try await f.wallet.resolveUnlockKeystorePrf(assertion: original, storedContainer: container)
+        XCTAssertEqual(unlock.hkdfSalt, originalHkdf)
+        XCTAssertEqual(unlock.hkdfInfo, Data("first info".utf8))
+    }
+
     func testAContainerWithoutAnEntryForThePasskeyFallsBackToTheSessionParameters() async throws {
         let f = makeFixture()
         let assertion = SirosWallet.PasskeyAssertion(

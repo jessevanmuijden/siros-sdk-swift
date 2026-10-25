@@ -373,7 +373,7 @@
     "addPasskeyNickname": "Name",
     "addPasskeyDone": "Passkey added: %1$@",
     "addPasskeyAuthorizationFailed": "The approval from your existing passkey was not accepted. Try again.",
-    "addPasskeyConflict": "Your wallet data changed on another device. Try again.",
+    "addPasskeyConflict": "Your wallet data changed on another device. Log out and log in again to load the latest data, then try again.",
     "addPasskeyExpired": "The request expired. Try again.",
     "addPasskeyLocked": "Unlock the wallet first, then add the passkey.",
     "addPasskeyNotPermitted": "This session is not allowed to add a passkey.",

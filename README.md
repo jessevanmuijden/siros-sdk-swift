@@ -122,7 +122,11 @@ case .finishOutcomeUnknown:
 case .localCommitFailed:
     break  // the backend accepted it and the cached container has it; the wallet
            // locked its keystore - unlock again to pick the new entry up
-case .authorizationRequired, .authorizationFailed, .retryNeeded, .privateDataConflict:
+case .privateDataConflict:
+    break  // nothing changed, but the backend's data changed on another device and this
+           // wallet's copy is stale: an immediate retry sends the same stale snapshot and
+           // conflicts again. Reload through a fresh login (log out, log in), then retry
+case .authorizationRequired, .authorizationFailed, .retryNeeded:
     break  // nothing changed; call again (the backend's challenge was spent)
 case .authorizerUnavailable, .passkeyCreationUnavailable, .prfUnsupported,
      .registrationRejected, .walletLocked, .insufficientScope, .sessionRevoked:
@@ -159,6 +163,9 @@ OID4VCI/OID4VP flows - a web-view wrapper around the SIROS web wallet, an app
 with its own protocol client - compose `SirosKeystore`, `SirosAuth` and
 `SirosCredentials` directly, without `SirosFlow` or the facade. Both are
 supported; see [docs/TWO-APIS.md](docs/TWO-APIS.md).
+
+Issuer and credential logos (https and `data:` raster; SVG is not supported; what is accepted and refused): see
+[docs/ISSUER-LOGOS.md](docs/ISSUER-LOGOS.md).
 
 ## Architecture
 
