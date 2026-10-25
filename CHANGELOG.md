@@ -18,6 +18,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardware.
 
 ### Fixed
+- **Add passkey: last review items (#197).** `healAccountCache` updates an already-cached passkey's salt in place (position and
+  nickname kept) instead of removing and appending it, so the original passkey stays first and still unlocks with its own
+  HKDF parameters after other passkeys were added. The private-data conflict wording (SampleApp en/sv, README, doc comment)
+  tells the user to reload through a fresh login before retrying.
+- **Add passkey: second review round (#197).** New results `.notSubmitted` (the session changed before `register-finish`
+  was sent: nothing enrolled, credential rolled back) and `.finishOutcomeUnknown` (register-finish failed in transport: the
+  credential is kept, not rolled back, because the backend may hold it); `.sessionChanged` is documented as accepted-but-
+  not-applied, and the README, SampleApp strings (en, sv) and switches follow. `addPasskey` ceremonies are serialised and
+  `ASAuthorizationAuthProvider` rejects a second concurrent request instead of overwriting the first's continuation.
+  `persistKeystoreOrThrow` takes `keystoreContainerLock` like `persistAndSyncKeystore`. The `WscdKeystoreAdapter` erase/reopen
+  doc comments are corrected.
+  **The unknown-outcome case is only partially handled:** the credential is kept and `.finishOutcomeUnknown` is returned, but the
+  wallet's keystore then lacks an entry the backend may hold, and an ordinary private-data write carries no `If-Match`, so
+  a later stale export could overwrite it. Tracked in https://github.com/sirosfoundation/siros-sdk-swift/issues/239.
+- **Add passkey: review fixes (#197).** Enrolment is one transaction under the keystore-container lock (prepare, the
+  matching ETag, finish, commit and cache publication), so overlapping enrolments and queued syncs cannot send an
+  older snapshot under a newer tag; it is invalidated before login, register, resume and unlock replace the session
+  scope, and a prepared key is refused by a keystore that was locked and unlocked since (new
+  `AddPasskeyResult.localCommitFailed`: a commit failure after the backend accepted no longer rolls the passkey back).
+  Rollback names the credential it created (new `AuthProvider.rollbackRegistration(credentialId:)`, default falls back
+  to `rollbackLastRegistration()`). Every successful private-data sync persists its ETag. `WscdKeystoreAdapter`
+  forwards `setCredentialId`, and a PRF output derived from a different salt than the matched entry's is re-evaluated
+  with the entry's own. README example handles `sessionChanged`.
 - **Account deletion: review fixes (#196).** The delete-begin response must carry a non-empty, well-formed
   `allowCredentials` list (no silent fall-back to a discoverable prompt), and only `410 STEP_UP_EXPIRED` reads as an
   expired step-up. The wipe now clears `AuthServerClient`'s token cache, reports failures of the credential store, the
@@ -206,6 +229,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Added
+- **`SirosWallet.addPasskey(nickname:authorizer:)`: add a passkey to the
+  signed-in account (go-wallet-backend#352, backend PR #453; same shapes as
+  siros-sdk-kotlin's).** An account that has a passkey needs one of them to
+  authorise the addition: `authorizer` (default: the wallet's `AuthProvider`)
+  answers the backend's `authorization` options and is asked first, so declining
+  creates nothing; then the new passkey is created and both go in one
+  `register-finish`. The new passkey gets its own PRF entry (own HKDF salt) in
+  the keystore container, sent as `privateData`; the keystore must be unlocked.
+  Returns `AddPasskeyResult` (`added`, `authorizationRequired`,
+  `authorizationFailed`, `authorizerUnavailable`, `passkeyCreationUnavailable`,
+  `prfUnsupported`, `retryNeeded`, `privateDataConflict`, `registrationRejected`,
+  `walletLocked`, `insufficientScope`, `sessionRevoked`) and throws only for no
+  session, a bad nickname, transport failures and responses outside the
+  contract. The keystore and the local account cache change only when the
+  backend answered `added`; a refused attempt consumes the backend's challenge,
+  so a retry is a new call. Backed by `BackendApiClient.passkeyRegisterBegin()`
+  (`AddPasskeyBegin`) and `passkeyRegisterFinish(...)` (`AddPasskeyOutcome`),
+  which sends `X-Private-Data-If-Match` from `privateDataEtag` - the client now
+  keeps the `X-Private-Data-ETag` of every response when built on the new
+  `HttpResponseFunction` transport (`UrlSessionTransport.send`, used by the
+  wallet) - and by the new `KeystoreManager` requirements
+  `preparePrfKey(...)` / `commitPrfKey(_:)` (the web wallet's `addPrf`; default:
+  throws; implemented by `JweKeystore` and `WscdKeystoreAdapter`). The sample
+  app's Devices screen offers "Add passkey".
+- **Fix: a second passkey could not log in.** `login()` and `unlockKeystore()`
+  derived the PRF key with the account-level HKDF salt/info from the session
+  store, which are the first passkey's, while the keystore picks the container's
+  PRF entry by that salt. They now use the HKDF parameters of the logging-in
+  passkey's own entry in the private data container.
+- **`LogoSanitizer` / `DisplayLogo`: safe rendering of credential and issuer
+  display logos, including `data:image/...` URIs.** `LogoSanitizer.sanitize(_:)`
+  returns `.image(pngBytes)`, `.remote(httpsURL)` or a typed `LogoRejection`
+  (fail closed). `data:` logos must be `data:<type>;base64,...` with type
+  `image/png|jpeg|webp|gif`, at most 256 KiB decoded and 2048 px per side; they
+  are decoded with ImageIO, checked to be the declared type, and re-encoded as a
+  fresh PNG, so metadata and trailing/polyglot payloads are dropped. **SVG is
+  refused** (`svgNotSupported`; script, external references, no safe renderer in
+  this SDK); it is tracked in a separate pull request. Only `https:` remote logos
+  pass (`http:` and other schemes are refused). Without ImageIO (Linux) every
+  `data:` logo is refused. Same policy as siros-sdk-kotlin, except that Kotlin
+  also renders SVG.
+  `LogoCache` fetches every `https` logo once (`LogoSanitizer.fetchAndSanitize`),
+  decides raster versus refused-SVG from the response `Content-Type` (untyped bytes
+  are sniffed), caches by URI off the main actor, and shares one download between
+  concurrent callers (the last waiter leaving cancels it). Fetches validate the URL
+  and every redirect target (https, no userinfo), stop reading at the 256 KiB cap,
+  have one wall-clock budget (default 15 s, clamped to 120 s, invalid values
+  refused), report `timedOut`/`networkFailure` for transport problems, and never
+  cache transient failures or cancellations. The sample app shows the issuer initial
+  until the logo is ready or when it fails. See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
   assertion (step-up, valid 2 minutes, single use) and the typed confirmation

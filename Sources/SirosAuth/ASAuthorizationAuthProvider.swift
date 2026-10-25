@@ -84,6 +84,24 @@ public final class ASAuthorizationAuthProvider: NSObject, AuthProvider, WscdAuto
             ASAuthorizationPublicKeyCredentialParameters(algorithm: .ES256),
         ]
 
+        // Credentials the backend already knows about for this RP/user that
+        // this registration must not recreate - see
+        // `RegisterOptions.excludeCredentials`'s doc comment. Applied to both
+        // request kinds: whichever authenticator answers, an existing
+        // discoverable credential for this RP/user must actually block
+        // creating a duplicate rather than silently replacing it.
+        if let excludeCredentials = options.excludeCredentials, !excludeCredentials.isEmpty {
+            platformRequest.excludedCredentials = excludeCredentials.map {
+                ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: $0.id)
+            }
+            securityKeyRequest.excludedCredentials = excludeCredentials.map {
+                ASAuthorizationSecurityKeyPublicKeyCredentialDescriptor(
+                    credentialID: $0.id,
+                    transports: ASAuthorizationSecurityKeyPublicKeyCredentialDescriptor.Transport.allSupported
+                )
+            }
+        }
+
         let authorization = try await performRequest([platformRequest, securityKeyRequest])
 
         switch authorization.credential {
@@ -354,7 +372,14 @@ public final class ASAuthorizationAuthProvider: NSObject, AuthProvider, WscdAuto
 
     private func performRequest(_ requests: [ASAuthorizationRequest]) async throws -> ASAuthorization {
         try await withCheckedThrowingContinuation { cont in
+            // One pending request at a time: a second would overwrite the first's continuation, handing it the first
+            // ceremony's response and stranding the first caller. Reject the second atomically instead.
             lock.lock()
+            if self.continuation != nil {
+                lock.unlock()
+                cont.resume(throwing: SirosError.auth(message: "Another passkey request is already in progress"))
+                return
+            }
             self.continuation = cont
             lock.unlock()
 
