@@ -23,16 +23,39 @@ public final class AccountRegistry: @unchecked Sendable {
 
     /// Registry persisted in the Keychain under `service` (UserDefaults on
     /// Linux). Survives logout and app reinstall-with-keychain-restore.
-    public init(service: String = "org.siros.wallet.accounts") {
+    ///
+    /// Under a test run (XCTest loaded) the default registry is in-memory, never the real Keychain service or
+    /// `UserDefaults`: a fixture that forgot to inject one, and then reaches `wipeLocalState()`, must not delete
+    /// the real accounts of a developer's Mac or a CI machine. A test that wants a persistent registry passes an
+    /// explicit `service`.
+    public init(service: String? = nil) {
+        if service == nil, Self.runningUnderTests {
+            self.storage = InMemoryAccountRegistryStorage()
+            self.isPersistent = false
+            return
+        }
+        self.isPersistent = true
         #if canImport(Security)
-        self.storage = KeychainAccountRegistryStorage(service: service)
+        self.storage = KeychainAccountRegistryStorage(service: service ?? "org.siros.wallet.accounts")
         #else
         self.storage = UserDefaultsAccountRegistryStorage()
         #endif
     }
 
+    /// Whether this registry writes to the Keychain / `UserDefaults`. False for `inMemory()` and for the
+    /// test-run default. Exposed for the hermeticity guard test.
+    let isPersistent: Bool
+
+    static var runningUnderTests: Bool {
+        // XCTest on Apple platforms, and the `.xctest` test runner on Linux (no Objective-C runtime there).
+        NSClassFromString("XCTestCase") != nil
+            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || (CommandLine.arguments.first?.contains(".xctest") ?? false)
+    }
+
     init(storage: AccountRegistryStorage) {
         self.storage = storage
+        self.isPersistent = !(storage is InMemoryAccountRegistryStorage)
     }
 
     /// A registry that persists nothing - for tests and previews, and for

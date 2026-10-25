@@ -101,15 +101,18 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     }
 
     public func registerLifecycle(request: RegisterLifecycleRequest) async throws -> RegistrationOutcome {
-        try await requireWscdManager().registerLifecycle(request: request)
+        // Admitted through the key-operation gate: it can create or replace signing keys, so an erase drains it.
+        try await keyGate.run { try await requireWscdManager().registerLifecycle(request: request) }
     }
 
     public func activateLifecycle(request: ActivateLifecycleRequest) async throws -> ActivationOutcome {
-        try await requireWscdManager().activateLifecycle(request: request)
+        // Admitted through the key-operation gate: it can create or replace signing keys, so an erase drains it.
+        try await keyGate.run { try await requireWscdManager().activateLifecycle(request: request) }
     }
 
     public func rotateLifecycle(request: RotateLifecycleRequest) async throws -> RotationOutcome {
-        try await requireWscdManager().rotateLifecycle(request: request)
+        // Admitted through the key-operation gate: it can create or replace signing keys, so an erase drains it.
+        try await keyGate.run { try await requireWscdManager().rotateLifecycle(request: request) }
     }
 
     public func destroyLifecycle(request: DestroyLifecycleRequest) async throws -> DestructionOutcome {
@@ -755,7 +758,8 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// If the migration result is `.reEnrollmentRequired`, the wallet
     /// should trigger credential re-issuance with the issuer.
     public func migrateKey(keyId: String, targetPlugin: String) async throws -> MigrationResult {
-        return try await signer.migrateKey(keyId: keyId, targetPlugin: targetPlugin)
+        // Moves a key between plugins (creates one in the target): admitted through the key-operation gate.
+        return try await keyGate.run { try await signer.migrateKey(keyId: keyId, targetPlugin: targetPlugin) }
     }
 
     /// Return the security properties for a key, or nil if unavailable.

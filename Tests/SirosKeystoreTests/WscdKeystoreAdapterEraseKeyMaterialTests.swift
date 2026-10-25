@@ -44,7 +44,26 @@ private final class KeyedSigner: Signer, @unchecked Sendable {
     }
     func attestationChain(keyId: String) async throws -> AttestationChain? { nil }
     func exportPublicKey(keyId: String) async throws -> Data { Data() }
-    func migrateKey(keyId: String, targetPlugin: String) async throws -> MigrationResult { .migrated(newKeyId: keyId) }
+    private var parkMigration = false
+    private var migrationEntered = false
+    private var migrationContinuation: CheckedContinuation<Void, Never>?
+    private var migrationReleased = false
+    func parkNextMigration() { lock.lock(); parkMigration = true; lock.unlock() }
+    var migrationHasEntered: Bool { lock.lock(); defer { lock.unlock() }; return migrationEntered }
+    func releaseMigration() {
+        lock.lock(); migrationReleased = true; let c = migrationContinuation; migrationContinuation = nil; lock.unlock()
+        c?.resume()
+    }
+    func migrateKey(keyId: String, targetPlugin: String) async throws -> MigrationResult {
+        lock.lock(); let park = parkMigration; if park { migrationEntered = true; parkMigration = false }; lock.unlock()
+        if park {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if migrationReleased { lock.unlock(); c.resume() } else { migrationContinuation = c; lock.unlock() }
+            }
+        }
+        return .migrated(newKeyId: keyId)
+    }
     func securityProperties(keyId: String) async throws -> SignerSecurityProperties {
         SignerSecurityProperties(keyStorage: ["software"], userAuthentication: [])
     }
@@ -125,6 +144,34 @@ final class WscdKeystoreAdapterEraseKeyMaterialTests: XCTestCase {
         adapter.reopenKeyOperations()
         let again = try await adapter.generateKey(algorithm: "ES256")
         XCTAssertEqual(again, "created", "a new session admits key creation again")
+    }
+
+    /// `migrateKey` and the lifecycle operations can create or replace signing keys: they go through the same gate,
+    /// so the erase waits for one in flight and a new one is refused once the erase has begun.
+    func testMigrationAndLifecycleOperationsAreAdmittedThroughTheEraseGate() async throws {
+        let signer = KeyedSigner(keys: [])
+        signer.parkNextMigration()
+        let adapter = WscdKeystoreAdapter(signer: signer)
+        try await adapter.unlock(prfOutput: Data(), encryptedContainer: Data(), hkdfSalt: Data(), hkdfInfo: Data())
+        let migrating = Task { try await adapter.migrateKey(keyId: "k", targetPlugin: "p") }
+        while !signer.migrationHasEntered { try await Task.sleep(nanoseconds: 5_000_000) }
+        let erased = Flag()
+        let erasing = Task { try await adapter.eraseKeyMaterial(); erased.set() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(erased.value, "the erase must wait for the migration in flight")
+
+        do {
+            _ = try await adapter.registerLifecycle(request: RegisterLifecycleRequest(pluginId: "p", contextId: "c", factorKind: .opaque))
+            XCTFail("a lifecycle operation after the erase began must be refused by the gate")
+        } catch KeystoreError.locked {}
+        do {
+            _ = try await adapter.migrateKey(keyId: "k2", targetPlugin: "p")
+            XCTFail("a migration after the erase began must be refused")
+        } catch KeystoreError.locked {}
+
+        signer.releaseMigration()
+        _ = try await migrating.value
+        try await erasing.value
     }
 
     func testAFailingKeyIsReportedAndTheRestAreStillDeleted() async {
