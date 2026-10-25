@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Add passkey: second review round (#197).** New results `.notSubmitted` (the session changed before `register-finish`
+  was sent: nothing enrolled, credential rolled back) and `.finishOutcomeUnknown` (register-finish failed in transport: the
+  credential is kept, not rolled back, because the backend may hold it); `.sessionChanged` is documented as accepted-but-
+  not-applied, and the README, SampleApp strings (en, sv) and switches follow. `addPasskey` ceremonies are serialised and
+  `ASAuthorizationAuthProvider` rejects a second concurrent request instead of overwriting the first's continuation.
+  `persistKeystoreOrThrow` takes `keystoreContainerLock` like `persistAndSyncKeystore`. The `WscdKeystoreAdapter` erase/reopen
+  doc comments are corrected.
 - **Add passkey: review fixes (#197).** Enrolment is one transaction under the keystore-container lock (prepare, the
   matching ETag, finish, commit and cache publication), so overlapping enrolments and queued syncs cannot send an
   older snapshot under a newer tag; it is invalidated before login, register, resume and unlock replace the session

@@ -3,11 +3,18 @@
 import Foundation
 
 /// What `SirosWallet.addPasskey` did. Every outcome the backend defines is a
-/// value here; only a transport failure or an unexpected response throws.
+/// value here; a transport failure before `register-finish` or an unexpected
+/// response throws, and a transport failure OF `register-finish` is
+/// ``finishOutcomeUnknown(message:)``.
 ///
-/// Only `added` changes anything: every other result leaves the account and
-/// this wallet's keystore exactly as they were. A refused attempt has consumed
-/// its challenge, so calling `addPasskey` again starts afresh.
+/// Only `added` means the passkey is enrolled AND applied to this wallet.
+/// ``sessionChanged(message:)`` (accepted, not applied here),
+/// ``localCommitFailed(credentialId:message:)`` (accepted, keystore locked) and
+/// ``finishOutcomeUnknown(message:)`` (unknown) leave a credential that may be
+/// on the account; every other result leaves the account and this wallet's
+/// keystore exactly as they were, with the new credential rolled back where the
+/// `AuthProvider` can. A refused attempt has consumed its challenge, so calling
+/// `addPasskey` again starts afresh.
 public enum AddPasskeyResult: Sendable, Equatable {
     /// The passkey is on the account and its PRF entry is in the synced private
     /// data. `credentialId` is the backend's id for it.
@@ -41,15 +48,24 @@ public enum AddPasskeyResult: Sendable, Equatable {
     case insufficientScope(message: String?)
     /// The session token is revoked or expired; log in again.
     case sessionRevoked(message: String?)
-    /// The backend accepted the passkey for the account/session this call
+    /// The backend ACCEPTED the passkey for the account/session this call
     /// started for, but the session has since moved on (a logout, or a
     /// login/re-login - possibly to a different account - completed while
     /// the backend round trip was in flight). The new passkey is real and
     /// usable on the account it was added to, but this call deliberately did
     /// NOT apply it to whatever account/keystore happens to be active now,
     /// to avoid recording it under the wrong identity. Call `addPasskey`
-    /// again on that account's session if it still needs doing.
+    /// again on that account's session if it still needs doing. Contrast
+    /// ``notSubmitted(message:)``, where nothing was enrolled.
     case sessionChanged(message: String?)
+    /// The session changed BEFORE the enrolment was sent: `register-finish` never went out, the credential just
+    /// created was rolled back (where the `AuthProvider` can), and nothing is enrolled anywhere. Call `addPasskey`
+    /// again on the active session if it still needs doing.
+    case notSubmitted(message: String?)
+    /// The request to `register-finish` failed in transport (timeout, lost response, 5xx), so whether the backend
+    /// stored the passkey and its PRF entry is UNKNOWN. The credential just created was NOT rolled back: deleting it
+    /// would make an accepted passkey unusable. Check the account's passkeys before retrying.
+    case finishOutcomeUnknown(message: String?)
     /// The backend accepted the passkey and the cached container carries its
     /// PRF entry, but this wallet's live keystore could not take the entry.
     /// The new passkey was NOT rolled back (it is on the account), and the

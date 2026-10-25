@@ -34,8 +34,13 @@ final class PasskeyEnrollmentClientTests: XCTestCase {
         )
     }
 
+    private struct UnexpectedBegin: Error {}
+
     private func ready(_ begin: AddPasskeyBegin) throws -> PasskeyEnrollmentChallenge {
-        guard case let .ready(challenge) = begin else { throw XCTSkip("not ready: \(begin)") }
+        guard case let .ready(challenge) = begin else {
+            XCTFail("unexpected begin outcome: \(begin)")
+            throw UnexpectedBegin()
+        }
         return challenge
     }
 

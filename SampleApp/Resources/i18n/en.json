@@ -381,8 +381,10 @@
     "addPasskeyRegistrationAborted": "The new passkey was not created: %1$@",
     "addPasskeyNoPrf": "This passkey cannot protect your wallet data, so it was not added: %1$@",
     "addPasskeyRefused": "This authenticator is not allowed. %1$@",
-    "addPasskeySessionChanged": "The passkey was added, but to a different sign-in than the one now active. Log in to that account to use it.",
-    "addPasskeyLocalCommitFailed": "The passkey was enrolled, but this wallet could not take it in and has locked itself. Unlock the wallet again to finish."
+    "addPasskeySessionChanged": "The passkey was added to the account you were signed in to when you started, but a different sign-in is active now, so it was not set up here. Log in to that account to use it.",
+    "addPasskeyLocalCommitFailed": "The passkey was enrolled, but this wallet could not take it in and has locked itself. Unlock the wallet again to finish.",
+    "addPasskeyNotSubmitted": "The sign-in changed before the passkey was sent, so nothing was added. Try again.",
+    "addPasskeyOutcomeUnknown": "The connection failed while adding the passkey, so it may or may not have been added. Check your passkeys before trying again."
   },
   "walletBlocked": {
     "suspendedTitle": "This device is suspended",

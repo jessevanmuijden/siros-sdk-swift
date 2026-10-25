@@ -213,13 +213,19 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// erased by this SDK and are skipped by ``eraseKeyMaterial()``.
     private static let externalAuthenticatorPluginId = "fido2"
 
-    /// Deletes every key the retained `signer` holds, except those on an
-    /// external authenticator. Continues past a failing key and throws one
-    /// error naming each, so the caller can report that key material remains.
+    /// Admits key creation again after ``eraseKeyMaterial()`` closed it. Called by
+    /// the wallet when a NEW session starts, never by an unlock, so an unlock that
+    /// races an erase cannot let a key be created behind its key-list snapshot.
+    /// Deletes nothing.
     public func reopenKeyOperations() {
         keyGate.reopen()
     }
 
+    /// Closes key creation, waits for the creations already admitted, then deletes
+    /// every key the retained `signer` holds except those on an external
+    /// authenticator. Continues past a failing key and throws one error naming
+    /// each, so the caller can report that key material remains. Key creation
+    /// stays closed until ``reopenKeyOperations()``.
     public func eraseKeyMaterial() async throws {
         // No new key may be created from here on, and one being created now is
         // waited for, so the snapshot below cannot miss it.

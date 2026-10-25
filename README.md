@@ -111,8 +111,13 @@ switch try await wallet.addPasskey(nickname: "Laptop") {
 case .added:
     break  // the new passkey can now unlock the wallet's data too
 case .sessionChanged:
-    break  // the backend accepted it for the account it was started for, but the
-           // active session changed meanwhile, so nothing was applied locally
+    break  // the backend ACCEPTED it for the account it was started for, but the
+           // active session changed meanwhile, so it was not applied locally
+case .notSubmitted:
+    break  // the session changed before it was sent: nothing is enrolled
+case .finishOutcomeUnknown:
+    break  // register-finish failed in transport: the backend may or may not hold
+           // the passkey; it was not rolled back - check the account's passkeys
 case .localCommitFailed:
     break  // the backend accepted it and the cached container has it; the wallet
            // locked its keystore - unlock again to pick the new entry up

@@ -372,7 +372,14 @@ public final class ASAuthorizationAuthProvider: NSObject, AuthProvider, WscdAuto
 
     private func performRequest(_ requests: [ASAuthorizationRequest]) async throws -> ASAuthorization {
         try await withCheckedThrowingContinuation { cont in
+            // One pending request at a time: a second would overwrite the first's continuation, handing it the first
+            // ceremony's response and stranding the first caller. Reject the second atomically instead.
             lock.lock()
+            if self.continuation != nil {
+                lock.unlock()
+                cont.resume(throwing: SirosError.auth(message: "Another passkey request is already in progress"))
+                return
+            }
             self.continuation = cont
             lock.unlock()
 

@@ -28,6 +28,15 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         private(set) var lastCredentialId: Data?
         /// When set, each `register` makes a new credential id `new-pk-<n>`.
         var distinctCredentialIds = false
+        /// Concurrency probe: how many authenticator ceremonies (assert + create) were in flight at once.
+        private var inFlight = 0
+        private(set) var maxInFlight = 0
+        var ceremonyDelayNanoseconds: UInt64 = 0
+        private func enterCeremony() async {
+            lock.lock(); inFlight += 1; maxInFlight = max(maxInFlight, inFlight); let delay = ceremonyDelayNanoseconds; lock.unlock()
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+        }
+        private func leaveCeremony() { lock.lock(); inFlight -= 1; lock.unlock() }
         private var registerCount = 0
         private(set) var prfSaltsEvaluated: [Data] = []
         var assertionFailure: Error?
@@ -35,6 +44,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         var prf: PrfOutput? = PrfOutput(first: Data(repeating: 0x42, count: 32))
         var prfCeremony: Result<PrfOutput, Error> = .failure(SirosError.auth(message: "no prf"))
         func register(options: RegisterOptions) async throws -> RegisterResult {
+            await enterCeremony(); defer { leaveCeremony() }
             lock.lock(); registrations.append(options); order.append("create"); registerCount += 1
             let id = Data((distinctCredentialIds ? "new-pk-\(registerCount)" : "new-pk").utf8)
             lastCredentialId = id
@@ -45,6 +55,7 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
             )
         }
         func authenticate(options: AuthenticateOptions) async throws -> AuthenticateResult {
+            await enterCeremony(); defer { leaveCeremony() }
             lock.lock(); assertions.append(options); order.append("assert"); lastCredentialId = Data("pk-1".utf8); lock.unlock()
             if let assertionFailure { throw assertionFailure }
             return AuthenticateResult(
@@ -366,17 +377,51 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         }
     }
 
-    func testATransportFailureOnFinishThrowsAndCommitsNothing() async {
+    /// The server may have accepted the write and the response been lost: a transport failure on finish leaves the
+    /// outcome UNKNOWN, so the credential is NOT rolled back and a distinct result says so.
+    func testALostFinishResponseKeepsTheCredentialAndReportsAnUnknownOutcome() async throws {
         let f = makeFixture()
-        f.server.failFinish(500, "")
-        do {
-            _ = try await f.wallet.addPasskey(nickname: "n")
-            XCTFail("a 500 is outside the contract")
-        } catch SirosError.backendApi(let code, _, _) {
-            XCTAssertEqual(code, 500)
-        } catch { XCTFail("\(error)") }
+        f.server.finish = .failure(SirosError.network(message: "response lost"))
+
+        let result = try await f.wallet.addPasskey(nickname: "n")
+
+        guard case .finishOutcomeUnknown = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(f.auth.rollbackCalls, 0, "an unknown outcome must not delete a credential the backend may hold")
         XCTAssertTrue(f.keystore.committed.isEmpty)
-        XCTAssertEqual(f.auth.rollbackCalls, 1, "a transport failure on finish must still roll back the created credential")
+        assertUnchanged(f)
+    }
+
+    /// A preparation failure sent nothing: the credential is rolled back and the error is thrown.
+    func testAFailedPreparationStillRollsBackAndThrows() async {
+        struct Boom: Error {}
+        let f = makeFixture()
+        f.keystore.prepareError = Boom()
+        do { _ = try await f.wallet.addPasskey(nickname: "n"); XCTFail("must throw") } catch is Boom {} catch { XCTFail("\(error)") }
+        XCTAssertEqual(f.auth.rollbackCalls, 1)
+    }
+
+    /// The session moved on before anything was sent: `.notSubmitted`, credential rolled back, no register-finish.
+    func testASessionChangeBeforeTheFinishIsNotSubmittedAndRollsBack() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        let started = Gate()
+        let result = try await withThrowingTaskGroup(of: AddPasskeyResult.self) { group -> AddPasskeyResult in
+            group.addTask {
+                try await f.wallet.addPasskey(nickname: "Laptop") { _ in
+                    await started.open()
+                    await gate.wait()                               // paused in the authorising assertion
+                    return AuthenticateResult(credentialId: Data("sk".utf8), authenticatorData: Data(), clientDataJSON: Data(), signature: Data([9]))
+                }
+            }
+            await started.wait()
+            f.wallet.bumpSessionGeneration()                       // a logout / re-login lands before anything is sent
+            await gate.open()
+            return try await group.next()!
+        }
+
+        guard case .notSubmitted = result else { return XCTFail("got \(result)") }
+        XCTAssertEqual(f.auth.rollbackCalls, 1, "the credential created for the never-sent enrolment is removed")
+        XCTAssertTrue(finishCalls(f).isEmpty, "register-finish was never sent")
         assertUnchanged(f)
     }
 
@@ -916,6 +961,41 @@ final class SirosWalletAddPasskeyTests: XCTestCase {
         f.sessionStore.activeAccountId = "default:user-1"
         assertUnchanged(f)
         XCTAssertEqual(f.auth.rollbackCalls, 0, "the backend accepted it: the passkey stays")
+    }
+
+    /// Overlapping `addPasskey` calls must not both reach the authenticator at once (the platform provider has one
+    /// pending request, so the second would take the first's response).
+    func testOverlappingAddPasskeyCallsNeverRunTwoCeremoniesAtOnce() async throws {
+        let f = makeFixture()
+        f.auth.distinctCredentialIds = true
+        f.auth.ceremonyDelayNanoseconds = 40_000_000
+        f.keystore.prepareSnapshotsFollowCommits = true
+
+        async let a = f.wallet.addPasskey(nickname: "A")
+        async let b = f.wallet.addPasskey(nickname: "B")
+        let (ra, rb) = try await (a, b)
+
+        guard case .added = ra, case .added = rb else { return XCTFail("got \(ra) \(rb)") }
+        XCTAssertEqual(f.auth.maxInFlight, 1, "authenticator ceremonies must be serialised")
+    }
+
+    /// Transaction-log persistence (`persistKeystoreOrThrow`) must not interleave with a pending register-finish:
+    /// it exports only after the accepted entry is committed.
+    func testPersistKeystoreOrThrowWaitsForAPendingFinish() async throws {
+        let f = makeFixture()
+        let gate = Gate()
+        f.server.finishGate = gate
+
+        let addTask = Task { try await f.wallet.addPasskey(nickname: "Laptop") }
+        await f.server.finishStarted.wait()
+        let generation = f.wallet.currentAccountGeneration()
+        async let persisted: Void = f.wallet.persistKeystoreOrThrow(generation: generation)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await gate.open()
+
+        _ = try await addTask.value
+        _ = try? await persisted
+        XCTAssertEqual(f.keystore.operationOrder.first, "commit", "an export before the commit would erase the new entry: \(f.keystore.operationOrder)")
     }
 
     // MARK: - excludeCredentials (review finding)

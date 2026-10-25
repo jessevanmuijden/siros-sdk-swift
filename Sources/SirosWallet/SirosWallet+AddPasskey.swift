@@ -26,11 +26,23 @@ extension SirosWallet {
     ///
     /// - Parameter nickname: the user's name for the new passkey (1-256 characters).
     /// - Throws: `SirosError` when no session is active, the nickname is
-    ///   invalid, or the transport fails / the backend answers outside its
-    ///   contract.
+    ///   invalid, the transport fails before `register-finish`, or the backend
+    ///   answers outside its contract. A failure OF `register-finish` is the
+    ///   result `.finishOutcomeUnknown`, not a throw.
     public func addPasskey(
         nickname: String,
         authorizer: StepUpAssertionProvider? = nil
+    ) async throws -> AddPasskeyResult {
+        // One enrolment ceremony at a time: the platform authenticator provider has a single pending request, so two
+        // overlapping calls would hand one ceremony's response to the other (and strand the first).
+        try await addPasskeyCeremonyMutex.withLock {
+            try await performAddPasskey(nickname: nickname, authorizer: authorizer)
+        }
+    }
+
+    private func performAddPasskey(
+        nickname: String,
+        authorizer: StepUpAssertionProvider?
     ) async throws -> AddPasskeyResult {
         guard !nickname.trimmingCharacters(in: .whitespaces).isEmpty, nickname.count <= 256 else {
             throw SirosError.wallet(message: "nickname must be 1-256 characters")
@@ -98,6 +110,11 @@ extension SirosWallet {
             /// the second case the passkey is real but is deliberately not
             /// applied to whatever keystore and account are active now.
             case sessionChanged(accepted: Bool)
+            /// The keystore could not prepare the new entry: nothing was sent.
+            case preparationFailed(Error)
+            /// The request to register-finish failed in transport (timeout, lost response, 5xx): whether the backend
+            /// stored the passkey is UNKNOWN, so the credential must not be rolled back.
+            case finishOutcomeUnknown(Error)
             /// Accepted, committed into the live keystore and published to the
             /// local caches.
             case committed(credentialId: String?)
@@ -122,24 +139,36 @@ extension SirosWallet {
                 guard currentEnrollmentIsLive(generation: startGeneration, epoch: startEpoch) else {
                     return .sessionChanged(accepted: false)
                 }
-                let prepared = try await keystore.preparePrfKey(
-                    credentialId: created.credentialId, prfOutput: prfOutput.first,
-                    prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo
-                )
+                let prepared: PreparedPrfKey
+                do {
+                    prepared = try await keystore.preparePrfKey(
+                        credentialId: created.credentialId, prfOutput: prfOutput.first,
+                        prfSalt: prfSalt, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo
+                    )
+                } catch {
+                    return .preparationFailed(error)
+                }
                 // Read inside the same transaction as the snapshot above, so it
                 // is the tag of exactly that state. After a session resume
                 // `client` is a fresh `BackendApiClient` with no ETag of its
                 // own (see `BackendApiClient.privateDataEtag`'s doc comment):
                 // fall back to the one persisted with the cached container.
                 let ifMatch = client.privateDataEtag ?? sessionStore.privateDataEtag
-                let outcome = try await client.passkeyRegisterFinish(
-                    challengeId: challenge.challengeId,
-                    credential: created,
-                    nickname: nickname,
-                    privateData: prepared.container,
-                    authorization: authorization,
-                    ifMatch: ifMatch
-                )
+                // A definitive refusal comes back as a value; anything thrown here (timeout, lost response, 5xx)
+                // leaves the backend's state unknown.
+                let outcome: AddPasskeyOutcome
+                do {
+                    outcome = try await client.passkeyRegisterFinish(
+                        challengeId: challenge.challengeId,
+                        credential: created,
+                        nickname: nickname,
+                        privateData: prepared.container,
+                        authorization: authorization,
+                        ifMatch: ifMatch
+                    )
+                } catch {
+                    return .finishOutcomeUnknown(error)
+                }
                 guard case let .added(credentialId) = outcome else { return .refused(outcome) }
 
                 // From here the backend has accepted the passkey: nothing below
@@ -172,8 +201,7 @@ extension SirosWallet {
                 return .committed(credentialId: credentialId)
             }
         } catch {
-            // The backend did not accept it (preparation or the request
-            // failed), so the credential just created is unused.
+            // Nothing above throws any more except the lock itself failing, before anything was sent.
             rollbackLocalCredential(credentialId: created.credentialId)
             throw error
         }
@@ -182,9 +210,18 @@ extension SirosWallet {
         case let .refused(outcome):
             rollbackLocalCredential(credentialId: created.credentialId)
             return Self.addPasskeyRefusal(outcome)
+        case let .preparationFailed(error):
+            rollbackLocalCredential(credentialId: created.credentialId)
+            throw error
+        case let .finishOutcomeUnknown(error):
+            // Kept: the backend may hold this passkey and its PRF entry, and deleting the credential would make them
+            // unusable. The caller reconciles later (list the account's passkeys / retry).
+            return .finishOutcomeUnknown(message: error.localizedDescription)
         case let .sessionChanged(accepted):
-            if !accepted { rollbackLocalCredential(credentialId: created.credentialId) }
-            return .sessionChanged(message: nil)
+            if accepted { return .sessionChanged(message: nil) }
+            // register-finish was never sent: the credential just created is unused.
+            rollbackLocalCredential(credentialId: created.credentialId)
+            return .notSubmitted(message: nil)
         case let .committed(credentialId):
             return .added(credentialId: credentialId)
         case let .acceptedButNotCommitted(credentialId, error):

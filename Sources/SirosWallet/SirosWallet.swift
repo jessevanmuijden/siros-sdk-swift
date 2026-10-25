@@ -263,6 +263,8 @@ public final class SirosWallet: @unchecked Sendable {
     /// `SirosWallet+Lifecycle.swift` and `SirosWallet+AddPasskey.swift`, same
     /// cross-file-extension-access reason as `keystore` above.
     let keystoreContainerLock = AsyncLock()
+    /// Serialises `addPasskey` ceremonies: see `addPasskey`.
+    let addPasskeyCeremonyMutex = AsyncMutex()
 
     /// WSCD hardware-key lifecycle (enroll/rotate/destroy) and
     /// additional-plugin registration (FIDO2 rawSign, R2PS remote HSM) -

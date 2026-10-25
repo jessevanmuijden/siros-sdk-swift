@@ -381,8 +381,10 @@
     "addPasskeyRegistrationAborted": "Den nya passkey skapades inte: %1$@",
     "addPasskeyNoPrf": "Den här passkey kan inte skydda dina plånboksdata och lades därför inte till: %1$@",
     "addPasskeyRefused": "Den här autentiseraren är inte tillåten. %1$@",
-    "addPasskeySessionChanged": "Passkeyn lades till, men på en annan inloggning än den som nu är aktiv. Logga in på det kontot för att använda den.",
-    "addPasskeyLocalCommitFailed": "Passkeyn registrerades, men plånboken kunde inte ta emot den och har låst sig. Lås upp plånboken igen för att slutföra."
+    "addPasskeySessionChanged": "Passkeyn lades till på kontot du var inloggad på när du började, men en annan inloggning är aktiv nu, så den ställdes inte in här. Logga in på det kontot för att använda den.",
+    "addPasskeyLocalCommitFailed": "Passkeyn registrerades, men plånboken kunde inte ta emot den och har låst sig. Lås upp plånboken igen för att slutföra.",
+    "addPasskeyNotSubmitted": "Inloggningen ändrades innan passkeyn skickades, så ingenting lades till. Försök igen.",
+    "addPasskeyOutcomeUnknown": "Anslutningen misslyckades när passkeyn lades till, så den kan ha lagts till eller inte. Kontrollera dina passkeys innan du försöker igen."
   },
   "walletBlocked": {
     "suspendedTitle": "Den här enheten är pausad",
