@@ -44,7 +44,7 @@ Accepted attributes, each with a strict value grammar: `id`; geometry (`x`, `y`,
 `gradientTransform` (a strict list of `matrix`, `translate`, `scale`, `rotate`,
 `skewX`, `skewY` with the right number of arguments); path data `d` (strict SVG
 syntax: valid commands with exactly the right argument counts, nothing after
-`Z`); `points` (an even number of coordinates); paint and stroke (`fill`, `stroke`, `stop-color`,
+`Z`/`z` except whitespace, ASCII only); `points` (an even number of coordinates); paint and stroke (`fill`, `stroke`, `stop-color`,
 `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
 `stroke-dasharray`, `stroke-dashoffset`, `fill-rule`, `clip-rule`); opacity
 attributes; `clip-path`; `display`; gradient `gradientUnits`, `spreadMethod`,

@@ -57,6 +57,73 @@ final class LogoSanitizerTests: XCTestCase {
         }
     }
 
+    // MARK: Path data grammar (pure Foundation, runs everywhere)
+
+    private func validPath(_ d: String) -> Bool { SvgPathData.isValid(d, maxNumber: 1_000_000) }
+
+    func testPathDataGrammarAcceptsOrdinaryPaths() {
+        for d in ["M0 0 L8 0 L8 8 Z", "M0,0 4,0 4,4 8,8", "m1 1 h4 v4 z m2 2 l1 1", "M0 0 C1 1 2 2 3 3 S4 4 5 5 Q1 1 2 2 T3 3",
+                  "M0 0 A4 4 0 0 1 4 4", "M0 0 a1 1 0 00.5.5", "M-1.5e2 .5 L+3 -.25z", "M0 0Z", "M0 0 Z M1 1 L2 2",
+                  "M0 0 L1 1 2 2 3 3", " M0 0 z ", "M0 0 L1 1,2 2", "M0 0 z\n m1 1"] {
+            XCTAssertTrue(validPath(d), d)
+        }
+    }
+
+    /// Each of these makes SwiftDraw 0.29.0 loop without consuming input or trap; none may pass.
+    func testPathDataGrammarRefusesEveryNonAdvancingOrTrappingForm() {
+        let bad = [
+            "M0 0Z0", "M0 0 L4 0 L4 4 Z 5", "M0 0 z,1", "M0 0Z,", "M0 0 z ,", "M0 0 Z , L1 1", "M0 0Z,L1 1", "M0 0Z.5", "M0 0Z-1", "M0 0Ze1",
+            "M0 0 ß", "M0 0Zſ1 2 3 4", "M0 0 ı", "M0 0 \u{212A}", "M0 0 İ", "M0 0 ǆ", "M0 0 Ｌ1 1", "M０ 0", "M0 0 L1 1\u{00A0}",
+            "M0 0 L1 1\u{2003}2 2", "M0 0 L1 1\u{0}", "M0 0 é", "💥",
+            "", " ", "L0 0", "Z", "M0", "M0 0 L1", "M0 0 H", "M0 0 C1 1 2 2 3", "M0 0 A4 4 0 0 1 4", "M0 0 A4 4 0 2 1 4 4",
+            "M0 0 L1 1 e", "M0 0 L1e 1", "M0 0 L1e+ 1", "M0 0 L1 1 x", "M0 0 L1e30 1", "M0 0 L--1 1", "M0 0 L1..2 1", "M0 0 <", "M0 0 L1 1 2",
+            "M0 0 L1 1 X", "M0 0 R1 1", "M0 0 L 1 1 -", "M0 0 L1 1 +", "M0 0 .", "M0 0 L. 1", "M0 0 L1 1 e5",
+        ]
+        for d in bad { XCTAssertFalse(validPath(d), d.debugDescription) }
+    }
+
+    /// Deterministic bounded property test: whatever the grammar accepts is ASCII-only, starts with
+    /// M/m, uses only command letters, never has a comma after Z/z, and every Z/z is followed by
+    /// whitespace/end/letter. (The matching "renders under SwiftDraw within a timeout" fuzz is a scratch
+    /// harness on the Mac mini; this keeps the invariants honest everywhere.)
+    func testPathDataGrammarInvariantsOnGeneratedPaths() {
+        let noise = ["ß", "ſ", "ı", "\u{212A}", "İ", "ǆ", "e", "-", "+", ",", ".", " ", "Z", "z", "e1", "1e2", "-.5", "1.", "0 0 1", "x", "5 5 5"]
+        let letters = Array("MmLlHhVvCcSsQqTtAaZz")
+        let counts: [Character: Int] = ["M": 2, "L": 2, "T": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "A": 7, "Z": 0]
+        let numbers = ["0", "1", "2", "5", "12", "3.5", "-4", ".5", "1e2", "+3", "-.25"]
+        var accepted = 0
+        for idx in 0..<6000 {
+            var x = UInt64(idx) &* 6364136223846793005 &+ 1442695040888963407
+            func next(_ n: Int) -> Int { x = x &* 6364136223846793005 &+ 1442695040888963407; return Int((x >> 33) % UInt64(n)) }
+            var d = next(4) == 0 ? "" : "M0 0 "
+            for _ in 0..<(1 + next(5)) {
+                let l = letters[next(letters.count)]
+                d += String(l)
+                let n = counts[Character(l.uppercased())] ?? 0
+                for _ in 0..<(n * (1 + next(2))) { d += numbers[next(numbers.count)] + [" ", ",", " ", ""][next(4)] }
+                if next(4) == 0 { d += noise[next(noise.count)] } // mutate: this is where the bad inputs come from
+                if next(3) == 0 { d += " " }
+            }
+            guard validPath(d) else { continue }
+            accepted += 1
+            let b = Array(d.utf8)
+            XCTAssertTrue(b.allSatisfy { $0 < 0x80 }, d)
+            let first = b.first { $0 != 0x20 && $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }
+            XCTAssertTrue(first == 0x4D || first == 0x6D, d)
+            let allowedLetters = Set("MmLlHhVvCcSsQqTtAaZz".utf8)
+            for (i, c) in b.enumerated() {
+                let isLetter = (c | 0x20) >= 0x61 && (c | 0x20) <= 0x7A
+                if isLetter && c != 0x65 && c != 0x45 { XCTAssertTrue(allowedLetters.contains(c), d) } // e/E only inside numbers
+                if c == 0x5A || c == 0x7A {
+                    var j = i + 1
+                    while j < b.count, b[j] == 0x20 || b[j] == 0x09 || b[j] == 0x0A || b[j] == 0x0D { j += 1 }
+                    XCTAssertTrue(j == b.count || ((b[j] | 0x20) >= 0x61 && (b[j] | 0x20) <= 0x7A), "Z must be followed by a command or the end: \(d)")
+                }
+            }
+        }
+        XCTAssertGreaterThan(accepted, 100, "the generator must actually produce accepted paths (accepted \(accepted))")
+    }
+
     func testPercentEncodedSvgRefused() {
         // Base64 only, like every other data: logo (and like Kotlin).
         XCTAssertEqual(rejection("data:image/svg+xml;utf8,<svg onload='alert(1)'/>"), .malformedDataUri)
@@ -519,18 +586,10 @@ final class LogoSanitizerImageTests: XCTestCase {
 
     // MARK: Path data / transform / points / colour / href: SwiftDraw 0.29.0 behaviours (verified on the Mac mini)
 
-    /// `M0 0Z0` makes SwiftDraw loop forever (hang + memory growth). Tested on the validator, never through SwiftDraw.
-    func testPathDataIsValidatedStrictly() {
-        let good = ["M0 0 L8 0 L8 8 Z", "M0,0 4,0 4,4 8,8", "m1 1 h4 v4 z m2 2 l1 1", "M0 0 C1 1 2 2 3 3 S4 4 5 5 Q1 1 2 2 T3 3",
-                    "M0 0 A4 4 0 0 1 4 4", "M0 0 a1 1 0 00.5.5", "M-1.5e2 .5 L+3 -.25z", "M0 0Z", "M0 0 Z M1 1 L2 2",
-                    "M0 0 L1 1 2 2 3 3"]
-        for d in good { XCTAssertTrue(SvgActiveContentGuard.isValidPathData(d), d) }
-        let bad = ["M0 0Z0", "M0 0 L4 0 L4 4 Z 5", "M0 0 z,1", "", " ", "L0 0", "M0", "M0 0 L1", "M0 0 H", "M0 0 C1 1 2 2 3",
-                   "M0 0 A4 4 0 0 1 4", "M0 0 A4 4 0 2 1 4 4", "M0 0 L1 1 e", "M0 0 L1e 1", "M0 0 L1 1 x", "M0 0 L1e30 1",
-                   "M0 0 L--1 1", "M0 0 L1..2 1", "M0 0 <", "M0 0 L1 1 2"]
-        for d in bad { XCTAssertFalse(SvgActiveContentGuard.isValidPathData(d), d) }
-        // The guard (no SwiftDraw involved) refuses the hanging documents.
-        for d in ["M0 0Z0", "M0 0 L4 0 L4 4 Z 5"] {
+    /// `M0 0Z0` makes SwiftDraw loop forever (hang + memory growth); the other bad inputs are in
+    /// `LogoSanitizerTests.testPathDataGrammar*`. Guard only: these documents never reach SwiftDraw.
+    func testGuardRefusesHangingAndTrappingPaths() {
+        for d in ["M0 0Z0", "M0 0 L4 0 L4 4 Z 5", "M0 0Z,", "M0 0 Z , L1 1", "M0 0 ß", "M0 0Zſ1 2 3 4"] {
             XCTAssertEqual(guardCheck(svg("<path d=\"\(d)\" fill=\"red\"/>")), .activeContent, d)
         }
         XCTAssertNil(guardCheck(svg("<path d=\"M0 0 L8 0 L8 8 Z\" fill=\"red\"/>")))
