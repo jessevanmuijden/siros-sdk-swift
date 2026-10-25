@@ -42,7 +42,10 @@ extension SirosWallet {
         guard applied == true else { return false }
         if keystore.isUnlocked { await persistAndSyncKeystore() }
         await checkRenewThresholds(consumedCredentialIds: record.credentialIds)
-        return true
+        // The awaits above can finish after an account wipe: a record that was admitted but then wiped must not be
+        // reported as recorded (the callers return a signed presentation only for a recorded one).
+        lock.lock(); let stillCurrent = isCurrentLocked(token); lock.unlock()
+        return stillCurrent
     }
 
     /// Reload presentation history from the encrypted container after unlock.
