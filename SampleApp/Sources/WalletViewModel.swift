@@ -502,15 +502,11 @@ final class WalletViewModel: ObservableObject {
 
     @Published var walletInstances: [WalletInstance] = []
     @Published var devicesLoading = false
-    /// The instance whose status write is in flight, so its row can show a spinner.
-    @Published var devicesBusyInstanceId: String?
     @Published var devicesError: String?
-    @Published var deactivating = false
-    /// What the last `deactivateWallet` call reported. Kept so the screen can
-    /// say whether the backend confirmed the erasure - an incomplete one still
-    /// deactivated the wallet, but leaves residual server-side data for an
-    /// administrator, and the user should be told which of the two happened.
-    @Published var deactivationOutcome: DeactivationOutcome?
+    @Published var deletingAccount = false
+    /// Why the last `deleteAccount` did not finish, shown in the delete
+    /// sheet; nil after a success or before the first attempt.
+    @Published var deleteAccountError: String?
 
     func openWscaDeveloper() {
         showWscaDeveloper = true

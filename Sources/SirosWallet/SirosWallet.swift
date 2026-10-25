@@ -228,68 +228,6 @@ public final class SirosWallet: @unchecked Sendable {
     /// reading this right after it is the reliable order.
     public var thisInstanceId: String? { instanceKeyThumbprint() }
 
-    /// Suspend, reactivate or revoke one of this user's wallet instances
-    /// (`PUT /user/session/instances/{id}/status`). Suspension is reversible
-    /// and only blocks that installation (login, attestation, sessions);
-    /// revocation is terminal, but - per the EUDI wallet-unit lifecycle, which
-    /// SIROS follows exactly - terminal *for that instance only*: the user's
-    /// other devices are untouched. Revoking the last non-revoked instance
-    /// deactivates the wallet - prefer `deactivateWallet(reason:)` for that,
-    /// which also clears local state.
-    ///
-    /// Any change away from `active` cuts off every bearer token issued before
-    /// it, including this session's (the acting token survives only for the
-    /// request that made the change, and may not mint new ones), so this
-    /// re-logs in once afterwards - see `WalletState.lifecycleBlocked`.
-    /// Suspending *this* device's own instance therefore ends in
-    /// `.lifecycleBlocked(reason: .suspended, ...)`, which is the truthful
-    /// state; confirm with the user before calling it for an instance whose
-    /// `isThisDevice` is true.
-    public func setWalletInstanceStatus(instanceId: String, status: WalletInstance.Status, reason: String? = nil) async throws -> WalletInstance {
-        guard let client = apiClient else { throw SirosError.auth(message: "Not logged in") }
-        let updated = try await client.setWalletInstanceStatus(instanceId: instanceId, status: status, reason: reason)
-        // Every status write records a cut-off, and the acting token's
-        // exemption from it does not reach POST /auth/token or an engine flow
-        // start - so this session is done either way. Re-login once instead of
-        // letting the next issuance or presentation discover it as a 401.
-        await reloginAfterLifecycleChange()
-        return updated
-    }
-
-    /// Deactivate this wallet: revoke every wallet instance of the user
-    /// (`POST /user/session/instances/revoke-all`). The backend erases the
-    /// wallet's private data and server-side credentials and refuses every
-    /// passkey of the user at login with `WALLET_REVOKED` at scope `wallet`
-    /// (which reaches other installations as
-    /// `WalletState.lifecycleBlocked(reason: .deactivated, ...)`); a new
-    /// enrollment is required afterwards. The local cached account is forgotten and the
-    /// wallet logged out, since the vault it decrypts no longer exists.
-    /// The local account is forgotten in both outcomes, since the revocations
-    /// stand even when the backend's erasure cascade did not finish.
-    ///
-    /// Unlike `setWalletInstanceStatus` this does not re-login: there is
-    /// nothing left to log in to.
-    ///
-    /// - Returns: how many instances the backend revoked and whether it
-    ///   confirmed the erasure (`DeactivationOutcome.complete`); an incomplete
-    ///   erasure leaves residual server-side data for an administrator.
-    @discardableResult
-    public func deactivateWallet(reason: String? = nil) async throws -> DeactivationOutcome {
-        guard let client = apiClient else { throw SirosError.auth(message: "Not logged in") }
-        let outcome = try await client.revokeAllWalletInstances(reason: reason)
-        if !outcome.complete {
-            #if canImport(os)
-            logger.warning("Wallet deactivated with an unfinished erasure: \(outcome.revoked) instance(s) revoked, residual server-side data must be cleaned up by an administrator; forgetting local account anyway")
-            #endif
-        }
-        if let active = accountRegistry.activeAccountId {
-            forgetAccount(accountId: active)
-        } else {
-            logout()
-        }
-        return outcome
-    }
-
     // MARK: - Configuration & dependencies
 
     // Not `private`: `SirosWallet+Issuance.swift`, `SirosWallet+Lifecycle.swift`
@@ -441,6 +379,9 @@ public final class SirosWallet: @unchecked Sendable {
     // `keystore` itself had to stay internal (not private).
 
     let credentialStore: CredentialStore
+
+    /// Write admission around an account wipe; see `TeardownGate`.
+    let teardownGate = TeardownGate()
 
     /// A BBS credential's holder state vault - `nil` unless `keystore`
     /// conforms to `ExtensionStore`. See `removeBbsHolderStateIfAny`.
@@ -694,6 +635,9 @@ public final class SirosWallet: @unchecked Sendable {
     // too - same cross-file-extension-access reason as `keystore` above.
     var wmpPeer: WmpPeer?
 
+    /// Caller holds `lock`.
+    func resetPresentationHistoryLocked() { _presentationHistory = [] }
+
     /// Presentation history — most recent first.
     public var presentationHistory: [PresentationRecord] {
         lock.lock(); defer { lock.unlock() }
@@ -709,15 +653,35 @@ public final class SirosWallet: @unchecked Sendable {
     // Not `private`: `SirosWallet+DCAPI.swift` and `SirosWallet+Engine.swift`
     // need it too - same cross-file-extension-access reason as `keystore`
     // above.
-    func recordPresentation(_ record: PresentationRecord) async {
-        lock.lock(); _presentationHistory.insert(record, at: 0); lock.unlock()
-        if keystore.isUnlocked {
-            if let data = try? JSONEncoder().encode(record), let raw = String(data: data, encoding: .utf8) {
+    /// - Parameter token: captured by the caller before its first `await`. The
+    ///   record is applied only while it is current; the check, the in-memory
+    ///   insert and the keystore write are one admitted write, which a wipe
+    ///   closes and drains, so a handler that resumed after an account deletion
+    ///   records nothing. Returns false when it was refused.
+    @discardableResult
+    func recordPresentation(_ record: PresentationRecord, token: TeardownToken) async -> Bool {
+        lock.lock()
+        let current = isCurrentLocked(token)
+        lock.unlock()
+        guard current else { return false }
+        let applied: Bool? = await teardownGate.admit(token.ticket) { [self] in
+            lock.lock()
+            guard isCurrentLocked(token) else { lock.unlock(); return false }
+            _presentationHistory.insert(record, at: 0)
+            lock.unlock()
+            if keystore.isUnlocked,
+               let data = try? JSONEncoder().encode(record), let raw = String(data: data, encoding: .utf8) {
                 try? await keystore.savePresentationRecord(id: record.id, json: raw)
-                await persistAndSyncKeystore()
             }
+            return true
         }
+        guard applied == true else { return false }
+        if keystore.isUnlocked { await persistAndSyncKeystore() }
         await checkRenewThresholds(consumedCredentialIds: record.credentialIds)
+        // The awaits above can finish after an account wipe: a record that was admitted but then wiped must not be
+        // reported as recorded (the callers return a signed presentation only for a recorded one).
+        lock.lock(); let stillCurrent = isCurrentLocked(token); lock.unlock()
+        return stillCurrent
     }
 
     /// Per-credential-configuration-id override for
@@ -975,6 +939,7 @@ public final class SirosWallet: @unchecked Sendable {
         guard let asClient = authServerClient, let tokens = authTokens else {
             throw SirosError.wallet(message: "AuthServerClient not initialized")
         }
+        await reopenForNewSession()
         setState(.connecting)
         // See logout()'s identical reset: this enrollment gets its own
         // instance key, so any WIA still cached from an earlier account must
@@ -1135,6 +1100,11 @@ public final class SirosWallet: @unchecked Sendable {
         guard let asClient = authServerClient, let tokens = authTokens else {
             throw SirosError.wallet(message: "AuthServerClient not initialized")
         }
+        // A new session: admits writes again if an account wipe had closed them (waits for one still running).
+        await reopenForNewSession()
+        // The admission ticket for this login, taken before its first await: every commit below re-checks it, so a
+        // wipe that lands meanwhile is never undone (credentials, keys, registry entry or `.ready` state restored).
+        guard let ticket = teardownGate.ticket() else { return }
         setState(.connecting)
         // See logout()'s identical reset: a WIA still cached from another
         // account (or from before a re-enrollment) must not be what identifies
@@ -1166,43 +1136,39 @@ public final class SirosWallet: @unchecked Sendable {
             // into the active scope. The registry's active account is only
             // moved once the unlock has succeeded.
             let accountId = "\(config.tenantId):\(session.uuid)"
-            sessionStore.activeAccountId = accountId
-            // Now the server has named the account, so a refusal from anything
-            // below this line is unambiguously about it.
-            loginAccountId = accountId
-
-            setupApiClientWithTokens(tokens)
+            try await admittedCommit(ticket) {
+                sessionStore.activeAccountId = accountId
+                // Now the server has named the account, so a refusal from anything
+                // below this line is unambiguously about it.
+                loginAccountId = accountId
+                setupApiClientWithTokens(tokens)
+            }
             let privateData = try await fetchPrivateData()
 
             // PRF/HKDF parameters, normal or recovered - see `resolveLoginPrf`.
             let cached = assertion.cachedAccount.flatMap { $0.accountId == accountId ? $0 : nil }
             let resolved = try await resolveLoginPrf(assertion: assertion, privateData: privateData, cachedAccount: cached)
 
-            try await keystore.unlock(
-                prfOutput: resolved.prfOutput.first,
-                encryptedContainer: privateData,
-                hkdfSalt: resolved.hkdfSalt,
-                hkdfInfo: resolved.hkdfInfo,
-                prfSalt: resolved.prfSalt
+            // The unlock restores the container's credentials and keys, and the bookkeeping creates the registry
+            // entry: one admitted commit. Records credentialId/salts and heals the account cache on recovery.
+            try await commitLoginUnlock(
+                ticket: ticket, privateData: privateData, resolved: resolved,
+                accountId: accountId, session: session, assertion: assertion
             )
 
-            // Records credentialId/salts and heals the account cache on
-            // recovery - see `recordSuccessfulLogin`.
-            recordSuccessfulLogin(
-                accountId: accountId, session: session, assertion: assertion,
-                prfSaltBytes: resolved.prfSalt, hkdfSalt: resolved.hkdfSalt, hkdfInfo: resolved.hkdfInfo,
-                recoveredSalt: resolved.recoveredSalt
-            )
-
+            try requireAdmitted(ticket)
             try await connectEngineWithToken(tokens)
 
             // A new session: a cut-off met on THIS one deserves its own
             // self-driven re-login, and the 401s of the session it replaced
             // no longer do.
-            bumpSessionGeneration()
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: session.uuid, displayName: session.displayName, credentials: creds))
+            try await commitLoginReady(ticket: ticket, session: session)
             await reloadPresentationHistory()
+        } catch where !teardownGate.isValid(ticket) {
+            // An account wipe landed during this login (or a newer session replaced it): whatever it failed with -
+            // a cancelled passkey, an authorization or HTTP error, a PRF failure - is discarded, and the wipe's
+            // `.disconnected` (or the newer session's) state stands.
+            return
         } catch let e as SirosError {
             // A SID-AUTH-06 refusal is a state, not an error: this passkey's
             // wallet instance is suspended or the wallet was deactivated, and
@@ -1334,6 +1300,7 @@ public final class SirosWallet: @unchecked Sendable {
 
     /// Resume a previous session without requiring a new WebAuthn assertion.
     public func resumeSession() async {
+        await reopenForNewSession()
         // Restore the active account ID so the session store reads the right data
         let resumingAccountId = accountRegistry.activeAccountId
         if let resumingAccountId {
@@ -1380,6 +1347,8 @@ public final class SirosWallet: @unchecked Sendable {
     public func unlockKeystore() async throws {
         guard case .keystoreLocked(let userId, let displayName) = state,
               let asClient = authServerClient else { return }
+        // Taken before the first await: an unlock that resumes after an account wipe must restore nothing.
+        guard let ticket = teardownGate.ticket() else { return }
         // The account being unlocked, captured before the ceremony: a refusal
         // arrives after it, and the registry is mutable in between. See
         // `handleLifecycleRefusal(_:forAccount:)`.
@@ -1411,24 +1380,14 @@ public final class SirosWallet: @unchecked Sendable {
             let storedContainer = Data(storedJwe.utf8)
             let resolved = try await resolveUnlockKeystorePrf(assertion: assertion, storedContainer: storedContainer)
 
-            try await keystore.unlock(
-                prfOutput: resolved.prfOutput.first,
-                encryptedContainer: storedContainer,
-                hkdfSalt: resolved.hkdfSalt,
-                hkdfInfo: resolved.hkdfInfo
+            try await commitKeystoreUnlock(
+                ticket: ticket, container: storedContainer, resolved: resolved,
+                assertion: assertion, userId: userId, displayName: displayName
             )
-
-            if let recoveredSalt = resolved.recoveredSalt, let accountId = sessionStore.activeAccountId {
-                healAccountCache(
-                    accountId: accountId, userId: userId, displayName: displayName,
-                    credentialId: assertion.credentialId, prfSalt: recoveredSalt,
-                    hkdfSalt: resolved.hkdfSalt, hkdfInfo: resolved.hkdfInfo
-                )
-            }
-
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
             await reloadPresentationHistory()
+        } catch where !teardownGate.isValid(ticket) {
+            // Same as login(): an unlock overtaken by deletion discards any error and never replaces the state.
+            return
         } catch {
             if await handleLifecycleRefusal(error, forAccount: unlockingAccountId) { return }
             setState(.error(message: error.localizedDescription))

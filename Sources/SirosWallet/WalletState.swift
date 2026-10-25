@@ -37,7 +37,7 @@ public enum WalletState: Sendable, Equatable {
     /// and the cached credentials stay, because the user's other devices and
     /// passkeys keep working. `.deactivated` is the whole wallet - every
     /// instance revoked, the data erased server-side - so the SDK forgets the
-    /// affected account there, the same way `SirosWallet.deactivateWallet`
+    /// affected account there, the same way `SirosWallet.forgetAccount(accountId:)`
     /// does, and `cachedAccounts` no longer lists it.
     ///
     /// The one qualification: the SDK only forgets an account it has

@@ -27,6 +27,15 @@ public protocol CredentialStore: Sendable {
 
     /// Remove all stored credentials.
     func clear() async
+
+    /// Remove all stored credentials and report a failure. `clear()` cannot
+    /// say that it failed; an account wipe needs to know, so a store whose
+    /// removal can fail overrides this. The default calls `clear()`.
+    func eraseAll() async throws
+}
+
+public extension CredentialStore {
+    func eraseAll() async throws { await clear() }
 }
 
 /// In-memory credential store for development/testing.

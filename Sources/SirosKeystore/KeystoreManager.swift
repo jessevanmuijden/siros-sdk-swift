@@ -68,6 +68,20 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// Lock the keystore, clearing key material from memory.
     func lock()
 
+    /// Irreversibly erase signing keys this keystore holds outside its
+    /// credential container, and throw if any could not be erased. An account
+    /// wipe calls this before `lock()`. Keys that live in the container are
+    /// already gone with it, so the default does nothing; a keystore that
+    /// retains a `Signer` overrides it. Keys on an external authenticator
+    /// cannot be erased from here and are left alone.
+    func eraseKeyMaterial() async throws
+
+    /// Admits key creation again after `eraseKeyMaterial()` closed it. Called by
+    /// the wallet when a NEW session starts, never by an unlock: an unlock that
+    /// raced the erase must not let a key be created behind its key-list
+    /// snapshot. The default does nothing.
+    func reopenKeyOperations()
+
     /// Generate a new keypair and return the key ID.
     func generateKey(algorithm: String) async throws -> String
 
@@ -355,6 +369,9 @@ public protocol KeystoreManager: AnyObject, Sendable {
 
 /// Default implementation for optional methods.
 public extension KeystoreManager {
+    func eraseKeyMaterial() async throws {}
+    func reopenKeyOperations() {}
+
     /// Default: freshKey=false for backward compatibility.
     func generateProof(audience: String, nonce: String) async throws -> String {
         try await generateProof(audience: audience, nonce: nonce, freshKey: false)
