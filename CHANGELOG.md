@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ASAuthorizationAuthProvider` rejects a second concurrent request instead of overwriting the first's continuation.
   `persistKeystoreOrThrow` takes `keystoreContainerLock` like `persistAndSyncKeystore`. The `WscdKeystoreAdapter` erase/reopen
   doc comments are corrected.
+  **The unknown-outcome case is only partially handled:** the credential is kept and `.finishOutcomeUnknown` is returned, but the
+  wallet's keystore then lacks an entry the backend may hold, and an ordinary private-data write carries no `If-Match`, so
+  a later stale export could overwrite it. Tracked in https://github.com/sirosfoundation/siros-sdk-swift/issues/239.
 - **Add passkey: review fixes (#197).** Enrolment is one transaction under the keystore-container lock (prepare, the
   matching ETag, finish, commit and cache publication), so overlapping enrolments and queued syncs cannot send an
   older snapshot under a newer tag; it is invalidated before login, register, resume and unlock replace the session

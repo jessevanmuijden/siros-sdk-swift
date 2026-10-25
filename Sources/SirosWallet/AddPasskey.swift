@@ -65,6 +65,10 @@ public enum AddPasskeyResult: Sendable, Equatable {
     /// The request to `register-finish` failed in transport (timeout, lost response, 5xx), so whether the backend
     /// stored the passkey and its PRF entry is UNKNOWN. The credential just created was NOT rolled back: deleting it
     /// would make an accepted passkey unusable. Check the account's passkeys before retrying.
+    ///
+    /// **Only partially handled.** If the backend did store it, this wallet's keystore and caches lack the new PRF
+    /// entry, and an ordinary private-data write carries no `If-Match`, so a later export from the stale keystore
+    /// could overwrite it. Tracked in https://github.com/sirosfoundation/siros-sdk-swift/issues/239.
     case finishOutcomeUnknown(message: String?)
     /// The backend accepted the passkey and the cached container carries its
     /// PRF entry, but this wallet's live keystore could not take the entry.
