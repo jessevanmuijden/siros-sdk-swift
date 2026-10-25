@@ -63,6 +63,9 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// introduced by this change.
     private let credentialsKeystore = JweKeystore()
 
+    /// Admits key creation only while no erase is under way; see `KeyOperationGate`.
+    private let keyGate = KeyOperationGate()
+
     /// Non-nil only when `signer` is itself WSCD-backed (i.e. a
     /// `UniFFISigner`) - a plain software `Signer` has no lifecycle or
     /// plugin-registration concept.
@@ -98,15 +101,18 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     }
 
     public func registerLifecycle(request: RegisterLifecycleRequest) async throws -> RegistrationOutcome {
-        try await requireWscdManager().registerLifecycle(request: request)
+        // Admitted through the key-operation gate: it can create or replace signing keys, so an erase drains it.
+        try await keyGate.run { try await requireWscdManager().registerLifecycle(request: request) }
     }
 
     public func activateLifecycle(request: ActivateLifecycleRequest) async throws -> ActivationOutcome {
-        try await requireWscdManager().activateLifecycle(request: request)
+        // Admitted through the key-operation gate: it can create or replace signing keys, so an erase drains it.
+        try await keyGate.run { try await requireWscdManager().activateLifecycle(request: request) }
     }
 
     public func rotateLifecycle(request: RotateLifecycleRequest) async throws -> RotationOutcome {
-        try await requireWscdManager().rotateLifecycle(request: request)
+        // Admitted through the key-operation gate: it can create or replace signing keys, so an erase drains it.
+        try await keyGate.run { try await requireWscdManager().rotateLifecycle(request: request) }
     }
 
     public func destroyLifecycle(request: DestroyLifecycleRequest) async throws -> DestructionOutcome {
@@ -175,6 +181,33 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
 
     public func lock() {
         credentialsKeystore.lock()
+    }
+
+    /// Plugin whose keys live on an external authenticator. They cannot be
+    /// erased by this SDK and are skipped by ``eraseKeyMaterial()``.
+    private static let externalAuthenticatorPluginId = "fido2"
+
+    /// Deletes every key the retained `signer` holds, except those on an
+    /// external authenticator. Continues past a failing key and throws one
+    /// error naming each, so the caller can report that key material remains.
+    public func reopenKeyOperations() {
+        keyGate.reopen()
+    }
+
+    public func eraseKeyMaterial() async throws {
+        // No new key may be created from here on, and one being created now is
+        // waited for, so the snapshot below cannot miss it.
+        await keyGate.beginErase()
+        let keys = try await signer.listKeys()
+        var failures: [String] = []
+        for key in keys where key.pluginId != Self.externalAuthenticatorPluginId {
+            do { try await signer.deleteKey(keyId: key.keyId) } catch {
+                failures.append("\(key.keyId): \(error.localizedDescription)")
+            }
+        }
+        if !failures.isEmpty {
+            throw KeystoreError.invalidParameter("signing keys not erased: " + failures.joined(separator: "; "))
+        }
     }
 
     /// The persisted (privatedata-synced) copy of every hardware-backed WSCD
@@ -247,7 +280,11 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
 
     public func generateKey(algorithm: String) async throws -> String {
         try checkUnlocked()
-        return try await signer.generateKey(algorithm: algorithm)
+        return try await keyGate.run {
+            // Re-checked inside the gate: a lock() that landed meanwhile must not be followed by a new key.
+            try checkUnlocked()
+            return try await signer.generateKey(algorithm: algorithm)
+        }
     }
 
     public func sign(keyId: String, payload: Data, algorithm: String) async throws -> Data {
@@ -270,7 +307,10 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         var keys = try await signer.listKeys()
         if keys.isEmpty || freshKey {
             // Auto-generate a key for VCI proof-of-possession
-            let newKeyId = try await signer.generateKey(algorithm: "ES256")
+            let newKeyId = try await keyGate.run {
+                try checkUnlocked()
+                return try await signer.generateKey(algorithm: "ES256")
+            }
             keys = try await signer.listKeys()
             if freshKey {
                 keys = keys.filter { $0.keyId == newKeyId }
@@ -718,7 +758,8 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
     /// If the migration result is `.reEnrollmentRequired`, the wallet
     /// should trigger credential re-issuance with the issuer.
     public func migrateKey(keyId: String, targetPlugin: String) async throws -> MigrationResult {
-        return try await signer.migrateKey(keyId: keyId, targetPlugin: targetPlugin)
+        // Moves a key between plugins (creates one in the target): admitted through the key-operation gate.
+        return try await keyGate.run { try await signer.migrateKey(keyId: keyId, targetPlugin: targetPlugin) }
     }
 
     /// Return the security properties for a key, or nil if unavailable.

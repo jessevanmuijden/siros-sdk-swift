@@ -334,6 +334,16 @@ public final class WscdSelectionPolicy: @unchecked Sendable {
         writeTofuLocked([:])
     }
 
+    /// Clears every persisted choice: TOFU mappings, per-issuer overrides and
+    /// the global override. For the active account's storage; a full local
+    /// wipe also drops the rest through `SessionStoreProtocol.clearAll()`.
+    public func clearAll() {
+        lock.lock(); defer { lock.unlock() }
+        writeTofuLocked([:])
+        writeUserOverridesLocked([:])
+        sessionStore.wscdGlobalOverridePluginId = nil
+    }
+
     // MARK: - User override inspection/management (host-app settings UI)
 
     /// Sets (or overwrites) an explicit, deliberate per-(issuer,

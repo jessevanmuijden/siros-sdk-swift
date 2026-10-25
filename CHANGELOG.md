@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Account deletion: review fixes (#196).** The delete-begin response must carry a non-empty, well-formed
+  `allowCredentials` list (no silent fall-back to a discoverable prompt), and only `410 STEP_UP_EXPIRED` reads as an
+  expired step-up. The wipe now clears `AuthServerClient`'s token cache, reports failures of the credential store, the
+  Keychain session store and the account registry (new members `CredentialStore.eraseAll()`,
+  `SessionStoreProtocol.eraseAll()`, `AccountRegistry.eraseAll()`, with default implementations), refuses credential
+  writes from an issuance that was in flight when it began, and covers every distinct registered keystore, erasing the
+  signing keys held by `WscdKeystoreAdapter` (new `KeystoreManager.eraseKeyMaterial()`, default no-op; keys on an
+  external authenticator are left alone) before locking. `ASAuthorizationAuthProvider` passes the requested
+  `userVerification` to both assertion requests, and `LocalAuthProvider` assertions carry the UV flag (the key is gated
+  by `.userPresence`).
+  Write admission is one gate (`TeardownGate`): the wipe closes it synchronously before its first await, drains the
+  admitted writes, and it reopens only when a new session starts (login, register, resume). Credential saves,
+  presentation history writes (engine, DC API, proximity), flow completions and consent handlers all hold a ticket taken
+  before their first await and write through the gate; `WscdKeystoreAdapter` key creation is closed by the erase and
+  reopened by the new `KeystoreManager.reopenKeyOperations()`, not by an unlock.
+  The same gate fences the session-start paths and the rest of a completion: `login` and `unlockKeystore` commit their
+  keystore unlock, registry entry and `.ready` state as admitted writes, a flow completion's old-batch deletion and
+  refresh token / DPoP key capture are admitted writes with its final state and callbacks re-checked, and a presentation
+  record is reported as recorded only if the ticket is still valid after its awaits.
 - **Issuer trust is evaluated on a wallet-encrypted completion's DECRYPTED credentials.** Main's issuance trust gate
   read the engine's entries, which carry no value when the wallet decrypted the response itself, so an encrypted `mso_mdoc`
   issuance could never verify. The gate now runs after the entries are paired with what the wallet decrypted (the Kotlin
@@ -177,6 +196,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider is gone.
 
 ### Added
+- **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
+  deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey
+  assertion (step-up, valid 2 minutes, single use) and the typed confirmation
+  `DELETE` authorise the backend to erase the account. The assertion comes from
+  the wallet's `AuthProvider`, or from the optional `stepUp` closure. The call
+  does not throw for expected outcomes: it returns `DeleteAccountResult`
+  (`deleted`, `cleanupPending`, `operatorRequired`, `retryNeeded(reason)`,
+  `failed(failure)`). Only the first three wipe local state - keystore
+  contents and key material, credentials, presentation records and history,
+  every account's session store and Keychain items, the account registry, the
+  trust and credential-status caches and the WSCD selection policy - and the
+  wipe carries on past a failing step, reporting each in `LocalWipeReport`.
+  A `409 DELETION_INCOMPLETE`, a failed, expired or missing step-up, a wrong
+  confirmation, a rejected token or an unknown account keep local state.
+  Stores the host app owns (transaction log, Digital Credentials API registry,
+  file caches) are the host's to clear. Backed by
+  `BackendApiClient.deleteAccountBegin()` and
+  `deleteAccount(challengeId:credential:confirm:)`, which return an
+  `AccountDeletionResponse` per backend outcome, and by
+  `WscdSelectionPolicy.clearAll()`. The sample app's Devices screen offers it
+  with a typed confirmation.
 - **`ECDH-ES+A192KW` credential-response encryption** (as in the Kotlin SDK): a 24-byte key-encryption key from the
   Concat KDF, RFC 3394 unwrap, with every supported content encryption. go-jose v4.1.6 vectors (16 cases now).
 - **`IDVError.chipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
@@ -511,6 +551,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `providerError` with the code kept, all with the backend's `error` text as
   the message instead of the raw JSON body. A body without a code is unchanged.
 
+### Removed
+- **Breaking: `SirosWallet.deactivateWallet(reason:)` and
+  `setWalletInstanceStatus(instanceId:status:reason:)`, with
+  `BackendApiClient.revokeAllWalletInstances(reason:)` and
+  `setWalletInstanceStatus(instanceId:status:reason:)`, `DeactivationOutcome`,
+  `errorErasureIncomplete` and the `erasureRetryDelays` initializer parameter.**
+  They called `POST /user/session/instances/revoke-all` and
+  `PUT /user/session/instances/{id}/status`, which the backend no longer has.
+  Use `deleteAccount(confirmation:stepUp:)`. `listWalletInstances()` stays.
 ### Changed
 - **One TTL trust-decision cache for every `/v1/evaluate` call (replaces `TrustCache`).**
   Every trust evaluation (mdoc issuer/reader, engine-relayed verifier/issuer,

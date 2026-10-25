@@ -50,7 +50,13 @@ public final class KeystoreBackedCredentialStore: CredentialStore, @unchecked Se
     }
 
     public func clear() async {
+        try? await eraseAll()
+    }
+
+    /// A locked keystore holds nothing in memory; its persisted container is
+    /// the session store's to remove.
+    public func eraseAll() async throws {
         guard keystore.isUnlocked else { return }
-        try? await keystore.clearCredentials()
+        try await keystore.clearCredentials()
     }
 }
