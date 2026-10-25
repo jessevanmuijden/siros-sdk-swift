@@ -24,6 +24,12 @@ final class SampleAppAuthProvider: WscdAuthProvider, @unchecked Sendable {
     }
 
     func requestPin(pluginId: String) throws -> Data {
+        try requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin))
+    }
+
+    /// The SDK's PIN interface with a kind: it owns the choose/confirm/compare logic for a NEW PIN and calls this
+    /// once per prompt; this app only shows the sheet.
+    func requestPin(pluginId: String, request: PinRequest) throws -> Data {
         guard pluginId == "fido2" else {
             // Every non-FIDO2 plugin (currently just "r2ps") uses a fixed
             // debug-only test PIN in this sample app - matches the Kotlin
@@ -43,7 +49,7 @@ final class SampleAppAuthProvider: WscdAuthProvider, @unchecked Sendable {
                 semaphore.signal()
                 return
             }
-            viewModel.pendingFido2PinEntry = PendingFido2PinEntry(respond: { pin in
+            viewModel.pendingFido2PinEntry = PendingFido2PinEntry(request: request, respond: { pin in
                 // Clear first so the sheet dismisses on Submit too, not
                 // just Cancel - `dismissFido2PinEntry`'s onDismiss-driven
                 // call is then a harmless no-op, mirroring

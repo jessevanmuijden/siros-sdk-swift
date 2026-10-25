@@ -1,0 +1,110 @@
+// Copyright 2026 SIROS Foundation. BSD 2-Clause License.
+
+import XCTest
+@testable import SirosKeystore
+
+// The bridge to the UniFFI callback and error types exists on iOS only (the XCFramework has no other slice).
+#if os(iOS)
+import siros_wscd_managerFFI
+
+/// `AuthCallbackBridge.requestNewPin`, the `FfiWscdError.Pin` classification and `withPinRecovery`, driven by a
+/// fake app. No authenticator and no hardware: this is the SDK's bridge code only.
+final class UniFFIPinBridgeTests: XCTestCase {
+
+    private final class FakeProvider: WscdAuthProvider, @unchecked Sendable {
+        private let lock = NSLock()
+        private var answers: [String?]
+        private(set) var requests: [PinRequest] = []
+        init(_ answers: [String?]) { self.answers = answers }
+        func requestPin(pluginId: String) throws -> Data { try requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin)) }
+        func requestPin(pluginId: String, request: PinRequest) throws -> Data {
+            lock.lock(); defer { lock.unlock() }
+            requests.append(request)
+            guard !answers.isEmpty, let answer = answers.removeFirst() else { throw PinPromptCancelled() }
+            return Data(answer.utf8)
+        }
+        func requestWebauthnAssertion(pluginId: String, challenge: Data, rpId: String, allowedCredentials: [Data]) throws -> Data {
+            throw PinPromptCancelled()
+        }
+    }
+
+    func testRequestNewPinChoosesConfirmsAndReturnsTheSamePin() throws {
+        let provider = FakeProvider(["12", "123456", "123456"])
+        let bridge = AuthCallbackBridge(provider: provider)
+        let pin = try bridge.requestNewPin(pluginId: "fido2", minLength: 6)
+        XCTAssertEqual(pin, Data("123456".utf8))
+        XCTAssertEqual(provider.requests.map(\.kind), [.setNewPin(minLength: 6), .setNewPin(minLength: 6), .confirmNewPin])
+        XCTAssertEqual(provider.requests[1].retry, .tooShort(minLength: 6))
+    }
+
+    func testRequestPinAsksToEnterTheExistingPinAndCarriesAnOperationRetryOnce() throws {
+        let provider = FakeProvider(["1234", "1234"])
+        let bridge = AuthCallbackBridge(provider: provider)
+        bridge.setNextPromptRetry(.wrongPin)
+        _ = try bridge.requestPin(pluginId: "fido2")
+        _ = try bridge.requestPin(pluginId: "fido2")
+        XCTAssertEqual(provider.requests.map(\.kind), [.enterPin, .enterPin])
+        XCTAssertEqual(provider.requests[0].retry, .wrongPin)
+        XCTAssertNil(provider.requests[1].retry, "the retry reason is consumed by the first prompt")
+    }
+
+    func testCancellingTheNewPinPromptIsAnAuthCancelled() {
+        let bridge = AuthCallbackBridge(provider: FakeProvider([nil]))
+        XCTAssertThrowsError(try bridge.requestNewPin(pluginId: "fido2", minLength: 4)) { error in
+            guard case FfiWscdError.AuthCancelled = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testRunningOutOfNewPinAttemptsIsRecordedAndReplacesTheGenericCancel() throws {
+        let provider = FakeProvider(["1", "1", "1"])          // the signer holds its provider weakly: keep it alive
+        let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
+        XCTAssertThrowsError(try signer.withPinRecovery { bridge in
+            try bridge.requestNewPin(pluginId: "fido2", minLength: 4)
+        }) { XCTAssertEqual($0 as? WscdPinError, .tooManyAttempts) }
+    }
+
+    func testEveryFfiPinFailureIsClassified() {
+        func classify(_ reason: FfiPinFailure) -> PinFailureReason? {
+            UniFFISigner.classifyPinFailure(FfiWscdError.Pin(reason: reason, msg: ""))
+        }
+        XCTAssertEqual(classify(.tooShort(minLength: 6)), .tooShort(minLength: 6))
+        XCTAssertEqual(classify(.tooLong), .tooLong)
+        XCTAssertEqual(classify(.invalidEncoding), .invalidEncoding)
+        XCTAssertEqual(classify(.policyViolation), .policyViolation)
+        XCTAssertEqual(classify(.invalid), .invalid)
+        XCTAssertEqual(classify(.blocked), .blocked)
+        XCTAssertEqual(classify(.authBlocked), .authBlocked)
+        XCTAssertEqual(classify(.notSet), .notSet)
+        XCTAssertNil(UniFFISigner.classifyPinFailure(FfiWscdError.AuthCancelled(msg: "x")), "not a PIN failure")
+    }
+
+    func testAWrongPinRerunsTheOperationAndTheNextPromptSaysSo() throws {
+        let provider = FakeProvider(["0000", "1234"])
+        let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
+        var runs = 0
+        let result: String = try signer.withPinRecovery { bridge in
+            runs += 1
+            _ = try bridge.requestPin(pluginId: "fido2")
+            if runs == 1 { throw FfiWscdError.Pin(reason: .invalid, msg: "") }
+            return "signed"
+        }
+        XCTAssertEqual(result, "signed")
+        XCTAssertEqual(provider.requests.map(\.retry), [nil, .wrongPin])
+    }
+
+    func testABlockedKeyEndsTheOperationWithAClearError() throws {
+        let provider = FakeProvider([])
+        let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
+        XCTAssertThrowsError(try signer.withPinRecovery { _ -> Int in
+            throw FfiWscdError.Pin(reason: .blocked, msg: "")
+        }) { XCTAssertEqual($0 as? WscdPinError, .keyBlocked) }
+    }
+
+    func testAnScaSignNeverSetsAPin() {
+        let callback = OneShotPinAuthCallback(pin: Data("1234".utf8), fallback: nil)
+        XCTAssertThrowsError(try callback.requestNewPin(pluginId: "fido2", minLength: 4)) { error in
+            guard case FfiWscdError.AuthCancelled = error else { return XCTFail("\(error)") }
+        }
+    }
+}
+#endif

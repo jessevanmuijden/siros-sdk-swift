@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Set a PIN on a fresh FIDO2 authenticator (draft, needs siros-wscd-manager#119).** `WscdAuthProvider` gains
+  `requestPin(pluginId:request:)` with a `PinRequest` kind (`enterPin`, `setNewPin(minLength:)`, `confirmNewPin`) and an
+  optional retry reason; the default calls the existing `requestPin(pluginId:)`. The SDK, not the app, asks twice,
+  compares, enforces the minimum length in characters (NFC code points, as the authenticator counts them) and bounds the
+  prompts (3 entries of a new PIN, 3 re-runs of an operation). `FfiWscdError.Pin` is classified in one place: a rejected
+  new PIN re-prompts for a new one, a wrong PIN re-prompts to enter it, a blocked key or authenticator fails with
+  `WscdPinError` (localised `error_pin_*` strings). The sample app shows "Choose a PIN" with confirmation. Not verified on
+  hardware.
+
 ### Fixed
 - **Account deletion: review fixes (#196).** The delete-begin response must carry a non-empty, well-formed
   `allowCredentials` list (no silent fall-back to a discoverable prompt), and only `410 STEP_UP_EXPIRED` reads as an

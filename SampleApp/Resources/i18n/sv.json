@@ -202,7 +202,17 @@
     "pinDescription": "Ange PIN-koden för din FIDO2-säkerhetsnyckel.",
     "pinPlaceholder": "PIN",
     "submitButton": "Skicka",
-    "navTitle": "PIN krävs"
+    "navTitle": "PIN krävs",
+    "choosePinTitle": "Välj en PIN-kod för din säkerhetsnyckel",
+    "choosePinDescription": "Säkerhetsnyckeln har ingen PIN-kod än. Välj en (minst %1$d tecken); du får skriva den två gånger.",
+    "confirmPinTitle": "Bekräfta din PIN-kod",
+    "confirmPinDescription": "Skriv in PIN-koden du just valde igen.",
+    "retryTooShort": "PIN-koden är för kort: använd minst %1$d tecken.",
+    "retryTooLong": "PIN-koden är för lång.",
+    "retryInvalidEncoding": "PIN-koden innehåller tecken som nyckeln inte kan använda.",
+    "retryPolicy": "Nyckeln godtar inte den PIN-koden. Välj en annan.",
+    "retryMismatch": "De två PIN-koderna stämde inte överens. Försök igen.",
+    "retryWrongPin": "Fel PIN-kod. Försök igen."
   },
   "idv": {
     "howItWorks": "Så fungerar det",
