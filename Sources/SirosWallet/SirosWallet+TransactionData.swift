@@ -336,7 +336,12 @@ extension SirosWallet {
     /// `persistAndSyncKeystore`, which only logs it).
     func persistKeystoreOrThrow(generation: Int) async throws {
         guard keystore.isUnlocked else { throw TransactionLogError("the container is locked") }
-        try await exportAndSyncKeystore(generation: generation)
+        // Under `keystoreContainerLock`, like `persistAndSyncKeystore()`: an export must not interleave with an
+        // `addPasskey` register-finish that is pending (it would POST a container without the new PRF entry after the
+        // enrolment was accepted). Lock order is container lock, then the persist mutex, as there.
+        try await keystoreContainerLock.withLock {
+            try await exportAndSyncKeystore(generation: generation)
+        }
     }
 
     /// Throws when the operation was cancelled or the account it started under is no longer the active one.

@@ -315,6 +315,53 @@ extension SirosWallet {
         }
     }
 
+    /// PRF output for `credentialId` evaluated over `salt`, with the same
+    /// "authenticator cannot do PRF" error `recoverPrfFromPrivateData` gives.
+    func recoverPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput {
+        do {
+            return try await authProvider.getPrfOutput(credentialId: credentialId, salt: salt)
+        } catch {
+            throw SirosError.wallet(
+                message: "PRF not supported by authenticator — cannot decrypt wallet data",
+                underlying: error
+            )
+        }
+    }
+
+    /// The `PrfKeyInfo` entry of `credentialId` in `privateData`, or nil when the
+    /// container is empty, unreadable or has no entry for it.
+    func ownPrfKeyInfo(credentialId: Data, in privateData: Data) -> PrfKeyInfo? {
+        guard !privateData.isEmpty, !credentialId.isEmpty,
+              let container = try? EncryptedContainer.parse(privateData) else { return nil }
+        return container.prfKeys.first { $0.credentialId == credentialId }
+    }
+
+    /// The container's ANONYMOUS (empty-`credentialId`) `PrfKeyInfo` entry -
+    /// the shape `register()`'s first-time-setup container used to leave the
+    /// ORIGINAL passkey's own entry in, before it started calling
+    /// `keystore.setCredentialId` right after (review finding - see
+    /// `JweKeystore.setCredentialId`'s doc comment). `ownPrfKeyInfo` can never
+    /// match such an entry by credential ID (it has none), so without this a
+    /// login/unlock with the original passkey falls through to whatever the
+    /// session store happens to hold - which, after a second passkey has
+    /// logged in since, is the SECOND passkey's HKDF salt, not the original's.
+    ///
+    /// Never a guess for any other credential: `credentialId` must be
+    /// independently verified as the account's own original passkey - the
+    /// FIRST entry in `account.passkeys` (`register()` always records it
+    /// first; `addPasskey()` only ever appends) - and the container must have
+    /// EXACTLY one such anonymous entry (more than one is ambiguous, and
+    /// "which one is THE original" is not answerable from the container
+    /// alone). Nil whenever any of that doesn't hold.
+    func anonymousOriginalPrfKeyInfo(credentialId: Data, account: CachedAccount?, in privateData: Data) -> PrfKeyInfo? {
+        guard !privateData.isEmpty, !credentialId.isEmpty,
+              let account, account.passkeys.first?.credentialId == Self.b64UrlEncode(credentialId),
+              let container = try? EncryptedContainer.parse(privateData) else { return nil }
+        let anonymous = container.prfKeys.filter(\.credentialId.isEmpty)
+        guard anonymous.count == 1 else { return nil }
+        return anonymous.first
+    }
+
     /// The pure lookup half of `recoverPrfFromPrivateData` - parses
     /// `privateData` and finds the `PrfKeyInfo` entry for `credentialId`, with
     /// no authenticator ceremony involved. Split out so it's directly
@@ -356,10 +403,37 @@ extension SirosWallet {
         cachedAccount: CachedAccount?
     ) async throws -> LoginPrfResolution {
         if let knownPrfOutput = assertion.prfOutput, let knownPrfSalt = assertion.prfSalt {
-            let hkdfSalt = sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
+            // An account with several passkeys has one PRF entry (with its own
+            // HKDF salt) per passkey, and the keystore picks the entry by that
+            // salt; the session store and the account cache only hold the
+            // first passkey's. The entry of the passkey that just logged in
+            // wins - its own entry if tagged by credential id, or (a
+            // container from before `register()` started tagging the
+            // original passkey's entry - see `JweKeystore.setCredentialId`'s
+            // doc comment) the verified anonymous entry.
+            let own = ownPrfKeyInfo(credentialId: assertion.credentialId, in: privateData)
+                ?? anonymousOriginalPrfKeyInfo(credentialId: assertion.credentialId, account: cachedAccount, in: privateData)
+            // The salt the PRF output was evaluated with must be the one the
+            // matched entry was created with. A passkey added on another
+            // device has no cache entry here, and `performPasskeyAssertion`
+            // then falls back to this installation's stored salt - the FIRST
+            // passkey's - so the output is for the wrong input even though
+            // the entry's HKDF parameters are right. Evaluate again with the
+            // entry's own salt, and report it as recovered so the account
+            // cache is healed by the successful login.
+            if let own, !own.prfSalt.isEmpty, own.prfSalt != knownPrfSalt {
+                let output = try await recoverPrfOutput(credentialId: assertion.credentialId, salt: own.prfSalt)
+                return LoginPrfResolution(
+                    prfOutput: output, prfSalt: own.prfSalt,
+                    hkdfSalt: own.hkdfSalt, hkdfInfo: own.hkdfInfo, recoveredSalt: own.prfSalt
+                )
+            }
+            let hkdfSalt = own?.hkdfSalt
+                ?? sessionStore.hkdfSalt.flatMap { Self.b64Decode($0) }
                 ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfSalt) }
                 ?? Self.randomBytes(32)
-            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) }
+            let hkdfInfo = own?.hkdfInfo
+                ?? sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) }
                 ?? cachedAccount.flatMap { Self.b64Decode($0.hkdfInfo) }
                 ?? Data(Self.hkdfInfo.utf8)
             return LoginPrfResolution(
@@ -434,10 +508,22 @@ extension SirosWallet {
         storedContainer: Data
     ) async throws -> UnlockKeystorePrfResolution {
         if let knownPrfOutput = assertion.prfOutput {
-            guard let hkdfSalt = sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
+            // See `resolveLoginPrf`: the logging-in passkey's own entry wins,
+            // including the verified-anonymous-entry fallback.
+            let own = ownPrfKeyInfo(credentialId: assertion.credentialId, in: storedContainer)
+                ?? anonymousOriginalPrfKeyInfo(credentialId: assertion.credentialId, account: assertion.cachedAccount, in: storedContainer)
+            // See `resolveLoginPrf`: re-evaluate PRF with the entry's own salt
+            // when the output was derived from a different one.
+            if let own, !own.prfSalt.isEmpty, let usedSalt = assertion.prfSalt, own.prfSalt != usedSalt {
+                let output = try await recoverPrfOutput(credentialId: assertion.credentialId, salt: own.prfSalt)
+                return UnlockKeystorePrfResolution(
+                    prfOutput: output, hkdfSalt: own.hkdfSalt, hkdfInfo: own.hkdfInfo, recoveredSalt: own.prfSalt
+                )
+            }
+            guard let hkdfSalt = own?.hkdfSalt ?? sessionStore.hkdfSalt.flatMap({ Self.b64Decode($0) }) else {
                 throw SirosError.keystore(message: "Missing HKDF salt")
             }
-            let hkdfInfo = sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) } ?? Data(Self.hkdfInfo.utf8)
+            let hkdfInfo = own?.hkdfInfo ?? sessionStore.hkdfInfo.flatMap { Self.b64Decode($0) } ?? Data(Self.hkdfInfo.utf8)
             return UnlockKeystorePrfResolution(prfOutput: knownPrfOutput, hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo, recoveredSalt: nil)
         }
         let recovered = try await recoverPrfFromPrivateData(
@@ -476,7 +562,14 @@ extension SirosWallet {
             hkdfSalt: Self.b64Encode(hkdfSalt),
             hkdfInfo: Self.b64Encode(hkdfInfo)
         )
-        account.passkeys = (existing?.passkeys.filter { $0.credentialId != credIdStr } ?? []) + [healedPasskey]
+        // Updated IN PLACE when the passkey is already cached: its position is meaningful (the verified-anonymous-entry
+        // fallback treats the FIRST cached passkey as the account's original one), so removing and appending it
+        // would move a healed original passkey behind the passkeys added since.
+        if let index = account.passkeys.firstIndex(where: { $0.credentialId == credIdStr }) {
+            account.passkeys[index].prfSalt = healedPasskey.prfSalt
+        } else {
+            account.passkeys.append(healedPasskey)
+        }
         accountRegistry.upsertAccount(account)
     }
 }

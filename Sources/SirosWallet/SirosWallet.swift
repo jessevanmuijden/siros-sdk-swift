@@ -247,6 +247,25 @@ public final class SirosWallet: @unchecked Sendable {
     // convention.
     let keystore: KeystoreManager
 
+    /// Serializes operations that export, modify, or push the keystore's
+    /// encrypted container to the backend - `persistAndSyncKeystore()` and
+    /// `addPasskey()`'s prepare/finish/commit sequence, specifically - so
+    /// they cannot interleave.
+    ///
+    /// Without this, `addPasskey()` can accept a new PRF entry from the
+    /// backend (its `register-finish` succeeds) while the entry is not yet
+    /// `commitPrfKey`'d into the live container: a concurrent
+    /// `persistAndSyncKeystore()` (from an unrelated issuance, presentation,
+    /// or credential deletion running at the same time) would export the
+    /// container as it stood BEFORE the commit and push it unconditionally -
+    /// silently erasing the just-accepted passkey entry if that push lands on
+    /// the server after `addPasskey`'s own write. Not `private`: needed from
+    /// `SirosWallet+Lifecycle.swift` and `SirosWallet+AddPasskey.swift`, same
+    /// cross-file-extension-access reason as `keystore` above.
+    let keystoreContainerLock = AsyncLock()
+    /// Serialises `addPasskey` ceremonies: see `addPasskey`.
+    let addPasskeyCeremonyMutex = AsyncMutex()
+
     /// WSCD hardware-key lifecycle (enroll/rotate/destroy) and
     /// additional-plugin registration (FIDO2 rawSign, R2PS remote HSM) -
     /// `nil` unless `keystore` is WSCD-backed (see `WscdKeystoreAdapter`).
@@ -523,7 +542,7 @@ public final class SirosWallet: @unchecked Sendable {
     // `SirosWallet+Engine.swift` need it too - same cross-file-extension-
     // access reason as `keystore` above.
     var engineTasks: [Task<Void, Never>] = []
-    private var _presentationHistory: [PresentationRecord] = []
+    var _presentationHistory: [PresentationRecord] = []
     /// Stores trust evaluation results keyed by flow ID for use in credential selection UI.
     // Not `private`: `SirosWallet+Engine.swift` needs it too - same
     // cross-file-extension-access reason as `keystore` above.
@@ -614,6 +633,13 @@ public final class SirosWallet: @unchecked Sendable {
     /// ``sessionGeneration``. Cleared by `bumpSessionGeneration()`.
     var reloginDoneForGeneration: Bool = false
 
+    /// Advanced by `invalidateEnrollment()` BEFORE anything replaces the
+    /// session scope or the keystore contents (login, register, resume,
+    /// unlock). `sessionGeneration` is bumped only after those complete, so an
+    /// `addPasskey` response landing in between would still pass a generation
+    /// check; this closes that window. Always read and written under `lock`.
+    var enrollmentEpoch: UInt64 = 0
+
     /// Set by `destroy()`. The state is left untouched there (a destroyed
     /// wallet is not a logged-out one), so without this a reauthentication
     /// signal from a task still unwinding could pass the guard and log back in
@@ -644,46 +670,6 @@ public final class SirosWallet: @unchecked Sendable {
         return _presentationHistory
     }
 
-    /// Record a new presentation: adds it to the in-memory history and
-    /// persists it into the encrypted container (privatedata-spec's
-    /// `S.presentations[]`) so `CredentialUtils.groupForDisplay`'s
-    /// remaining-copies count survives an app restart instead of resetting
-    /// to the full batch size every time - mirrors `deleteCredential`'s
-    /// persist-after-mutation pattern.
-    // Not `private`: `SirosWallet+DCAPI.swift` and `SirosWallet+Engine.swift`
-    // need it too - same cross-file-extension-access reason as `keystore`
-    // above.
-    /// - Parameter token: captured by the caller before its first `await`. The
-    ///   record is applied only while it is current; the check, the in-memory
-    ///   insert and the keystore write are one admitted write, which a wipe
-    ///   closes and drains, so a handler that resumed after an account deletion
-    ///   records nothing. Returns false when it was refused.
-    @discardableResult
-    func recordPresentation(_ record: PresentationRecord, token: TeardownToken) async -> Bool {
-        lock.lock()
-        let current = isCurrentLocked(token)
-        lock.unlock()
-        guard current else { return false }
-        let applied: Bool? = await teardownGate.admit(token.ticket) { [self] in
-            lock.lock()
-            guard isCurrentLocked(token) else { lock.unlock(); return false }
-            _presentationHistory.insert(record, at: 0)
-            lock.unlock()
-            if keystore.isUnlocked,
-               let data = try? JSONEncoder().encode(record), let raw = String(data: data, encoding: .utf8) {
-                try? await keystore.savePresentationRecord(id: record.id, json: raw)
-            }
-            return true
-        }
-        guard applied == true else { return false }
-        if keystore.isUnlocked { await persistAndSyncKeystore() }
-        await checkRenewThresholds(consumedCredentialIds: record.credentialIds)
-        // The awaits above can finish after an account wipe: a record that was admitted but then wiped must not be
-        // reported as recorded (the callers return a signed presentation only for a recorded one).
-        lock.lock(); let stillCurrent = isCurrentLocked(token); lock.unlock()
-        return stillCurrent
-    }
-
     /// Per-credential-configuration-id override for
     /// `CredentialUtils.renewThreshold` (plan §4.3: "near-expiry threshold
     /// is a per-credential user preference," not a global constant). Not
@@ -697,18 +683,6 @@ public final class SirosWallet: @unchecked Sendable {
     // Phase 2) - kept together with the rest of that plan's logic; this
     // stored property itself has to stay here since Swift extensions can't
     // add stored properties to a type.
-
-    /// Reload presentation history from the encrypted container after unlock.
-    private func reloadPresentationHistory() async {
-        guard let allRaw = try? await keystore.getAllPresentationRecords() else { return }
-        let decoder = JSONDecoder()
-        let records = allRaw.values.compactMap { raw in
-            try? decoder.decode(PresentationRecord.self, from: Data(raw.utf8))
-        }.sorted(by: { $0.timestamp > $1.timestamp })
-        lock.lock()
-        _presentationHistory = records
-        lock.unlock()
-    }
 
     /// Factory for creating engine sessions (injectable for testing).
     public static var createEngineSession: @Sendable (String, String) -> WalletEngineSession = { baseUrl, tenantId in
@@ -1010,6 +984,8 @@ public final class SirosWallet: @unchecked Sendable {
                 displayName: displayName
             )
 
+            // The keystore is about to hold a new account's contents.
+            invalidateEnrollment()
             // prfSalt must land in the new PrfKeyInfo, not a random value.
             try await keystore.unlock(
                 prfOutput: prfOutput.first,
@@ -1018,6 +994,19 @@ public final class SirosWallet: @unchecked Sendable {
                 hkdfInfo: hkdfInfo,
                 prfSalt: prfSalt
             )
+            // The first-time-setup container `unlock` just created has its
+            // PRF entry's `credentialId` empty (it has no credential to put
+            // there yet - see `JweKeystore.unlock`'s first-use branch).
+            // Without this, the ORIGINAL passkey's own entry can never be
+            // found by credential ID again (`ownPrfKeyInfo`/`setCredentialId`'s
+            // doc comment): after an `addPasskey()` adds a second passkey and
+            // logs in with it, the session's cached HKDF salt becomes the
+            // SECOND passkey's; resuming and unlocking with the ORIGINAL
+            // passkey would then find no entry matching its real credential
+            // ID, fall back to the session's (second passkey's) salt, and
+            // fail to decrypt. `setCredentialId` is a no-op once the entry
+            // already has one, so this is safe to call unconditionally here.
+            keystore.setCredentialId(result.credentialId)
 
             let encryptedContainer = try await keystore.exportEncryptedContainer()
 
@@ -1136,6 +1125,9 @@ public final class SirosWallet: @unchecked Sendable {
             // into the active scope. The registry's active account is only
             // moved once the unlock has succeeded.
             let accountId = "\(config.tenantId):\(session.uuid)"
+            // Before the scope moves: an in-flight `addPasskey` for the
+            // previous account must not be applied to this one.
+            invalidateEnrollment()
             try await admittedCommit(ticket) {
                 sessionStore.activeAccountId = accountId
                 // Now the server has named the account, so a refusal from anything
@@ -1303,6 +1295,7 @@ public final class SirosWallet: @unchecked Sendable {
         await reopenForNewSession()
         // Restore the active account ID so the session store reads the right data
         let resumingAccountId = accountRegistry.activeAccountId
+        invalidateEnrollment()
         if let resumingAccountId {
             sessionStore.activeAccountId = resumingAccountId
         }
@@ -1380,6 +1373,7 @@ public final class SirosWallet: @unchecked Sendable {
             let storedContainer = Data(storedJwe.utf8)
             let resolved = try await resolveUnlockKeystorePrf(assertion: assertion, storedContainer: storedContainer)
 
+            invalidateEnrollment()
             try await commitKeystoreUnlock(
                 ticket: ticket, container: storedContainer, resolved: resolved,
                 assertion: assertion, userId: userId, displayName: displayName

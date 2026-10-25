@@ -20,6 +20,15 @@ public protocol KeystoreManager: AnyObject, Sendable {
     /// something and then report success must check this first. Defaults to nil.
     var unsupportedSchemaVersion: UnsupportedSchemaVersion? { get }
 
+    /// Whether the user has ONBOARDED the WSCD plugin `pluginId` (e.g. "fido2"):
+    /// enrolled a token/key with it, so there is something for a PIN to unlock.
+    /// Checked by `WscdSelectionPolicy` BEFORE any key generation, so a user with no
+    /// onboarded token of the required assurance fails up front with a clear error
+    /// instead of being asked for a PIN that nothing could use. Side-effect free.
+    /// A genuine protocol requirement (defaulted below to `true` except for
+    /// onboarding-required plugins, which a keystore must vouch for itself) so it dispatches dynamically through the existential.
+    func isWscdPluginOnboarded(pluginId: String) async -> Bool
+
     /// Unlock the keystore using PRF-derived key material.
     ///
     /// - Parameters:
@@ -67,6 +76,51 @@ public protocol KeystoreManager: AnyObject, Sendable {
 
     /// Lock the keystore, clearing key material from memory.
     func lock()
+
+    /// Wrap this unlocked keystore's main key for an additional passkey (the
+    /// web wallet's `keystore.addPrf`) without changing anything yet.
+    ///
+    /// Returns the container that includes the new passkey's PRF entry, to be
+    /// sent to the backend. Only once the backend accepted it is
+    /// `commitPrfKey(_:)` called, so a refused enrolment leaves the keystore as
+    /// it was. The main key and the wallet state are unchanged: the other
+    /// passkeys keep working. `hkdfSalt` is the new entry's own; a login with
+    /// that passkey must derive with it (it is the entry the keystore picks by
+    /// HKDF salt).
+    ///
+    /// A genuine requirement, not a defaulted convenience: a keystore that
+    /// cannot do this must say so rather than let an enrolment succeed with a
+    /// container the new passkey cannot open (the default throws).
+    ///
+    /// - Throws: `KeystoreError.locked`, or `.invalidParameter` when the
+    ///   container already has an entry for `credentialId` or this keystore
+    ///   cannot add one.
+    func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey
+
+    /// Make the `prepared` PRF entry part of this keystore's container, once
+    /// the backend stored it.
+    func commitPrfKey(_ prepared: PreparedPrfKey) async throws
+
+    /// Give the ORIGINAL (first-time-setup) PRF entry its real credential ID,
+    /// once one exists to give it - see `JweKeystore.setCredentialId`'s doc
+    /// comment for why that entry is created with an empty ID in the first
+    /// place and what goes wrong (a second passkey's HKDF salt masquerading
+    /// as the original's on resume) if this is never called.
+    ///
+    /// A genuine protocol REQUIREMENT, not merely a defaulted extension
+    /// method - same reason as `unlock(prfOutput:encryptedContainer:hkdfSalt:
+    /// hkdfInfo:prfSalt:)` above: `SirosWallet` calls this through a
+    /// `KeystoreManager` existential, where a conformer's own non-protocol
+    /// method is invisible. Default-implemented as a no-op below for a
+    /// keystore with no such concept (e.g. `WscdKeystoreAdapter`, which
+    /// doesn't support `preparePrfKey` either).
+    func setCredentialId(_ credentialId: Data)
 
     /// Irreversibly erase signing keys this keystore holds outside its
     /// credential container, and throw if any could not be erased. An account
@@ -377,6 +431,24 @@ public extension KeystoreManager {
         try await generateProof(audience: audience, nonce: nonce, freshKey: false)
     }
 
+    /// Default: this keystore cannot add a passkey to its container.
+    func preparePrfKey(
+        credentialId: Data,
+        prfOutput: Data,
+        prfSalt: Data,
+        hkdfSalt: Data,
+        hkdfInfo: Data
+    ) async throws -> PreparedPrfKey {
+        throw KeystoreError.invalidParameter("This keystore cannot add a passkey to its container")
+    }
+
+    func commitPrfKey(_ prepared: PreparedPrfKey) async throws {
+        throw KeystoreError.invalidParameter("This keystore cannot add a passkey to its container")
+    }
+
+    /// Default: nothing to do. See the protocol requirement's doc comment.
+    func setCredentialId(_ credentialId: Data) {}
+
     /// Default for a conformer written before the `prfSalt` parameter
     /// existed: forwards unchanged, so a first-time-setup container it
     /// creates still gets *some* `PrfKeyInfo.prfSalt` (whatever its own
@@ -529,6 +601,34 @@ public struct KeyInfo: Sendable, Equatable {
     }
 }
 
+/// A container carrying a new passkey's PRF entry that has not been committed
+/// to the keystore yet; see `KeystoreManager.preparePrfKey`.
+public struct PreparedPrfKey: Sendable {
+    /// The serialized container to store on the backend.
+    public let container: Data
+    /// The credential the entry is for.
+    public let credentialId: Data
+    /// The entry itself; nil for a keystore that has its own way to commit.
+    let entry: PrfKeyInfo?
+    /// The unlocked session of the preparing keystore this was prepared in,
+    /// checked on commit; see `JweKeystore.unlockToken`.
+    let ownerToken: UUID?
+
+    public init(container: Data, credentialId: Data) {
+        self.container = container
+        self.credentialId = credentialId
+        self.entry = nil
+        self.ownerToken = nil
+    }
+
+    init(container: Data, credentialId: Data, entry: PrfKeyInfo, ownerToken: UUID) {
+        self.container = container
+        self.credentialId = credentialId
+        self.entry = entry
+        self.ownerToken = ownerToken
+    }
+}
+
 /// Keystore-related errors.
 public enum KeystoreError: Error, Sendable {
     case locked
@@ -560,6 +660,14 @@ extension KeystoreError: LocalizedError {
 
 extension KeystoreManager {
     public var unsupportedSchemaVersion: UnsupportedSchemaVersion? { nil }
+
+    /// Fails closed for plugins with an enrollment step: a keystore that does not
+    /// itself implement the check (e.g. the default `JweKeystore`) has no knowledge of
+    /// an enrolled token, so it must not vouch for one. Plugins without onboarding
+    /// (software keys) are always fine.
+    public func isWscdPluginOnboarded(pluginId: String) async -> Bool {
+        !WscdPluginCapabilities.onboardingRequiredPluginIds.contains(pluginId)
+    }
 
     public func signVpToken(
         credential: String,

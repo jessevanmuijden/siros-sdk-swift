@@ -507,6 +507,11 @@ final class WalletViewModel: ObservableObject {
     /// Why the last `deleteAccount` did not finish, shown in the delete
     /// sheet; nil after a success or before the first attempt.
     @Published var deleteAccountError: String?
+    /// Adding a passkey (`SirosWallet.addPasskey`): in flight, and what the
+    /// last attempt answered (an error or the confirmation).
+    @Published var addingPasskey = false
+    @Published var addPasskeyError: String?
+    @Published var addPasskeyDone: String?
 
     func openWscaDeveloper() {
         showWscaDeveloper = true

@@ -31,6 +31,95 @@ final class WscdSelectionPolicyTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    // Onboarding: no onboarded token must fail before anything can prompt.
+    func testNotOnboardedOnlySufficientPluginThrowsWscdNotOnboarded() async {
+        let policy = makePolicy()
+        do {
+            _ = try await policy.resolve(
+                issuer: "https://issuer.example.com",
+                credentialType: "urn:eu.europa.ec.eudi:pid:1",
+                requiredTier: "iso_18045_high",
+                availablePluginIds: ["softkey", "fido2"],
+                isPluginOnboarded: { $0 != "fido2" }
+            )
+            XCTFail("expected WscdSelectionError.wscdNotOnboarded")
+        } catch WscdSelectionError.wscdNotOnboarded(_, _, let tier, let notOnboarded) {
+            XCTAssertEqual(tier, "iso_18045_high")
+            XCTAssertEqual(notOnboarded, ["fido2"])
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
+    /// Each cached source is exercised on its own (a per-issuer override would
+    /// otherwise return before TOFU/mapping were ever consulted).
+    private func assertNotOnboardedPluginNotResolved(
+        _ policy: WscdSelectionPolicy, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        do {
+            _ = try await policy.resolve(
+                issuer: "https://issuer.example.com", credentialType: "pid",
+                requiredTier: "iso_18045_high", availablePluginIds: ["fido2"],
+                isPluginOnboarded: { _ in false }
+            )
+            XCTFail("a not-onboarded plugin must not be resolved from a cached choice", file: file, line: line)
+        } catch WscdSelectionError.wscdNotOnboarded {
+        } catch {
+            XCTFail("unexpected error \(error)", file: file, line: line)
+        }
+    }
+
+    func testNotOnboardedPluginIgnoresTofu() async throws {
+        let policy = makePolicy()
+        // Seed TOFU by a normal (onboarded) resolution, and prove it is seeded.
+        _ = try await policy.resolve(issuer: "https://issuer.example.com", credentialType: "pid",
+                                     requiredTier: "iso_18045_high", availablePluginIds: ["fido2"])
+        XCTAssertEqual(policy.currentTofuMapping()["https://issuer.example.com|pid"], "fido2")
+        await assertNotOnboardedPluginNotResolved(policy)
+    }
+
+    func testNotOnboardedPluginIgnoresDefaultMapping() async {
+        let policy = makePolicy(defaultMapping: ["https://issuer.example.com|pid": "fido2"])
+        await assertNotOnboardedPluginNotResolved(policy)
+    }
+
+    func testNotOnboardedPluginIgnoresUserOverride() async {
+        let policy = makePolicy()
+        policy.setUserOverride(issuer: "https://issuer.example.com", credentialType: "pid", pluginId: "fido2")
+        await assertNotOnboardedPluginNotResolved(policy)
+    }
+
+    func testNotOnboardedPluginIgnoresGlobalOverride() async {
+        let policy = makePolicy()
+        policy.setGlobalUserOverride(pluginId: "fido2")
+        await assertNotOnboardedPluginNotResolved(policy)
+    }
+
+    func testNotOnboardedInsufficientPluginDoesNotMaskNoEligible() async {
+        // An insufficient plugin not being onboarded is irrelevant: still a tier miss.
+        let policy = makePolicy()
+        do {
+            _ = try await policy.resolve(
+                issuer: "i", credentialType: "t", requiredTier: "iso_18045_high",
+                availablePluginIds: ["softkey"], isPluginOnboarded: { _ in false }
+            )
+            XCTFail("expected noEligiblePlugin")
+        } catch WscdSelectionError.noEligiblePlugin {
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
+    func testOnboardedPluginsStillResolveWhenAnotherIsNotOnboarded() async throws {
+        // r2ps and fido2 both high; fido2 not onboarded -> r2ps auto-picked, no prompt.
+        let policy = makePolicy()
+        let picked = try await policy.resolve(
+            issuer: "i", credentialType: "t", requiredTier: "iso_18045_high",
+            availablePluginIds: ["fido2", "r2ps"], isPluginOnboarded: { $0 != "fido2" }
+        )
+        XCTAssertEqual(picked, "r2ps")
+    }
+
     // 4. TOFU hit.
     func testTofuHitReusesPersistedChoiceWithoutPrompting() async throws {
         let store = InMemorySessionStore()

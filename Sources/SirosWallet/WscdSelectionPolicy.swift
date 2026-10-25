@@ -87,6 +87,13 @@ public enum WscdSelectionError: Error, Sendable, Equatable {
     /// never silently proceed with a possibly-insufficient plugin), so both
     /// are handled identically by every caller of `resolve`.
     case ambiguousChoiceNotMade(issuer: String, credentialType: String, requiredTier: String)
+    /// One or more registered plugins' nominal tier meets the requirement, but
+    /// the user has not onboarded any of them (e.g. no FIDO2 token has been
+    /// enrolled), so nothing can be used. Thrown BEFORE any key generation and
+    /// therefore before any PIN prompt - the user is told there is no applicable
+    /// WSCD instead of being asked for a PIN with no token behind it.
+    /// `notOnboardedPluginIds` lists the sufficient-but-not-onboarded plugins (sorted).
+    case wscdNotOnboarded(issuer: String, credentialType: String, requiredTier: String, notOnboardedPluginIds: [String])
 }
 
 extension WscdSelectionError: LocalizedError {
@@ -99,6 +106,10 @@ extension WscdSelectionError: LocalizedError {
             return "Multiple authenticators meet the required key-storage tier " +
                 "(\(requiredTier)) for credential type \(credentialType) from issuer \(issuer), " +
                 "but no choice was made"
+        case .wscdNotOnboarded(let issuer, let credentialType, let requiredTier, let notOnboarded):
+            return "No applicable WSCD available: no authenticator has been set up for key-storage tier " +
+                "\(requiredTier) (\(notOnboarded.joined(separator: ", "))), needed for " +
+                "credential type \(credentialType) from issuer \(issuer)"
         }
     }
 }
@@ -142,6 +153,14 @@ extension WscdSelectionError: LocalizedError {
 /// 8. Zero registered plugins meet the requirement -> throws
 ///    `WscdSelectionError.noEligiblePlugin` (nothing usable to fall back to
 ///    at all).
+///
+/// Onboarding (steps 2-8): a plugin the user has not onboarded
+/// (`isPluginOnboarded` - e.g. no FIDO2 token enrolled) is treated as if it
+/// were not registered, at EVERY step including overrides/TOFU/default
+/// mapping. If that leaves nothing while some sufficient plugin was merely
+/// not onboarded, `WscdSelectionError.wscdNotOnboarded` is thrown - before any
+/// key generation, hence before any PIN prompt. Fails closed: "cannot tell"
+/// is "not onboarded".
 // `@unchecked Sendable`: every mutable access (the persisted-mapping
 // read-modify-write sequences) is guarded by `lock` internally - see its
 // doc comment - matching this codebase's existing convention for types in
@@ -202,13 +221,25 @@ public final class WscdSelectionPolicy: @unchecked Sendable {
         issuer: String,
         credentialType: String,
         requiredTier: String?,
-        availablePluginIds: [String]
+        availablePluginIds: [String],
+        isPluginOnboarded: @Sendable (String) async -> Bool = { _ in true }
     ) async throws -> String? {
         // 1. No declared requirement - no-op.
         guard let requiredTier else { return nil }
 
         let key = Self.tofuKey(issuer: issuer, credentialType: credentialType)
-        let registered = Set(availablePluginIds)
+
+        // Onboarding is only asked about plugins that could otherwise be
+        // chosen (tier-sufficient), so a software plugin never costs a probe
+        // and an insufficient-and-not-onboarded one is not misreported as the
+        // cause. Not-onboarded plugins are dropped from everything below.
+        var present: [String] = []
+        var notOnboardedSufficient: [String] = []
+        for id in Set(availablePluginIds) {
+            guard isSufficient(id, for: requiredTier) else { present.append(id); continue }
+            if await isPluginOnboarded(id) { present.append(id) } else { notOnboardedSufficient.append(id) }
+        }
+        let registered = Set(present)
 
         // 2. Per-(issuer, credentialType) user override - an explicit,
         // deliberate preference, checked first because it's the most
@@ -256,7 +287,7 @@ public final class WscdSelectionPolicy: @unchecked Sendable {
         // guaranteed stable) so the host's choice-prompt UI sees the same
         // ordering across calls instead of one that varies with dictionary
         // iteration order.
-        let eligible = availablePluginIds.filter { isSufficient($0, for: requiredTier) }.sorted()
+        let eligible = present.filter { isSufficient($0, for: requiredTier) }.sorted()
 
         if eligible.count == 1 {
             persistTofu(key: key, pluginId: eligible[0])
@@ -291,7 +322,14 @@ public final class WscdSelectionPolicy: @unchecked Sendable {
             }
         }
 
-        // Zero eligible.
+        // Zero eligible. If sufficient plugins exist but none is onboarded, say so
+        // distinctly (before any PIN prompt) rather than a generic tier miss.
+        if !notOnboardedSufficient.isEmpty {
+            throw WscdSelectionError.wscdNotOnboarded(
+                issuer: issuer, credentialType: credentialType, requiredTier: requiredTier,
+                notOnboardedPluginIds: notOnboardedSufficient.sorted()
+            )
+        }
         throw WscdSelectionError.noEligiblePlugin(issuer: issuer, credentialType: credentialType, requiredTier: requiredTier)
     }
 
