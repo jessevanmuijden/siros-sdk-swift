@@ -16,8 +16,8 @@ import SwiftDraw
 ///
 /// Supported: `svg` (root only), `g`, `defs`, `title`, `desc`, `path`, `rect`,
 /// `circle`, `ellipse`, `line`, `polyline`, `polygon`, `linearGradient`,
-/// `radialGradient`, `stop`, `clipPath`; geometry, paint (colour, `none`,
-/// `currentColor`, `url(#id)`), stroke, opacity, transform, `clip-path` and
+/// `radialGradient`, `stop`; geometry, paint (colour, `none`,
+/// `currentColor`, `url(#id)` on shapes only), stroke, opacity, transform and
 /// gradient attributes with validated grammar; `#fragment` hrefs on gradients.
 /// Not supported: `style` attributes and `<style>`, text/fonts, `use`,
 /// `image`, `pattern`, `mask`, `filter`, `marker`, `switch`, `symbol`,
@@ -26,13 +26,18 @@ import SwiftDraw
 enum SvgActiveContentGuard {
     static let allowedElements: Set<String> = [
         "svg", "g", "defs", "title", "desc", "path", "rect", "circle", "ellipse", "line", "polyline",
-        "polygon", "linearGradient", "radialGradient", "stop", "clipPath",
+        "polygon", "linearGradient", "radialGradient", "stop",
     ]
 
     /// Bounds on document complexity (the byte cap alone allows ~25k elements).
     static let maxElements = 5000
-    /// Gradient stops x paint uses (a few hundred KB of work at most).
-    static let maxGradientWork = 1_000_000
+    /// Flat caps instead of per-use accounting: at most this many gradients and stops in a document
+    /// (gradient reuse by many shapes is then bounded by the element cap times 64 stops).
+    static let maxGradients = 8
+    static let maxStops = 64
+    /// Shapes that may carry a `url(#id)` fill/stroke; everything else (g, svg, defs, ...) may not,
+    /// so no paint reference is ever inherited and none needs accounting.
+    static let paintTargets: Set<String> = ["path", "rect", "circle", "ellipse", "line", "polyline", "polygon"]
     static let maxDepth = 64
 
     /// Largest magnitude accepted for any number. SwiftDraw traps (Float to
@@ -171,12 +176,10 @@ enum SvgActiveContentGuard {
         "stroke-miterlimit": isNumber,
         "stroke-dasharray": { $0.trimmingCharacters(in: .whitespaces) == "none" || isLengthList($0) },
         "stroke-dashoffset": { lengthProblem($0) == nil },
-        "fill-rule": { isEnum($0, ["nonzero", "evenodd"]) }, "clip-rule": { isEnum($0, ["nonzero", "evenodd"]) },
+        "fill-rule": { isEnum($0, ["nonzero", "evenodd"]) },
         "opacity": isOpacity, "fill-opacity": isOpacity, "stroke-opacity": isOpacity, "stop-opacity": isOpacity,
-        "clip-path": { $0.trimmingCharacters(in: .whitespaces) == "none" || matches(paintUrlRe, $0.trimmingCharacters(in: .whitespaces)) },
         "display": { isEnum($0, ["inline", "none"]) },
         "gradientUnits": { isEnum($0, ["userSpaceOnUse", "objectBoundingBox"]) },
-        "clipPathUnits": { isEnum($0, ["userSpaceOnUse", "objectBoundingBox"]) },
         "spreadMethod": { isEnum($0, ["pad", "reflect", "repeat"]) },
     ]
 
@@ -226,10 +229,20 @@ enum SvgActiveContentGuard {
         return nil
     }
 
-    /// The id in `url(#id)` (with an optional trailing colour), or nil.
-    static func referencedId(_ value: String) -> String? {
-        guard value.hasPrefix("url(#"), let close = value.firstIndex(of: ")") else { return nil }
-        return String(value[value.index(value.startIndex, offsetBy: 5)..<close])
+    /// Geometry units one element adds to the document total: path segments, polygon/polyline point
+    /// pairs, one for any other shape; nil for non-geometry elements.
+    static func geometryUnits(element: String, _ attrs: [String: String]) -> (units: Int, curves: Int)? {
+        switch element {
+        case "path":
+            guard let d = attrs["d"] else { return (1, 0) }
+            guard let c = SvgPathData.analyze(d, maxNumber: maxSvgNumber) else { return (1, 0) }
+            return (c.segments, c.curves)
+        case "polygon", "polyline":
+            let n = (attrs["points"] ?? "").split(whereSeparator: { " ,\t\r\n".contains($0) }).count
+            return (max(1, n / 2), 0)
+        case "rect", "circle", "ellipse", "line": return (1, 0)
+        default: return nil
+        }
     }
 
     /// viewBox: four finite numbers, positive size.
@@ -245,16 +258,12 @@ enum SvgActiveContentGuard {
         var sawSvgRoot = false
         private var elementCount = 0
         private var depth = 0
-        private var pathSegments = 0
-        /// Reference-expanded work. SwiftDraw rebuilds a clip path for every element that uses it
-        /// (5,000 segments x 4,000 uses took 9.6 s on a release build) and walks a gradient's stops for
-        /// every paint use, so each use is charged the referenced work and bounded before rendering.
-        private var containers: [(name: String, id: String?)] = []
-        private var clipSegments: [String: Int] = [:]
-        private var clipUses: [String: Int] = [:]
-        private var stopCounts: [String: Int] = [:]
-        private var gradientHref: [String: String] = [:]
-        private var paintUses: [String: Int] = [:]
+        /// Geometry units in the whole document: path segments, polygon/polyline points, one per other shape.
+        private var geometry = 0
+        private var curves = 0
+        private var ids = Set<String>()
+        private var gradients = 0
+        private var stops = 0
         private var stack: [String] = []
 
         private func refuse(_ parser: XMLParser, _ r: LogoRejection) {
@@ -282,44 +291,34 @@ enum SvgActiveContentGuard {
             if let bad = SvgActiveContentGuard.attributeProblem(element: elementName, attributeDict, isRoot: isRoot) {
                 return refuse(parser, bad)
             }
-            var ownSegments = 1
-            if let d = attributeDict["d"], let counts = SvgPathData.analyze(d, maxNumber: SvgActiveContentGuard.maxSvgNumber) {
-                ownSegments = max(1, counts.segments)
-                pathSegments += counts.segments
-                if pathSegments > SvgPathData.maxDocumentSegments { return refuse(parser, .tooLarge) }
+            // Duplicate ids make SwiftDraw and our accounting disagree about which element a reference means.
+            if let id = attributeDict["id"], !ids.insert(id).inserted { return refuse(parser, .activeContent) }
+            switch elementName {
+            case "linearGradient", "radialGradient":
+                gradients += 1
+                if gradients > SvgActiveContentGuard.maxGradients { return refuse(parser, .tooLarge) }
+            case "stop":
+                stops += 1
+                if stops > SvgActiveContentGuard.maxStops { return refuse(parser, .tooLarge) }
+            default: break
             }
-            if let clipId = containers.last(where: { $0.name == "clipPath" })?.id { clipSegments[clipId, default: 0] += ownSegments }
-            if let gradId = containers.last(where: { $0.name.hasSuffix("Gradient") })?.id, elementName == "stop" { stopCounts[gradId, default: 0] += 1 }
-            if ["clipPath", "linearGradient", "radialGradient"].contains(elementName) {
-                containers.append((elementName, attributeDict["id"]))
-                if let id = attributeDict["id"] {
-                    if elementName == "clipPath" { clipSegments[id, default: 0] += 0 }
-                    if let h = attributeDict["xlink:href"] { gradientHref[id] = String(h.dropFirst()) }
+            // Paint references only on leaf shapes: a `fill="url(#g)"` on a group or the root would be inherited
+            // by every descendant and would multiply the gradient work. Any value mentioning url is refused
+            // there, whatever the spelling or whitespace.
+            if !SvgActiveContentGuard.paintTargets.contains(elementName) {
+                for key in ["fill", "stroke"] where attributeDict[key]?.lowercased().contains("url") == true {
+                    return refuse(parser, .activeContent)
                 }
             }
-            for (key, value) in attributeDict {
-                guard let id = SvgActiveContentGuard.referencedId(value) else { continue }
-                if key == "clip-path" { clipUses[id, default: 0] += 1 } else if key == "fill" || key == "stroke" { paintUses[id, default: 0] += 1 }
+            if let g = SvgActiveContentGuard.geometryUnits(element: elementName, attributeDict) {
+                geometry += g.units
+                curves += g.curves
+                if geometry > SvgPathData.maxDocumentSegments || curves > SvgPathData.maxDocumentCurves { return refuse(parser, .tooLarge) }
             }
             stack.append(elementName)
         }
 
-        func parserDidEndDocument(_ parser: XMLParser) {
-            guard refusal == nil else { return }
-            var clipWork = 0
-            for (id, uses) in clipUses { clipWork += uses * max(1, clipSegments[id] ?? 1) }
-            if pathSegments + clipWork > SvgPathData.maxDocumentSegments { refusal = .tooLarge; return }
-            var gradientWork = 0
-            for (id, uses) in paintUses {
-                var stops = 0, cur: String? = id, hops = 0
-                while let g = cur, hops < 8 { stops += stopCounts[g] ?? 0; cur = gradientHref[g]; hops += 1 }
-                gradientWork += uses * max(1, stops)
-            }
-            if gradientWork > SvgActiveContentGuard.maxGradientWork { refusal = .tooLarge }
-        }
-
         func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-            if ["clipPath", "linearGradient", "radialGradient"].contains(elementName) { _ = containers.popLast() }
             depth -= 1
             _ = stack.popLast()
         }

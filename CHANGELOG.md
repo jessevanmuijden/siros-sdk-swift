@@ -285,8 +285,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-encoded as a fresh PNG, so metadata and trailing/polyglot payloads are
   dropped. **SVG** is first run through a deny-by-default allowlist guard (XMLParser): only
   `svg` (root), `g`, `defs`, `title`, `desc`, `path`, `rect`, `circle`, `ellipse`,
-  `line`, `polyline`, `polygon`, `linearGradient`, `radialGradient`, `stop` and
-  `clipPath` with validated geometry, paint (`url(#id)` only), stroke, opacity,
+  `line`, `polyline`, `polygon`, `linearGradient`, `radialGradient` and `stop`
+  with validated geometry, paint (`url(#id)` only), stroke, opacity,
   transform and gradient attributes are accepted; style attributes/elements, text and
   fonts, `use`, `image`, `pattern`, `mask`, `filter`, `marker`, animation, scripts,
   links, DOCTYPE/entities, namespaced content and anything not understood are refused,
@@ -311,15 +311,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<svg style="...">` are range-checked like the attributes.
   Path data, transform lists and `points` are validated strictly (SwiftDraw hangs on
   `d="M0 0Z0"`), 4/8-digit alpha hex and plain `href` are refused (SwiftDraw mis-handles
-  them), and `LogoCache` fetches every https logo and decides raster versus SVG from the
-  response `Content-Type` instead of the file name; the sample app draws only sanitized
-  results. SVG without a `Content-Type` is routed by a content sniff (still guarded);
-  timeouts and network errors are reported as `timedOut`/`networkFailure` and are not cached.
-  Path complexity is capped (5000 segments / 1000 subpaths per path, 20,000 per document):
-  SwiftDraw's close handling is quadratic, 99,000 compact `Z`s did not finish in 25 s.
-  Each clip-path use is charged the clip path's segments (SwiftDraw rebuilds it per use: 5,000
-  segments x 4,000 uses took 9.6 s) and gradient stops x paint uses are capped. The numeric
-  grammar is linear-time (possessive quantifiers).
+  them), `clipPath`/`clip-path` and duplicate ids are refused, `url(#id)` paint is allowed only
+  on leaf shapes (never inherited), and flat caps replace per-use accounting: 5000 geometry
+  units per document, 600 curve segments (CoreGraphics is quadratic in overlapping curves),
+  8 gradients, 64 stops. The numeric grammar is linear-time (possessive quantifiers).
   See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey

@@ -36,7 +36,7 @@ alpha hex colours and plain `href`.
 
 Accepted elements: `svg` (root only), `g`, `defs`, `title`, `desc`, `path`,
 `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `linearGradient`,
-`radialGradient`, `stop`, `clipPath`.
+`radialGradient`, `stop`.
 
 Accepted attributes, each with a strict value grammar: `id`; geometry (`x`, `y`,
 `width`, `height`, `cx`, `cy`, `r`, `rx`, `ry`, `x1`..`y2`, `fx`, `fy`, `fr`,
@@ -46,11 +46,12 @@ Accepted attributes, each with a strict value grammar: `id`; geometry (`x`, `y`,
 syntax: valid commands with exactly the right argument counts, nothing after
 `Z`/`z` except whitespace, ASCII only); `points` (an even number of coordinates); paint and stroke (`fill`, `stroke`, `stop-color`,
 `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
-`stroke-dasharray`, `stroke-dashoffset`, `fill-rule`, `clip-rule`); opacity
-attributes; `clip-path`; `display`; gradient `gradientUnits`, `spreadMethod`,
-`clipPathUnits`; and `href`/`xlink:href` on gradients. The only references
+`stroke-dasharray`, `stroke-dashoffset`, `fill-rule`); opacity
+attributes; `display`; gradient `gradientUnits`, `spreadMethod`; and `href`/`xlink:href` on gradients. The only references
 accepted are same-document `url(#id)` and `#id`; gradient inheritance must be
-written `xlink:href` (a plain `href` is refused); colours are `#rgb`, `#rrggbb`,
+written `xlink:href` (a plain `href` is refused); a `url(#id)` fill or stroke is only allowed on a leaf shape
+(`path`, `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`), never on `g`, `svg`, `defs` or any
+other element, so paint references are never inherited; colours are `#rgb`, `#rrggbb`,
 `rgb()`, `rgba()`, named colours, `none` and `currentColor` (4- and 8-digit
 alpha hex such as `#ff000080` is refused, use `rgba()` or `*-opacity`): no whitespace inside `url(`,
 no quotes, no comments, no `data:` or external URLs. The only `xmlns` values
@@ -65,6 +66,9 @@ Refused, never repaired:
   `a`, `view`, animation, `script`, `foreignObject`
 - editor metadata and any namespaced element or attribute (`sodipodi:*`,
   `inkscape:*`, `xml:space`, `metadata`, ...)
+- `clipPath` and `clip-path` entirely
+- duplicate `id`s
+- a `url(...)` fill/stroke on anything but a leaf shape
 - 4- and 8-digit hex colours, a plain `href`, malformed path data or transforms,
   odd `points` counts
 - a nested `<svg>` (only the root is allowed)
@@ -79,7 +83,8 @@ Refused, never repaired:
 | Raster edge | 2048 px |
 | SVG rendered size | at most 512 px on the longest edge; width, height, viewBox and every number at most 1,000,000 |
 | SVG elements / nesting depth | 5000 / 64 |
-| SVG path complexity | at most 5000 segments (commands plus implicit repeats, `Z` included) and 1000 subpaths per path; 20,000 segments per document; every `clip-path="url(#id)"` use is charged the clip path's segments against that document budget, and gradient stops x paint uses (including stops inherited through `xlink:href`) are capped at 1,000,000 |
+| SVG geometry | one document-wide cap of 5000 units (path segments including implicit repeats and `Z`, polygon/polyline points, one per other shape), at most 5000 segments and 1000 subpaths in a single path, and at most 600 curve segments (`C S Q T A`) per document |
+| SVG gradients | at most 8 gradients and 64 stops per document |
 | Remote fetch | 15 s wall-clock for request and body by default, 120 s maximum (larger values are clamped, NaN/infinite/non-positive are refused) |
 | Redirects | followed only to `https` URLs without credentials; any other target is not followed |
 

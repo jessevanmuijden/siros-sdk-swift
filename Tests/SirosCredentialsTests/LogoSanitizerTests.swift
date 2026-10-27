@@ -589,7 +589,7 @@ final class LogoSanitizerImageTests: XCTestCase {
             "<svg \(Self.ns) viewBox=\"0 0 100 100\" width=\"100\" height=\"100\"><title>Dot</title><circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"#0a84ff\" stroke=\"#003\" stroke-width=\"4\"/></svg>",
             "<svg \(Self.ns) xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"120\" height=\"60\" viewBox=\"0 0 120 60\"><defs><linearGradient id=\"a\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"100%\" stop-color=\"rgb(0,0,255)\" stop-opacity=\"0.8\"/></linearGradient><linearGradient id=\"b\" xlink:href=\"#a\"/></defs><rect width=\"120\" height=\"60\" rx=\"8\" fill=\"url(#a)\"/></svg>",
             "<svg \(Self.ns) width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g transform=\"translate(32 32) rotate(45)\" fill=\"none\" stroke=\"black\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M-20,-20 L20,-20 L20,20 Z\" fill-rule=\"evenodd\"/><ellipse rx=\"10\" ry=\"5\" opacity=\".5\"/><line x1=\"-5\" y1=\"0\" x2=\"5\" y2=\"0\" stroke-dasharray=\"2 1\"/></g></svg>",
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg \(Self.ns) width=\"32\" height=\"32\" viewBox=\"0 0 32 32\"><defs><clipPath id=\"c\"><rect width=\"16\" height=\"32\"/></clipPath><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"#123456\"/></radialGradient></defs><polygon points=\"0,0 32,0 16,32\" fill=\"url(#r)\" clip-path=\"url(#c)\"/><polyline points=\"0,32 16,16 32,32\" fill=\"none\" stroke=\"gray\"/></svg>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg \(Self.ns) width=\"32\" height=\"32\" viewBox=\"0 0 32 32\"><defs><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"#123456\"/></radialGradient></defs><polygon points=\"0,0 32,0 16,32\" fill=\"url(#r)\"/><polyline points=\"0,32 16,16 32,32\" fill=\"none\" stroke=\"gray\"/></svg>",
         ]
         for (i, doc) in logos.enumerated() {
             XCTAssertNil(guardCheck(doc), "logo \(i)")
@@ -613,7 +613,7 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertNotNil(guardCheck(svg("<path d=\"M0 0" + String(repeating: "Z", count: 99_000) + "\"/>")))
         let one = "<path d=\"M0 0 " + String(repeating: "L1 1 ", count: 3000) + "\"/>" // fine alone
         XCTAssertNil(guardCheck(svg(one)))
-        XCTAssertEqual(guardCheck(svg(String(repeating: one, count: 7))), .tooLarge, "7 x 3000 > document budget")
+        XCTAssertEqual(guardCheck(svg(String(repeating: one, count: 2))), .tooLarge, "2 x 3000 > the 5000 document cap")
     }
 
     func testTransformAndPointsAreValidatedStrictly() {
@@ -656,33 +656,102 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertEqual(px[0], 255); XCTAssertEqual(px[3], 255, "inherited stops paint the rect")
     }
 
-    /// SwiftDraw rebuilds a clip path for every user (5,000 segments x 4,000 uses = 9.6 s, 20,000 uses > 30 s on a
-    /// release build) and walks a gradient's stops per paint use: each use is charged against the budgets.
-    func testReferenceExpandedWorkIsBoundedBeforeRendering() {
-        func clipDoc(segments: Int, uses: Int) -> String {
-            let d = "M0 0 " + String(repeating: "L1 1 ", count: segments)
-            return svg("<defs><clipPath id=\"c\"><path d=\"\(d)\"/></clipPath></defs>"
-                       + String(repeating: "<rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>", count: uses))
-        }
-        XCTAssertEqual(guardCheck(clipDoc(segments: 4000, uses: 4000)), .tooLarge)
-        XCTAssertEqual(guardCheck(clipDoc(segments: 4000, uses: 6)), .tooLarge, "4000 x 6 > 20,000")
-        XCTAssertEqual(guardCheck(clipDoc(segments: 1, uses: 20_001)), .tooLarge, "element cap or budget, either way refused") // 5000-element cap
-        XCTAssertNil(guardCheck(clipDoc(segments: 200, uses: 20)), "ordinary clip use stays fine")
-        // Forward references (use before definition) are charged too.
-        let d = "M0 0 " + String(repeating: "L1 1 ", count: 4000)
-        let fwd = svg(String(repeating: "<rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>", count: 10)
-                      + "<defs><clipPath id=\"c\"><path d=\"\(d)\"/></clipPath></defs>")
-        XCTAssertEqual(guardCheck(fwd), .tooLarge)
+    // MARK: Flat caps (replace the earlier per-use accounting that kept leaking)
 
-        func gradDoc(stops: Int, uses: Int, link: Bool = false) -> String {
-            let st = String(repeating: "<stop offset=\"0.5\" stop-color=\"red\"/>", count: stops)
-            let inherit = link ? "<linearGradient id=\"h\" xlink:href=\"#g\"/>" : ""
-            return svg("<defs><linearGradient id=\"g\">\(st)</linearGradient>\(inherit)</defs>"
-                       + String(repeating: "<rect width=\"4\" height=\"4\" fill=\"url(#\(link ? "h" : "g"))\"/>", count: uses))
+    /// clipPath/clip-path are gone: SwiftDraw rebuilds a clip path for every user (5,000 segments x 4,000 uses = 9.6 s).
+    func testClipPathIsRefusedEntirely() {
+        XCTAssertEqual(guardCheck(svg("<defs><clipPath id=\"c\"><rect width=\"4\" height=\"4\"/></clipPath></defs><rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<defs><clipPath id=\"c\"/></defs>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<rect width=\"4\" height=\"4\" clip-path=\" url(#c)\"/>")), .activeContent, "any spelling")
+    }
+
+    /// Whitespace variants of url(...) used to bypass the id extraction that fed the budget.
+    func testWhitespaceAroundUrlNeverEvadesTheLimits() {
+        let grad = "<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/></linearGradient></defs>"
+        for fill in [" url(#g)", "url(#g) ", "\turl(#g)", "\nurl(#g)", "url(#g)\n", "  url(#g)  "] {
+            // On a leaf the value is either valid or refused; on a group it is always refused.
+            XCTAssertEqual(guardCheck(svg(grad + "<g fill=\"\(fill)\"><rect width=\"4\" height=\"4\"/></g>")), .activeContent, fill.debugDescription)
+            XCTAssertEqual(guardCheck(svg(grad + "<g stroke=\"\(fill)\"/>")), .activeContent, fill.debugDescription)
         }
-        XCTAssertEqual(guardCheck(gradDoc(stops: 2000, uses: 2000)), .tooLarge)
-        XCTAssertEqual(guardCheck(gradDoc(stops: 1200, uses: 1200, link: true)), .tooLarge, "stops inherited through href are charged")
-        XCTAssertNil(guardCheck(gradDoc(stops: 10, uses: 50)))
+        XCTAssertEqual(guardCheck("<svg \(Self.ns) width=\"8\" height=\"8\" fill=\" url(#g)\"/>"), .activeContent, "root")
+    }
+
+    /// A paint reference on a group or the root is inherited by every descendant: refused, so no accounting is needed.
+    func testGradientPaintIsOnlyAllowedOnLeafShapes() {
+        let grad = "<defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/></linearGradient></defs>"
+        XCTAssertEqual(guardCheck(svg(grad + "<g fill=\"url(#g)\">" + String(repeating: "<rect width=\"4\" height=\"4\"/>", count: 100) + "</g>")), .activeContent)
+        XCTAssertEqual(guardCheck("<svg \(Self.ns) width=\"8\" height=\"8\" stroke=\"url(#g)\">\(grad)<rect width=\"4\" height=\"4\"/></svg>"), .activeContent)
+        XCTAssertEqual(guardCheck(svg(grad + "<defs fill=\"url(#g)\"/>")), .activeContent)
+        for leaf in ["path d=\"M0 0 L1 1\"", "rect width=\"4\" height=\"4\"", "circle r=\"2\"", "ellipse rx=\"2\" ry=\"1\"", "line x2=\"4\"",
+                     "polyline points=\"0,0 4,4\"", "polygon points=\"0,0 4,0 4,4\""] {
+            XCTAssertNil(guardCheck(svg(grad + "<\(leaf) fill=\"url(#g)\" stroke=\"url(#g) red\"/>")), leaf)
+        }
+    }
+
+    func testGradientAndStopCountsAreCapped() {
+        func gradients(_ n: Int, stopsEach: Int) -> String {
+            (0..<n).map { i in "<linearGradient id=\"g\(i)\">" + String(repeating: "<stop offset=\"0\" stop-color=\"red\"/>", count: stopsEach) + "</linearGradient>" }.joined()
+        }
+        XCTAssertNil(guardCheck(svg("<defs>" + gradients(SvgActiveContentGuard.maxGradients, stopsEach: 2) + "</defs>")))
+        XCTAssertEqual(guardCheck(svg("<defs>" + gradients(SvgActiveContentGuard.maxGradients + 1, stopsEach: 1) + "</defs>")), .tooLarge)
+        XCTAssertNil(guardCheck(svg("<defs>" + gradients(1, stopsEach: SvgActiveContentGuard.maxStops) + "</defs>")))
+        XCTAssertEqual(guardCheck(svg("<defs>" + gradients(1, stopsEach: SvgActiveContentGuard.maxStops + 1) + "</defs>")), .tooLarge)
+        XCTAssertEqual(guardCheck(svg("<defs>" + gradients(4, stopsEach: 17) + "</defs>")), .tooLarge, "68 stops in total")
+    }
+
+    /// SwiftDraw resolves the FIRST of two elements with the same id; our accounting used to see the last.
+    func testDuplicateIdsAreRefused() {
+        XCTAssertEqual(guardCheck(svg("<defs><linearGradient id=\"g\"/><linearGradient id=\"g\" xlink:href=\"#h\"/></defs>")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<rect id=\"a\" width=\"1\" height=\"1\"/><circle id=\"a\" r=\"1\"/>")), .activeContent)
+        XCTAssertNil(guardCheck(svg("<rect id=\"a\" width=\"1\" height=\"1\"/><circle id=\"b\" r=\"1\"/>")))
+    }
+
+    /// CoreGraphics is quadratic in overlapping curves (1000 same-point cubics = 0.8 s, 2000 = 3.5 s): curves have their own cap.
+    func testCurveSegmentsAreCappedPerDocument() {
+        let cap = SvgPathData.maxDocumentCurves
+        func curves(_ n: Int, cmd: String = "C1 1 2 2 3 0 ") -> String { "<path d=\"M0 0 " + String(repeating: cmd, count: n) + "\"/>" }
+        XCTAssertNil(guardCheck(svg(curves(cap))))
+        XCTAssertEqual(guardCheck(svg(curves(cap + 1))), .tooLarge)
+        XCTAssertEqual(guardCheck(svg(curves(cap + 1, cmd: "Q1 1 3 0 "))), .tooLarge)
+        XCTAssertEqual(guardCheck(svg(curves(cap + 1, cmd: "A5 5 0 0 1 3 3 "))), .tooLarge)
+        XCTAssertEqual(guardCheck(svg(curves(cap) + curves(2))), .tooLarge, "curves add up across paths")
+        // Implicit repeats count too, lines do not.
+        XCTAssertEqual(guardCheck(svg("<path d=\"M0 0 C" + String(repeating: "1 1 2 2 3 0 ", count: cap + 1) + "\"/>")), .tooLarge)
+        XCTAssertNil(guardCheck(svg("<path d=\"M0 0 " + String(repeating: "L1 1 ", count: 4000) + "\"/>")))
+        XCTAssertEqual(SvgPathData.analyze("M0 0 C1 1 2 2 3 3 4 4 5 5 6 6 L1 1 Q1 1 2 2 A1 1 0 0 1 2 2 Z", maxNumber: 1e6)?.curves, 4)
+    }
+
+    /// The largest document the caps admit (600 overlapping cubics, 1500 zig-zag lines, 2000 gradient circles, dashed strokes)
+    /// must go through guard + SwiftDraw + PNG in well under a second on a release build (measured 0.6 s debug-free on the Mac mini);
+    /// the bound here is generous so only a real regression (multi-second work) fails.
+    func testLargestAdmittedDocumentRendersQuickly() {
+        let cubics = "<path d=\"M0 0 " + String(repeating: "C1 1 2 2 3 0 ", count: SvgPathData.maxDocumentCurves) + "\" fill=\"red\" stroke=\"blue\" stroke-dasharray=\"0.2 0.2\"/>"
+        let zig = "<path d=\"M0 0 " + (0..<1500).map { $0 % 2 == 0 ? "L60 \($0 % 60) " : "L0 \(($0 * 7) % 60) " }.joined() + "\" fill=\"red\" stroke=\"blue\"/>"
+        let stops = (0..<SvgActiveContentGuard.maxStops).map { "<stop offset=\"\(Double($0) / 63)\" stop-color=\"#\(String(format: "%02x", $0 * 3 % 256))40ff\"/>" }.joined()
+        let grad = "<defs><linearGradient id=\"g\">\(stops)</linearGradient></defs>"
+        let circles = (0..<2000).map { "<circle cx=\"\($0 % 60)\" cy=\"\($0 / 60)\" r=\"2\" fill=\"url(#g)\" stroke=\"url(#g)\"/>" }.joined()
+        let doc = svg(grad + cubics + zig + circles)
+        XCTAssertLessThan(doc.utf8.count, LogoSanitizer.maxDecodedBytes)
+        let t0 = Date()
+        guard case .success(.image) = LogoSanitizer.sanitize(svgUri(doc)) else { return XCTFail("the largest admitted document must render") }
+        let elapsed = Date().timeIntervalSince(t0)
+        print("LARGEST-ADMITTED-DOC elapsed=\(elapsed)s bytes=\(doc.utf8.count)")
+        XCTAssertLessThan(elapsed, 5.0)
+    }
+
+    /// Path segments, polygon/polyline points and shapes share ONE document-wide geometry cap.
+    func testGeometryCapCountsPointsPathsAndShapesTogether() {
+        let cap = SvgPathData.maxDocumentSegments
+        let points = (0..<(cap + 10)).map { "\($0 % 50),\($0 % 40)" }.joined(separator: " ")
+        XCTAssertEqual(guardCheck(svg("<polyline points=\"\(points)\"/>")), .tooLarge, "points beyond the cap")
+        XCTAssertEqual(guardCheck(svg("<polygon points=\"\(points)\"/>")), .tooLarge)
+        let half = (0..<(cap / 2 + 1)).map { "\($0 % 50),\($0 % 40)" }.joined(separator: " ")
+        XCTAssertEqual(guardCheck(svg("<polygon points=\"\(half)\"/><polygon points=\"\(half)\"/>")), .tooLarge, "two polygons add up")
+        let path = "M0 0 " + String(repeating: "L1 1 ", count: cap / 2)
+        XCTAssertEqual(guardCheck(svg("<path d=\"\(path)\"/><polygon points=\"\(half)\"/><path d=\"\(path)\"/>")), .tooLarge, "paths and points add up")
+        XCTAssertEqual(guardCheck(svg(String(repeating: "<rect width=\"1\" height=\"1\"/>", count: cap + 1))), .tooLarge)
+        XCTAssertNil(guardCheck(svg("<path d=\"\(path)\"/><polygon points=\"0,0 4,0 4,4\"/>")))
     }
 
     /// Adjacent variable-length digit runs backtrack quadratically on long invalid input; rejection must stay linear.
@@ -697,13 +766,15 @@ final class LogoSanitizerImageTests: XCTestCase {
         let t0 = Date()
         Thread {
             for (attr, value) in cases {
-                results.modify { $0.append(SvgActiveContentGuard.attributeProblem(element: "rect", [attr: value], isRoot: false) != nil) }
+                // Validate OUTSIDE the lock; the lock only guards storing the result, so a hang cannot block the reader.
+                let refused = SvgActiveContentGuard.attributeProblem(element: "rect", [attr: value], isRoot: false) != nil
+                results.modify { $0.append(refused) }
             }
             done.signal()
         }.start()
         let finished = done.wait(timeout: .now() + 5) == .success
         XCTAssertTrue(finished, "eight 300 KB invalid values must be rejected in linear time (backtracking regression?)")
-        XCTAssertEqual(results.value, Array(repeating: true, count: cases.count))
+        if finished { XCTAssertEqual(results.value, Array(repeating: true, count: cases.count)) }
         XCTAssertLessThan(Date().timeIntervalSince(t0), 2.0)
     }
 

@@ -29,7 +29,11 @@ import Foundation
 enum SvgPathData {
     static let maxSegments = 5000
     static let maxSubpaths = 1000
-    static let maxDocumentSegments = 20_000
+    static let maxDocumentSegments = 5000
+    /// Curve segments (C S Q T A, implicit repeats included) per document. CoreGraphics fill/stroke is
+    /// quadratic in overlapping curves (release build, same-point cubics: 500 = 0.2 s, 1000 = 0.8 s,
+    /// 2000 = 3.5 s; 600 = 0.28 s), whereas 5,000 lines or 4,900 shapes stay far below 0.4 s.
+    static let maxDocumentCurves = 600
 
     static func isValid(_ d: String, maxNumber: Double) -> Bool {
         guard let counts = analyze(d, maxNumber: maxNumber) else { return false }
@@ -37,10 +41,10 @@ enum SvgPathData {
     }
 
     /// Grammar check plus segment/subpath counts; nil when the syntax is not a strict match.
-    static func analyze(_ d: String, maxNumber: Double) -> (segments: Int, subpaths: Int)? {
+    static func analyze(_ d: String, maxNumber: Double) -> (segments: Int, subpaths: Int, curves: Int)? {
         let b = Array(d.utf8)
         guard !b.isEmpty, b.count <= 100_000, b.allSatisfy({ $0 < 0x80 }) else { return nil }
-        var segments = 0, subpaths = 0
+        var segments = 0, subpaths = 0, curves = 0
         var i = 0
         func isDigit(_ x: UInt8) -> Bool { x >= 0x30 && x <= 0x39 }
         func isWhitespace(_ x: UInt8) -> Bool { x == 0x20 || x == 0x09 || x == 0x0A || x == 0x0D }
@@ -83,12 +87,14 @@ enum SvgPathData {
         while true {
             // Whitespace, and commas between segments, but the caller of Z handles its own tail.
             skipSeparators()
-            if i >= b.count { return (segments, subpaths) }
+            if i >= b.count { return (segments, subpaths, curves) }
             let cmd = b[i]
             guard isLetter(cmd), let n = argCounts[upper(cmd)] else { return nil }
             i += 1
             segments += 1
             if upper(cmd) == 0x4D { subpaths += 1 }
+            let isCurve = [0x43, 0x53, 0x51, 0x54, 0x41].contains(upper(cmd)) // C S Q T A
+            if isCurve { curves += 1 }
             if segments > 4 * maxSegments { return nil } // stop counting once it is hopeless
             if n == 0 { // Z/z takes nothing: only whitespace may follow, then a command letter or the end
                 skipWhitespace()
@@ -109,6 +115,7 @@ enum SvgPathData {
             }
             guard groups >= 1 else { return nil }
             segments += groups - 1 // implicit repeats are segments too
+            if isCurve { curves += groups - 1 }
         }
     }
 }
