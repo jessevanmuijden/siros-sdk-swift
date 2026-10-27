@@ -221,9 +221,21 @@ extension SirosWallet {
         // The notification awaits a transport send, during which this issuance may be cancelled and another begun: the
         // cleanup runs only if THIS flow still owns the state (checked under the wallet lock, where it also ends the flow).
         let generation = credentialResponseGeneration(flowId: flowId)
+        // A completion with no start tag cannot be tied to an issuance by its epoch, so the cleanup (which resets
+        // issuance-global guards and advances the epoch) needs PROVEN ownership of the flow instead: the wallet offered
+        // this flow a response key, or its active state is this very flow. Otherwise the completion is refused for its
+        // own notification ids only (cannot prove => leave the current issuance alone).
+        let ownsFlow: Bool = {
+            if startTag != nil { return true }
+            lock.lock(); defer { lock.unlock() }
+            if offeredResponseKeyFlows.contains(flowId) { return true }
+            if case .flowActive(_, _, let activeFlowId, _, _, _) = _state { return activeFlowId == flowId }
+            return false
+        }()
         for id in Set(notificationIds).sorted() where !id.isEmpty {
             await sendCredentialFailure(flowId: flowId, notificationId: id)
         }
+        guard ownsFlow else { return }
         await failIssuanceLocally(flowId: flowId, message: message, ifGeneration: generation, ifEpoch: startTag)
     }
 

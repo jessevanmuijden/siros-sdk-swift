@@ -217,6 +217,13 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         return msg
     }
 
+    /// A completion the session could not associate with an issuance: no start tag at all.
+    private static func decodeUntaggedFlowComplete(_ object: [String: Any]) throws -> FlowCompleteMessage {
+        let msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(msg.startTag)
+        return msg
+    }
+
     private func flowComplete(flowId: String, entries: Int, encrypted: Bool = true) throws -> FlowCompleteMessage {
         let credentials = (0..<entries).map { _ in ["format": "dc+sd-jwt", "vct": "urn:eudi:pid:1"] }
         let object: [String: Any] = [
@@ -1084,6 +1091,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         w.credentialNotifier = notifier
         let listener = Listener()
         w.eventListener = listener
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "wp", flowType: "oid4vci", status: "active", credentials: []))
         await w.handleWmpFlowComplete(flowId: "wp", result: .object_([
             "credentials": .array([.object_(["format": .string("dc+sd-jwt"), "credential": .string("a.b.c"), "notification_id": .string("n-w")])]),
             "credential_metadata": .object_(["holder_commitments": .object_(["k": .string("v")])]),
@@ -1170,6 +1178,53 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(flowId, "B")
         let stored = await w.credentialStore.getAll()
         XCTAssertTrue(stored.isEmpty, "nothing stored")
+    }
+
+    /// A late completion with NO start tag (nothing ties it to an issuance by epoch) for a flow the wallet cannot prove
+    /// it owns is refused for its own notification ids only: it must not clear the active issuance's guards or advance
+    /// its epoch. A flow that IS the active one (state or offered key) still gets its cleanup.
+    func testAnUntaggedLateRefusalNeverTouchesAnotherActiveIssuance() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        w.lock.lock(); w.issuanceInFlight = true; let epochB = w.issuanceEpoch; w.lock.unlock()
+        try installKey(w, flowId: "B")
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "A",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-A"]],
+            "credential_metadata": ["secret_members": ["k": "v"]],
+        ]
+        await w.handleFlowComplete(msg: try Self.decodeUntaggedFlowComplete(object))
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-A"], "still refused for its own notification id")
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil, w.issuanceEpoch == epochB)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is kept")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        XCTAssertTrue(kept.2, "B's epoch is not advanced")
+        XCTAssertTrue(listener.errors.isEmpty)
+        guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
+        XCTAssertEqual(flowId, "B")
+    }
+
+    func testAnUntaggedRefusalOfTheActiveFlowStillCleansUp() async throws {
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "cur", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "cur",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-c"]],
+            "credential_metadata": ["secret_members": ["k": "v"]],
+        ]
+        await w.handleFlowComplete(msg: try Self.decodeUntaggedFlowComplete(object))
+        XCTAssertEqual(listener.errors.count, 1)
+        w.lock.lock(); let inFlight = w.issuanceInFlight; w.lock.unlock()
+        XCTAssertFalse(inFlight)
     }
 
     /// A CURRENT refusal (the completion's tag is the epoch in force) does run its cleanup: the in-flight guard is
