@@ -112,6 +112,16 @@ final class CredentialStackInteractionUITests: XCTestCase {
     /// key itself (e.g. `"common.delete"` instead of "Delete"). Matching
     /// either form keeps this suite valid regardless of whether/when that
     /// separate, pre-existing issue is fixed.
+    /// Whether `element` is gone within `timeout` (polling, so it does not depend on `waitForNonExistence` availability).
+    private func waitForDisappearance(of element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !element.exists { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        return !element.exists
+    }
+
     private func button(labeled candidates: String...) -> XCUIElement {
         let predicate = NSPredicate(
             format: candidates.map { _ in "label == %@" }.joined(separator: " OR "),
@@ -222,7 +232,17 @@ final class CredentialStackInteractionUITests: XCTestCase {
         // itself is clipped below the visible screen edge and isn't in the
         // accessibility tree at all. Tapping outside is the standard way to
         // dismiss any popover-style presentation regardless.
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 40, dy: 60)).tap()
+        let deleteButton = button(labeled: "Delete", "common.delete")
+        let outside = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 40, dy: 60))
+        outside.tap()
+        // The dismissal is animated: a tap on the deck while the popover is still going away is swallowed by it (the
+        // source of this test's flake on slow runners). Wait until the dialog is really gone - tapping outside again
+        // once if the first tap did not dismiss it - and the deck has stopped moving before interacting with it.
+        if !waitForDisappearance(of: deleteButton, timeout: 4) {
+            outside.tap()
+            XCTAssertTrue(waitForDisappearance(of: deleteButton, timeout: 6), "the long-press dialog must dismiss")
+        }
+        waitForDeckToSettle()
 
         // The deck's front is unaffected by a long-press: 3 ("Charlie")
         // still opens directly.

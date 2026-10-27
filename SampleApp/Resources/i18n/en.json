@@ -202,7 +202,17 @@
     "pinDescription": "Enter the PIN for your FIDO2 security key.",
     "pinPlaceholder": "PIN",
     "submitButton": "Submit",
-    "navTitle": "PIN Required"
+    "navTitle": "PIN Required",
+    "choosePinTitle": "Choose a PIN for your security key",
+    "choosePinDescription": "This security key has no PIN yet. Choose one (at least %1$d characters); you will be asked to type it twice.",
+    "confirmPinTitle": "Confirm your PIN",
+    "confirmPinDescription": "Type the PIN you just chose again.",
+    "retryTooShort": "That PIN is too short: use at least %1$d characters.",
+    "retryTooLong": "That PIN is too long.",
+    "retryInvalidEncoding": "That PIN contains characters the key cannot use.",
+    "retryPolicy": "The key does not accept that PIN. Choose a different one.",
+    "retryMismatch": "The two PINs did not match. Try again.",
+    "retryWrongPin": "Wrong PIN. Try again."
   },
   "idv": {
     "howItWorks": "How it works",

@@ -3341,6 +3341,120 @@ public func FfiConverterTypeFfiOperationProgress_lower(_ value: FfiOperationProg
 
 
 
+/**
+ * See [`crate::error::PinFailure`].
+ */
+
+public enum FfiPinFailure: Equatable, Hashable {
+    
+    case tooShort(minLength: UInt32
+    )
+    case tooLong
+    case invalidEncoding
+    case policyViolation
+    case invalid
+    case blocked
+    case authBlocked
+    case notSet
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiPinFailure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPinFailure: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPinFailure
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPinFailure {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .tooShort(minLength: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 2: return .tooLong
+        
+        case 3: return .invalidEncoding
+        
+        case 4: return .policyViolation
+        
+        case 5: return .invalid
+        
+        case 6: return .blocked
+        
+        case 7: return .authBlocked
+        
+        case 8: return .notSet
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiPinFailure, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .tooShort(minLength):
+            writeInt(&buf, Int32(1))
+            FfiConverterUInt32.write(minLength, into: &buf)
+            
+        
+        case .tooLong:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .invalidEncoding:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .policyViolation:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .invalid:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .blocked:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .authBlocked:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .notSet:
+            writeInt(&buf, Int32(8))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPinFailure_lift(_ buf: RustBuffer) throws -> FfiPinFailure {
+    return try FfiConverterTypeFfiPinFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPinFailure_lower(_ value: FfiPinFailure) -> RustBuffer {
+    return FfiConverterTypeFfiPinFailure.lower(value)
+}
+
+
+
 public 
 enum FfiWscdError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -3365,6 +3479,12 @@ enum FfiWscdError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Serialization(msg: String
     )
     case Crypto(msg: String
+    )
+    /**
+     * A CTAP2 PIN set/use was refused; `reason` says why so the host can
+     * re-prompt. `msg` never contains PIN material.
+     */
+    case Pin(reason: FfiPinFailure, msg: String
     )
 
     
@@ -3423,6 +3543,10 @@ public struct FfiConverterTypeFfiWscdError: FfiConverterRustBuffer {
             msg: try FfiConverterString.read(from: &buf)
             )
         case 10: return .Crypto(
+            msg: try FfiConverterString.read(from: &buf)
+            )
+        case 11: return .Pin(
+            reason: try FfiConverterTypeFfiPinFailure.read(from: &buf), 
             msg: try FfiConverterString.read(from: &buf)
             )
 
@@ -3486,6 +3610,12 @@ public struct FfiConverterTypeFfiWscdError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(10))
             FfiConverterString.write(msg, into: &buf)
             
+        
+        case let .Pin(reason,msg):
+            writeInt(&buf, Int32(11))
+            FfiConverterTypeFfiPinFailure.write(reason, into: &buf)
+            FfiConverterString.write(msg, into: &buf)
+            
         }
     }
 }
@@ -3510,7 +3640,20 @@ public func FfiConverterTypeFfiWscdError_lower(_ value: FfiWscdError) -> RustBuf
 
 public protocol FfiAuthCallback: AnyObject, Sendable {
     
+    /**
+     * Ask the user to ENTER the PIN already set on the authenticator (or
+     * the OPAQUE PIN for r2ps).
+     */
     func requestPin(pluginId: String) throws  -> Data
+    
+    /**
+     * Ask the user to CHOOSE a new PIN for an authenticator that has none
+     * (CTAP2 `clientPin: false`). Show "Choose a PIN" (ideally with
+     * confirmation) and enforce `min_length` characters; the value is sent
+     * to the authenticator's setPIN. Called instead of `request_pin`, never
+     * in addition to it, within one ceremony.
+     */
+    func requestNewPin(pluginId: String, minLength: UInt32) throws  -> Data
     
     func requestWebauthnAssertion(pluginId: String, challenge: Data, rpId: String, allowedCredentials: [Data]) throws  -> Data
     
@@ -3552,6 +3695,33 @@ fileprivate struct UniffiCallbackInterfaceFfiAuthCallback {
                 }
                 return try uniffiObj.requestPin(
                      pluginId: try FfiConverterString.lift(pluginId)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeFfiWscdError_lower
+            )
+        },
+        requestNewPin: { (
+            uniffiHandle: UInt64,
+            pluginId: RustBuffer,
+            minLength: UInt32,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceFfiAuthCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.requestNewPin(
+                     pluginId: try FfiConverterString.lift(pluginId),
+                     minLength: try FfiConverterUInt32.lift(minLength)
                 )
             }
 
@@ -4406,10 +4576,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new() != 9101) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() != 23519) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() != 7366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() != 26184) {
+    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_new_pin() != 9600) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() != 47617) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command() != 35187) {

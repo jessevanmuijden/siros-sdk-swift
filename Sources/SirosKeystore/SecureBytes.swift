@@ -159,6 +159,21 @@ public final class SecureBytes: @unchecked Sendable {
         return Data(buffer)
     }
 
+    /// Whether this and `other` hold the same bytes, compared in place under both locks: no plaintext copy is made, and
+    /// the comparison does not stop at the first differing byte (only the lengths may differ the answer early).
+    /// A wiped buffer equals nothing. Locks are taken in a fixed (address) order so two threads comparing the same
+    /// pair the other way round cannot deadlock.
+    public func constantTimeEquals(_ other: SecureBytes) -> Bool {
+        if self === other { return !isWiped }
+        let (first, second) = ObjectIdentifier(self) < ObjectIdentifier(other) ? (self, other) : (other, self)
+        first.lock.lock(); defer { first.lock.unlock() }
+        second.lock.lock(); defer { second.lock.unlock() }
+        guard let a = buffer, let b = other.buffer, a.count == b.count else { return false }
+        var difference: UInt8 = 0
+        for index in 0..<a.count { difference |= a[index] ^ b[index] }
+        return difference == 0
+    }
+
     /// Overwrites the buffer with zero and releases it. Idempotent: safe to
     /// call more than once, including after `deinit` has already run it.
     public func wipe() {
