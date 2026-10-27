@@ -111,7 +111,7 @@ final class PrivateDataSchemaVectorTests: XCTestCase {
     }
 
     /// Vectors that need nothing from the keystore container: the delivered-secret
-    /// vectors are the receipt's (siros-sdk-swift DeliveredSecretReceipt), and the
+    /// vectors belonged to the removed delivered-secret receipt, and the
     /// merge vectors need an event merger this SDK does not have (it never merges
     /// histories; see the PR description). Listed so a NEW vector id is a decision.
     private static let refusalVectors: Set<String> = [

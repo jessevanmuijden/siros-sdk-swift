@@ -22,7 +22,7 @@ final class CredentialResponseJweTests: XCTestCase {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "credential-response-jwe-vectors", withExtension: "json"))
         let raw = try Data(contentsOf: url)
         // Pinned: the file is generated, never edited (see its PROVENANCE).
-        XCTAssertEqual(sha256Hex(raw), "51da911d44f3644e5f3b96dd81042c35eae0aa7f0fbb31ccece94c2cba61c104")
+        XCTAssertEqual(sha256Hex(raw), "613ec6d771b0ab89a5f32379c2d767a76f31cba209f28b02792791e972cadbfd")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
         let d = try XCTUnwrap((json["recipient_d"] as? String).flatMap(CredentialResponseJwe.decode))
         return Vectors(
@@ -221,7 +221,7 @@ final class CredentialResponseJweTests: XCTestCase {
         XCTAssertEqual(response.credentials, ["eyJhbGciOiJFUzI1NiJ9.eyJ2Y3QiOiJ1cm46ZXVkaTpwaWQ6MSJ9.c2ln~disclosure~"])
         XCTAssertEqual(response.notificationId, "3fwe98js")
         XCTAssertNil(response.transactionId)
-        XCTAssertEqual(response.credentialMetadata?["org.siros.secret_seed"]?["org.siros.nym_auth"]?.stringValue, "00112233445566778899aabbccddeeff")
+        XCTAssertEqual(response.credentialMetadata?["org.example.extension"]?["org.example.member"]?.stringValue, "00112233445566778899aabbccddeeff")
     }
 
     func testParseDeferredAndObjectCredentials() throws {

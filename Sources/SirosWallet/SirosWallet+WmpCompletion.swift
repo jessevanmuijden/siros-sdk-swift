@@ -16,6 +16,17 @@ extension SirosWallet {
             await refusePlainCompletion(flowId: flowId, notificationIds: ids)
             return
         }
+        // A relayed `credential_metadata` carrying a superseded secret-bearing member: refused before anything is
+        // stored, as on the WebSocket (`LEGACY_SECRET_MEMBER`).
+        if case .object_(let members)? = result?.objectValue?["credential_metadata"],
+           members.keys.contains(where: { CredentialDisplayMetadata.prohibitedMembers.contains($0) }) {
+            let ids = result?.objectValue?["credentials"]?.arrayValue?.compactMap { $0.objectValue?["notification_id"]?.stringValue } ?? []
+            await refusePlainCompletion(
+                flowId: flowId, notificationIds: ids,
+                message: "The issuer's response carries a superseded secret member (LEGACY_SECRET_MEMBER)"
+            )
+            return
+        }
         // Encrypted-to-the-wallet issuance: same pairing as the WebSocket's flow_complete.
         if Self.claimsEncryptedResponse(result) {
             guard let message = Self.encryptedFlowComplete(flowId: flowId, result: result) else {
