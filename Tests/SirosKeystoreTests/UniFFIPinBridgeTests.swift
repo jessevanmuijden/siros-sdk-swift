@@ -140,7 +140,7 @@ final class UniFFIPinBridgeTests: XCTestCase {
             XCTAssertFalse(callback.promptFailed)
         }
         let cancelling = FakeProvider([nil])
-        withExtendedLifetime(cancelling) {
+        try withExtendedLifetime(cancelling) {
             let cancelled = OneShotPinAuthCallback(pin: nil, fallback: cancelling)
             XCTAssertThrowsError(try cancelled.requestPin(pluginId: "fido2")) { error in
                 guard case FfiWscdError.AuthCancelled = error else { return XCTFail("\(error)") }
@@ -166,10 +166,10 @@ final class UniFFIPinBridgeTests: XCTestCase {
         XCTAssertEqual(provider.requests.map(\.retry), [.wrongPin], "only the retry asked the user, with the notice")
     }
 
-    func testAnScaSignIsRetriedAtMostTheBoundAndThenFails() {
+    func testAnScaSignIsRetriedAtMostTheBoundAndThenFails() throws {
         let provider = FakeProvider(["1", "2", "3", "4"])
         var runs = 0
-        withExtendedLifetime(provider) {
+        try withExtendedLifetime(provider) {
             XCTAssertThrowsError(try UniFFISigner.scaSignWithPinRetry(typedPin: Data("0".utf8), provider: provider) { auth -> Int in
                 runs += 1
                 _ = try auth.requestPin(pluginId: "fido2")
@@ -180,10 +180,10 @@ final class UniFFIPinBridgeTests: XCTestCase {
         XCTAssertEqual(provider.requests.count, WscdPinLimits.operationAttempts - 1, "the first run used the typed PIN")
     }
 
-    func testACancelledScaRetryPromptIsACancelEvenWhenTheLibraryWrapsItAsCallback() {
+    func testACancelledScaRetryPromptIsACancelEvenWhenTheLibraryWrapsItAsCallback() throws {
         let provider = FakeProvider([nil])
         var runs = 0
-        withExtendedLifetime(provider) {
+        try withExtendedLifetime(provider) {
             XCTAssertThrowsError(try UniFFISigner.scaSignWithPinRetry(typedPin: Data("0".utf8), provider: provider) { auth -> Int in
                 runs += 1
                 do { _ = try auth.requestPin(pluginId: "fido2") } catch {}
