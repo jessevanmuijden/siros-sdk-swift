@@ -965,7 +965,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         var payload: [String: AnyCodable] = [
             "matches": .array(matches.map { encode(match: $0) }),
         ]
-        if let noMatchReason { payload["no_match_reason"] = .string(noMatchReason) }
+        if let reason = NoMatchReason.wire(noMatchReason) { payload["no_match_reason"] = .string(reason) }
         return payload
     }
 

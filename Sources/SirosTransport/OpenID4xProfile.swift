@@ -1033,7 +1033,7 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
         // Without this an empty match set arrives as a bare "nothing matched"
         // and the reason - the only thing that can tell the user *which*
         // credential they are missing - is lost on this transport.
-        if let reason = result.noMatchReason { params["no_match_reason"] = .string(reason) }
+        if let reason = NoMatchReason.wire(result.noMatchReason) { params["no_match_reason"] = .string(reason) }
         return params
     }
 

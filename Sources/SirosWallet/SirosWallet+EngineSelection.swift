@@ -123,7 +123,7 @@ extension SirosWallet {
         /// match set, in either case.
         var reason: String {
             switch self {
-            case .declined: return "user selected none of the matching credentials"
+            case .declined: return NoMatchReason.noSelection
             case .noMatch(let reason): return reason
             }
         }
@@ -132,7 +132,7 @@ extension SirosWallet {
     /// Why a selection cannot be presented even though credentials were
     /// chosen: the copies behind them are spent (or their keys are gone).
     /// Shared by both engine handlers so they say the same thing.
-    static let ineligibleSelectionReason = "selected credential has no eligible copies remaining"
+    static let ineligibleSelectionReason = NoMatchReason.credentialsExhausted
 
     /// Whether this selection can be presented at all, and if not, what to
     /// tell the engine. `nil` means go ahead: credentials were selected and
@@ -215,15 +215,18 @@ extension SirosWallet {
         return types
     }
 
-    /// Why this wallet has nothing to present, for the `no_match_reason` the
-    /// engine forwards to the app (and logs) when a match set comes back
-    /// empty. Distinguishes the two cases that look identical on the wire but
-    /// need different words from an app: the wallet holds nothing of the
-    /// requested type at all, and it holds one but has no usable copy left.
+    /// Why this wallet has nothing to present, as the CODE for the `no_match_reason` the engine forwards to the app: the
+    /// wallet holds nothing of the requested type (`no_matching_credential`), or it holds some but has no usable copy
+    /// left (`credentials_exhausted`). Only a code leaves the device; `noMatchDescription` is for the local log.
     ///
-    /// - Parameter candidateCount: credentials the DCQL query did match, none
-    ///   of which turned out to be presentable.
+    /// - Parameter candidateCount: credentials the DCQL query did match, none of which turned out to be presentable.
     static func noMatchReason(dcqlQuery: [String: Any]?, candidateCount: Int) -> String {
+        candidateCount > 0 ? NoMatchReason.credentialsExhausted : NoMatchReason.noMatchingCredential
+    }
+
+    /// The wallet's own words for the same situation, for ITS log only: they name the requested types and how many
+    /// credentials the wallet holds, which must never reach the engine (see `NoMatchReason`).
+    static func noMatchDescription(dcqlQuery: [String: Any]?, candidateCount: Int) -> String {
         if candidateCount > 0 {
             return "\(candidateCount) matching credential(s) have no eligible copies remaining"
         }

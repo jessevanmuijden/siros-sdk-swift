@@ -458,7 +458,7 @@ public struct MatchResponseMessage: Codable, Sendable {
         try container.encode(type, forKey: .type)
         try container.encode(flowId, forKey: .flowId)
         try container.encode(matches.map { $0.engineSlot }, forKey: .matches)
-        try container.encodeIfPresent(noMatchReason, forKey: .noMatchReason)
+        try container.encodeIfPresent(NoMatchReason.wire(noMatchReason), forKey: .noMatchReason)
         try container.encodeIfPresent(error, forKey: .error)
         try container.encodeIfPresent(timestamp, forKey: .timestamp)
     }
@@ -490,6 +490,27 @@ public struct CredentialMatch: Codable, Sendable {
         case credentialQueryId = "credential_query_id"
         case credentialId = "credential_id"
         case availableClaims = "available_claims"
+    }
+}
+
+/// The `no_match_reason` the engine is sent: a CODE, never text. The wallet's description of why nothing matched
+/// (requested types, how many credentials it holds) stays in its own log. Anything that is not code-shaped goes out
+/// as `unspecified`, so free text cannot leave by accident.
+public enum NoMatchReason {
+    public static let noMatchingCredential = "no_matching_credential"
+    public static let credentialsExhausted = "credentials_exhausted"
+    public static let requestNotAnswerable = "request_not_answerable"
+    public static let noSelection = "no_selection"
+    public static let unspecified = "unspecified"
+
+    /// `reason` as sent: nil stays nil; a value matching `^[a-z0-9_]{1,64}$` is sent as is; anything else is `unspecified`.
+    public static func wire(_ reason: String?) -> String? {
+        guard let reason else { return nil }
+        let scalars = reason.unicodeScalars
+        let codeShaped = (1...64).contains(scalars.count) && scalars.allSatisfy {
+            ($0.value >= 0x61 && $0.value <= 0x7A) || ($0.value >= 0x30 && $0.value <= 0x39) || $0.value == 0x5F
+        }
+        return codeShaped ? reason : unspecified
     }
 }
 

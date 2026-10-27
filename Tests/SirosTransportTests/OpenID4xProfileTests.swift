@@ -1041,7 +1041,7 @@ final class OpenID4xProfileTests: XCTestCase {
         let ctx = MockPeerContext()
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onMatchRequest: { _, _ in
-                MatchResult(matches: [], noMatchReason: "no stored credential matches the requested type(s): urn:eudi:pid:1")
+                MatchResult(matches: [], noMatchReason: "no stored credential matches the requested type(s): urn:eudi:pid:1")  // free text on purpose: must go out as a code
             }
         ))
         profile.initialize(ctx: ctx)
@@ -1054,7 +1054,7 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(params?["matches"], .array([]))
         XCTAssertEqual(
             params?["no_match_reason"],
-            .string("no stored credential matches the requested type(s): urn:eudi:pid:1")
+            .string("unspecified")
         )
     }
 
