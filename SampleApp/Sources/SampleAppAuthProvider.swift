@@ -24,6 +24,12 @@ final class SampleAppAuthProvider: WscdAuthProvider, @unchecked Sendable {
     }
 
     func requestPin(pluginId: String) throws -> Data {
+        try requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin))
+    }
+
+    /// The SDK's PIN interface with a kind: it owns the choose/confirm/compare logic for a NEW PIN and calls this
+    /// once per prompt; this app only shows the sheet.
+    func requestPin(pluginId: String, request: PinRequest) throws -> Data {
         guard pluginId == "fido2" else {
             // Every non-FIDO2 plugin (currently just "r2ps") uses a fixed
             // debug-only test PIN in this sample app - matches the Kotlin
@@ -43,12 +49,14 @@ final class SampleAppAuthProvider: WscdAuthProvider, @unchecked Sendable {
                 semaphore.signal()
                 return
             }
-            viewModel.pendingFido2PinEntry = PendingFido2PinEntry(respond: { pin in
-                // Clear first so the sheet dismisses on Submit too, not
-                // just Cancel - `dismissFido2PinEntry`'s onDismiss-driven
-                // call is then a harmless no-op, mirroring
-                // `requestWscdChoice`'s identical `respond` closure.
-                viewModel.pendingFido2PinEntry = nil
+            let entryId = UUID()
+            let answered = OnceFlag()
+            viewModel.pendingFido2PinEntry = PendingFido2PinEntry(id: entryId, request: request, respond: { pin in
+                // Single-use: the first answer wins, later ones (a duplicate tap, a late dismissal) do nothing.
+                guard answered.setOnce() else { return }
+                // Clear the sheet only if it still shows THIS prompt; the SDK may already have installed the next
+                // one (confirmation, retry) the moment the semaphore below is signalled.
+                if viewModel.pendingFido2PinEntry?.id == entryId { viewModel.pendingFido2PinEntry = nil }
                 if let pin, !pin.isEmpty {
                     result = .success(Data(pin.utf8))
                 } else {
@@ -74,6 +82,20 @@ final class SampleAppAuthProvider: WscdAuthProvider, @unchecked Sendable {
         // No WebAuthn-assertion-based plugin ceremony is exercised by this
         // sample app today (R2PS uses OPAQUE, FIDO2 uses ClientPin above).
         throw FfiWscdError.AuthCancelled(msg: "WebAuthn assertion not implemented in sample app")
+    }
+}
+#endif
+
+#if canImport(siros_wscd_managerFFI)
+/// A flag that can be set once, thread-safely: the first `setOnce()` returns true, every later one false.
+final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func setOnce() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
     }
 }
 #endif

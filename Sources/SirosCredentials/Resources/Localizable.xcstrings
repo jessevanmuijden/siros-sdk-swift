@@ -714,6 +714,176 @@
           }
         }
       }
+    },
+    "error_pin_key_blocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The key is blocked and needs a reset."
+          }
+        },
+        "el": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Το κλειδί είναι μπλοκαρισμένο και χρειάζεται επαναφορά."
+          }
+        },
+        "pt": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A chave está bloqueada e precisa de ser reposta."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nyckeln är blockerad och måste återställas."
+          }
+        },
+        "fi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avain on lukittu ja se täytyy nollata."
+          }
+        }
+      }
+    },
+    "error_pin_authenticator_blocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The authenticator is blocked: unplug it and plug it in again."
+          }
+        },
+        "el": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ο αυθεντικοποιητής είναι μπλοκαρισμένος: αποσυνδέστε τον και συνδέστε τον ξανά."
+          }
+        },
+        "pt": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O autenticador está bloqueado: desligue-o e ligue-o novamente."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Autentiseraren är blockerad: koppla ur den och anslut den igen."
+          }
+        },
+        "fi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Todennuslaite on lukittu: irrota se ja kytke uudelleen."
+          }
+        }
+      }
+    },
+    "error_pin_not_set": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Internal error: the authenticator has no PIN set."
+          }
+        },
+        "el": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Εσωτερικό σφάλμα: ο αυθεντικοποιητής δεν έχει ορισμένο PIN."
+          }
+        },
+        "pt": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erro interno: o autenticador não tem PIN definido."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Internt fel: autentiseraren har ingen PIN-kod."
+          }
+        },
+        "fi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sisäinen virhe: todennuslaitteella ei ole PIN-koodia."
+          }
+        }
+      }
+    },
+    "error_pin_too_many_attempts": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many PIN attempts."
+          }
+        },
+        "el": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Πάρα πολλές προσπάθειες PIN."
+          }
+        },
+        "pt": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Demasiadas tentativas de PIN."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "För många PIN-försök."
+          }
+        },
+        "fi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liian monta PIN-yritystä."
+          }
+        }
+      }
+    },
+    "error_pin_wrong": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The PIN was not accepted."
+          }
+        },
+        "el": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Το PIN δεν έγινε δεκτό."
+          }
+        },
+        "pt": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O PIN não foi aceite."
+          }
+        },
+        "sv": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PIN-koden godtogs inte."
+          }
+        },
+        "fi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PIN-koodia ei hyväksytty."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

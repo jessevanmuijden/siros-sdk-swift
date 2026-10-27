@@ -77,4 +77,17 @@ final class SecureBytesTests: XCTestCase {
             }
         }
     }
+
+    func testConstantTimeEqualsComparesInPlace() {
+        let a = SecureBytes(utf8: "123456"), same = SecureBytes(utf8: "123456")
+        XCTAssertTrue(a.constantTimeEquals(same))
+        XCTAssertTrue(same.constantTimeEquals(a))
+        XCTAssertFalse(a.constantTimeEquals(SecureBytes(utf8: "123457")), "last byte differs")
+        XCTAssertFalse(a.constantTimeEquals(SecureBytes(utf8: "023456")), "first byte differs")
+        XCTAssertFalse(a.constantTimeEquals(SecureBytes(utf8: "12345")), "different length")
+        XCTAssertTrue(a.constantTimeEquals(a), "the same instance")
+        same.wipe()
+        XCTAssertFalse(a.constantTimeEquals(same), "a wiped buffer equals nothing")
+        XCTAssertFalse(same.constantTimeEquals(same))
+    }
 }

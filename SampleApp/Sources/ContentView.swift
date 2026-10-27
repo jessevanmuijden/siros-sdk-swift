@@ -99,10 +99,12 @@ struct ContentView: View {
         // ClientPin prompt (see `SampleAppAuthProvider.requestPin`) can fire
         // during any signing operation regardless of which screen is
         // showing underneath.
-        .sheet(item: $viewModel.pendingFido2PinEntry, onDismiss: {
-            viewModel.dismissFido2PinEntry()
-        }) { pending in
+        // Dismissed only by the sheet's own Submit/Cancel (each answers its prompt exactly once): swiping it away is
+        // disabled, because an `onDismiss` cancel cannot tell WHICH prompt was dismissed and used to cancel the NEXT
+        // prompt (the confirmation or a retry) that the SDK installed right after a submit.
+        .sheet(item: $viewModel.pendingFido2PinEntry) { pending in
             Fido2PinEntryView(pending: pending)
+                .interactiveDismissDisabled(true)
         }
         // Same top-level rationale as `pendingWscdChoice`/`pendingFido2PinEntry`
         // above - offered once right after a successful login, regardless of

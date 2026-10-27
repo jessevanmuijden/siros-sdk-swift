@@ -37,6 +37,17 @@ public protocol WscdAuthProvider: AnyObject, Sendable {
     /// - Throws: If the user cancels.
     func requestPin(pluginId: String) throws -> Data
 
+    /// Request a PIN, saying what for: to ENTER the PIN already set (`.enterPin`), or to CHOOSE a new one on an
+    /// authenticator that has none (`.setNewPin`, then `.confirmNewPin` for the second entry). `request.retry` says
+    /// why the prompt repeats an earlier one, so the app can show "PIN too short", "PINs did not match", "wrong PIN".
+    ///
+    /// All the logic stays in the SDK: it enforces the minimum length, asks twice, compares, and bounds the
+    /// re-prompts; the app only shows the prompt and returns what was typed. The default calls
+    /// ``requestPin(pluginId:)``, so an app that does not implement this still works (it just shows its plain PIN
+    /// prompt, with no "Choose a PIN" wording).
+    /// - Throws: If the user cancels.
+    func requestPin(pluginId: String, request: PinRequest) throws -> Data
+
     /// Request a WebAuthn assertion.
     /// - Parameters:
     ///   - pluginId: Which registered WSCD plugin is asking - see
@@ -53,6 +64,12 @@ public protocol WscdAuthProvider: AnyObject, Sendable {
         rpId: String,
         allowedCredentials: [Data]
     ) throws -> Data
+}
+
+public extension WscdAuthProvider {
+    func requestPin(pluginId: String, request: PinRequest) throws -> Data {
+        try requestPin(pluginId: pluginId)
+    }
 }
 
 /// `UniFFISigner` wraps the Rust `siros-wscd-manager` UniFFI bindings
@@ -155,11 +172,9 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     public func generateKey(algorithm: String) async throws -> String {
         try await onFFIQueue {
             let ffiAlgorithm = try Self.mapAlgorithm(algorithm)
-            let result = try self.ffi.generateKey(
-                algorithm: ffiAlgorithm,
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            )
+            let result = try self.withPinRecovery { auth in
+                try self.ffi.generateKey(algorithm: ffiAlgorithm, auth: auth, progress: NoOpProgressCallback())
+            }
             self.cacheLock.lock()
             self.publicKeyCache[result.kid] = Data(result.publicKeyJwk.utf8)
             self.cacheLock.unlock()
@@ -169,13 +184,15 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
 
     public func sign(keyId: String, data: Data) async throws -> Data {
         try await onFFIQueue {
-            let result = try self.ffi.sign(
-                kid: keyId,
-                data: data,
-                algorithm: .es256, // algorithm is inferred from key by the manager
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            )
+            let result = try self.withPinRecovery { auth in
+                try self.ffi.sign(
+                    kid: keyId,
+                    data: data,
+                    algorithm: .es256, // algorithm is inferred from key by the manager
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }
             return result.data
         }
     }
@@ -232,11 +249,9 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
 
     public func migrateKey(keyId: String, targetPlugin: String) async throws -> MigrationResult {
         try await onFFIQueue {
-            let result = try self.ffi.migrateKey(
-                kid: keyId,
-                targetPluginId: targetPlugin,
-                auth: self.authCallbackBridge()
-            )
+            let result = try self.withPinRecovery { auth in
+                try self.ffi.migrateKey(kid: keyId, targetPluginId: targetPlugin, auth: auth)
+            }
             switch result {
             case .migrated(let newKid):
                 return .migrated(newKeyId: newKid)
@@ -281,6 +296,9 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
             // The user backed out of the PIN prompt (the first one or a retry): that is declining the
             // transaction, answered at once like any other decline, not a failure of the wallet.
             throw TransactionDataError(.declined, detail: "the user cancelled the authentication")
+        } catch let FfiWscdError.Pin(reason, _) {
+            // The SCA flow asks once and does not re-run: a PIN the authenticator refused is reported as such.
+            throw PinFailureAction.terminalError(for: Self.sdkPinFailure(reason))
         }
     }
 
@@ -381,6 +399,44 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
         AuthCallbackBridge(provider: authProvider)
     }
 
+    /// Runs a PIN-using FFI operation, re-running it (bounded, see `WscdPinLimits`) when the authenticator refuses
+    /// the PIN: a rejected NEW PIN re-prompts for a new one, a wrong PIN re-prompts to enter it, and a blocked key
+    /// or authenticator fails with a clear `WscdPinError`. The error the bridge recorded (the user ran out of
+    /// attempts choosing a PIN) replaces the generic "cancelled" the FFI reports.
+    func withPinRecovery<T>(_ body: (AuthCallbackBridge) throws -> T) throws -> T {
+        try PinRecovery.run(classify: Self.classifyPinFailure) { retry in
+            let bridge = authCallbackBridge()
+            bridge.setNextPromptRetry(retry)
+            do {
+                return try body(bridge)
+            } catch {
+                // The library wraps a callback's failure (here: the SDK gave up asking for a PIN) in its own error
+                // (`FfiWscdError.Callback`), not only `AuthCancelled`: the recorded error wins whatever the wrapper.
+                if let recorded = bridge.recordedPinError { throw recorded }
+                throw error
+            }
+        }
+    }
+
+    /// The one place `FfiWscdError.Pin` is recognised: nil for every other error.
+    static func classifyPinFailure(_ error: Error) -> PinFailureReason? {
+        guard case let FfiWscdError.Pin(reason, _) = error else { return nil }
+        return sdkPinFailure(reason)
+    }
+
+    static func sdkPinFailure(_ reason: FfiPinFailure) -> PinFailureReason {
+        switch reason {
+        case let .tooShort(minLength): return .tooShort(minLength: Int(minLength))
+        case .tooLong: return .tooLong
+        case .invalidEncoding: return .invalidEncoding
+        case .policyViolation: return .policyViolation
+        case .invalid: return .invalid
+        case .blocked: return .blocked
+        case .authBlocked: return .authBlocked
+        case .notSet: return .notSet
+        }
+    }
+
     // MARK: - Type mapping
 
     /// The manager's name for a BLS12-381 Schnorr key-binding key
@@ -449,16 +505,55 @@ public enum UniFFISignerError: Error, LocalizedError {
 
 final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
     private weak var provider: WscdAuthProvider?
+    private let lock = NSLock()
+    private var nextPromptRetry: PinRetryReason?
+    private var pinError: WscdPinError?
 
     init(provider: WscdAuthProvider?) {
         self.provider = provider
+    }
+
+    /// Why the NEXT prompt repeats an earlier operation's (consumed by that prompt).
+    func setNextPromptRetry(_ retry: PinRetryReason?) {
+        lock.lock(); nextPromptRetry = retry; lock.unlock()
+    }
+
+    private func takeNextPromptRetry() -> PinRetryReason? {
+        lock.lock(); defer { lock.unlock() }
+        let retry = nextPromptRetry
+        nextPromptRetry = nil
+        return retry
+    }
+
+    /// Set when the user ran out of attempts choosing a PIN: the FFI only sees a cancel.
+    var recordedPinError: WscdPinError? {
+        lock.lock(); defer { lock.unlock() }
+        return pinError
     }
 
     func requestPin(pluginId: String) throws -> Data {
         guard let provider = provider else {
             throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured")
         }
-        return try provider.requestPin(pluginId: pluginId)
+        return try provider.requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin, retry: takeNextPromptRetry()))
+    }
+
+    /// The authenticator has no PIN: the SDK, not the app, runs "choose, confirm, compare" and enforces `minLength`
+    /// before anything is returned (Rust does not confirm; it sets whatever comes back).
+    func requestNewPin(pluginId: String, minLength: UInt32) throws -> Data {
+        guard let provider = provider else {
+            throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured")
+        }
+        let chooser = NewPinChooser { try provider.requestPin(pluginId: pluginId, request: $0) }
+        do {
+            return try chooser.choose(minLength: Int(minLength), firstRetry: takeNextPromptRetry())
+        } catch let error as WscdPinError {
+            lock.lock(); pinError = error; lock.unlock()
+            throw FfiWscdError.AuthCancelled(msg: "PIN entry gave up: too many attempts")
+        } catch {
+            // The provider throws only when the user cancels, whatever error type it uses.
+            throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt")
+        }
     }
 
     func requestWebauthnAssertion(
@@ -501,6 +596,11 @@ final class OneShotPinAuthCallback: FfiAuthCallback, @unchecked Sendable {
         if let once { return once }
         guard let fallback else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
         return try fallback.requestPin(pluginId: pluginId)
+    }
+
+    /// An SCA sign never sets a PIN: the plugin asking for one is refused rather than inventing a PIN.
+    func requestNewPin(pluginId: String, minLength: UInt32) throws -> Data {
+        throw FfiWscdError.AuthCancelled(msg: "setting a PIN is not part of a transaction signature")
     }
 
     func requestWebauthnAssertion(pluginId: String, challenge: Data, rpId: String, allowedCredentials: [Data]) throws -> Data {
@@ -638,41 +738,57 @@ extension UniFFISigner: SignerLifecycleManager {
 
     public func registerLifecycle(request: RegisterLifecycleRequest) async throws -> RegistrationOutcome {
         try await onFFIQueue {
-            try self.ffi.registerLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkRegistrationOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.registerLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkRegistrationOutcome()
         }
     }
 
     public func activateLifecycle(request: ActivateLifecycleRequest) async throws -> ActivationOutcome {
         try await onFFIQueue {
-            try self.ffi.activateLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkActivationOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.activateLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkActivationOutcome()
         }
     }
 
     public func rotateLifecycle(request: RotateLifecycleRequest) async throws -> RotationOutcome {
         try await onFFIQueue {
-            try self.ffi.rotateLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkRotationOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.rotateLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkRotationOutcome()
         }
     }
 
     public func destroyLifecycle(request: DestroyLifecycleRequest) async throws -> DestructionOutcome {
         try await onFFIQueue {
-            try self.ffi.destroyLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkDestructionOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.destroyLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkDestructionOutcome()
         }
     }
 }
