@@ -1134,6 +1134,43 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(flowId, "B")
     }
 
+    /// Issuance A is cancelled before its flow id is known and B starts; A's LATE completion carries a superseded
+    /// secret member. A's own notification is refused (credential_failure for ITS id), but the cleanup stands down:
+    /// B's guards, epoch, key and state are untouched, so B's valid completion is not dropped.
+    func testASupersededIssuancesRefusalNeverTouchesTheCurrentIssuance() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        let tagA = w.issuanceStartEpoch.begin()                            // A starts ...
+        let tagB = w.issuanceStartEpoch.begin()                            // ... is superseded; B starts
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        try installKey(w, flowId: "B")
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "A",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-A"]],
+            "credential_metadata": ["org.siros.secret_seed": ["k": "00112233445566778899aabbccddeeff"]],
+        ]
+        var message = try Self.decodeFlowComplete(object)
+        message.startTag = tagA
+        await w.handleFlowComplete(msg: message)
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-A"], "A is refused for its own notification id")
+        XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure)
+        XCTAssertTrue(w.issuanceStartEpoch.isCurrent(tagB), "B's epoch is not advanced by A's cleanup")
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is not reset")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        XCTAssertTrue(listener.errors.isEmpty, "A's failure is not reported as B's")
+        guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
+        XCTAssertEqual(flowId, "B")
+        let stored = await w.credentialStore.getAll()
+        XCTAssertTrue(stored.isEmpty, "nothing stored")
+    }
+
     /// The ready-state restore of a failed issuance waits for the credential store. If a logout publishes
     /// `.disconnected`, or a replacement issuance begins (without cancelling the failed one), while it waits, the restore
     /// stands down: the later state is never overwritten with the failed issuance's `.ready`.

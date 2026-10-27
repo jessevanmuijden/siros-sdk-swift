@@ -424,13 +424,17 @@ extension SirosWallet {
     /// - Parameter ifGeneration: when given, the cleanup runs only if the flow's generation is still this one, decided
     ///   under the wallet lock together with ending the flow; otherwise a cancellation (or another issuance) owns the
     ///   state now and nothing here touches it.
-    func failIssuanceLocally(flowId: String, message: String, ifGeneration: [Int]? = nil) async {
+    ///   - ifEpoch: the issuance start tag the failing completion belongs to. Checked under the same lock as
+    ///     `ifGeneration`: a completion of a SUPERSEDED issuance (cancelled, then another begun) must not clear the new
+    ///     issuance's guards, advance its epoch or end its state, so it does nothing here.
+    func failIssuanceLocally(flowId: String, message: String, ifGeneration: [Int]? = nil, ifEpoch: Int? = nil) async {
         // The issuance attempt this failure belongs to, taken before anything below: a replacement issuance that starts
         // afterwards (without cancelling this one) makes the final restore of the ready state stand down.
         let attempt = issuanceStartEpoch.current
-        if let ifGeneration {
+        if ifGeneration != nil || ifEpoch != nil {
             lock.lock()
-            guard ifGeneration == credentialResponseGenerationLocked(flowId: flowId) else { lock.unlock(); return }
+            if let ifGeneration, ifGeneration != credentialResponseGenerationLocked(flowId: flowId) { lock.unlock(); return }
+            if let ifEpoch, !issuanceStartEpoch.isCurrent(ifEpoch) { lock.unlock(); return }
             flowEndSeq[flowId, default: 0] += 1
             lock.unlock()
         }

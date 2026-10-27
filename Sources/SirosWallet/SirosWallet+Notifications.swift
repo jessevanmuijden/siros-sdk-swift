@@ -48,7 +48,9 @@ extension SirosWallet {
         if offeredKey, msg.credentialResponseEncrypted != true {
             // The engine says the issuer answered in the clear although the wallet's key was offered: the engine holds
             // the credentials, which engine-blind issuance forbids. Nothing is stored; the issuer is told.
-            await refusePlainCompletion(flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId))
+            await refusePlainCompletion(
+                flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId), startTag: msg.startTag
+            )
             return
         }
         // A plain completion whose relayed `credential_metadata` carries a superseded secret-bearing member
@@ -57,7 +59,7 @@ extension SirosWallet {
         if msg.credentialMetadata?.hasProhibitedMember == true {
             await refusePlainCompletion(
                 flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId),
-                message: "The issuer's response carries a superseded secret member (LEGACY_SECRET_MEMBER)"
+                startTag: msg.startTag, message: "The issuer's response carries a superseded secret member (LEGACY_SECRET_MEMBER)"
             )
             return
         }
@@ -208,8 +210,13 @@ extension SirosWallet {
 
     /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
     /// for each notification id the entries carry, and the issuance ended locally.
+    ///
+    /// - Parameter startTag: the issuance start tag the completion carries (nil over WMP's plain path). A completion
+    ///   whose issuance was superseded is still refused for ITS OWN notification ids, but its cleanup stands down
+    ///   (`failIssuanceLocally(ifEpoch:)`): it must not touch the current issuance's guards, epoch or state.
     func refusePlainCompletion(
-        flowId: String, notificationIds: [String], message: String = "The issuer's response was not encrypted to this wallet"
+        flowId: String, notificationIds: [String], startTag: Int? = nil,
+        message: String = "The issuer's response was not encrypted to this wallet"
     ) async {
         // The notification awaits a transport send, during which this issuance may be cancelled and another begun: the
         // cleanup runs only if THIS flow still owns the state (checked under the wallet lock, where it also ends the flow).
@@ -217,7 +224,7 @@ extension SirosWallet {
         for id in Set(notificationIds).sorted() where !id.isEmpty {
             await sendCredentialFailure(flowId: flowId, notificationId: id)
         }
-        await failIssuanceLocally(flowId: flowId, message: message, ifGeneration: generation)
+        await failIssuanceLocally(flowId: flowId, message: message, ifGeneration: generation, ifEpoch: startTag)
     }
 
     /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
