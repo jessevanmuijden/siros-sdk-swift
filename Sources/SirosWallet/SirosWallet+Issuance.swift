@@ -942,12 +942,16 @@ extension SirosWallet {
     /// - Returns: `false` when `requestUri` is identical to one started within the last minute
     ///   (`PresentationLinkLedger`) - no second flow is started for it (an issuer's own web page can re-fire the
     ///   same OpenID4VP redirect-URI request after the first presentation already answered it, and the verifier
-    ///   would refuse a second answer anyway: its nonce is spent). `true` when a flow was started. A start that
-    ///   throws forgets the link, so a retry of the SAME link goes through at once rather than waiting out the
-    ///   window.
+    ///   would refuse a second answer anyway: its nonce is spent). `true` when the request was actually dispatched
+    ///   to a live socket. A start that throws - not connected, a token refresh failure, or the dispatch itself
+    ///   finding no socket (`WalletEngineSession.startPresentation`'s own return value: it is nonthrowing and a
+    ///   dropped send is otherwise indistinguishable from a delivered one) - forgets the link, so a retry of the
+    ///   SAME link goes through at once rather than waiting out the window, and gives up this presentation's claim
+    ///   on `pendingPresentationLink`.
     @discardableResult
     public func startPresentation(requestUri: String) async throws -> Bool {
         guard presentationLinkLedger.admit(requestUri) else { return false }
+        lock.lock(); pendingPresentationLink = requestUri; lock.unlock()
         do {
             guard let engine = engineSession else {
                 throw SirosError.wallet(message: "Not connected")
@@ -959,17 +963,26 @@ extension SirosWallet {
             }
             // Snapshot at flow start: a flag flip applies to the next flow only.
             let declare = snapshotTransactionDataEnablement()
+            let dispatched: Bool
             if let send = startPresentationSendHook {
-                send(requestUri)
+                dispatched = send(requestUri)
             } else {
-                engine.startPresentation(
+                dispatched = engine.startPresentation(
                     requestUri: requestUri,
                     features: TransactionDataDeclaration.engineFeatures(enabled: declare)
                 )
             }
+            guard dispatched else {
+                // The connection dropped in the narrow window after `ensureEngineConnected` succeeded: this is not a
+                // throw from `send` itself (it is nonthrowing), so it is handled the same way as the `catch` below.
+                throw SirosError.wallet(message: "Not connected")
+            }
             return true
         } catch {
             presentationLinkLedger.release(requestUri)
+            lock.lock()
+            if pendingPresentationLink == requestUri { pendingPresentationLink = nil }
+            lock.unlock()
             throw error
         }
     }

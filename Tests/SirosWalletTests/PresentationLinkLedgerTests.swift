@@ -52,6 +52,24 @@ final class PresentationLinkLedgerTests: XCTestCase {
         XCTAssertFalse(ledger.admit("c"), "c is still within its window")
     }
 
+    /// A RENEWED admission (one whose window had already expired) moves to the fresh end of the eviction order,
+    /// not left at its stale old position: capacity 2, admit A, B, A again after A's window expires (renewed) - the
+    /// next new link must evict the genuinely oldest, still-expired B, not the freshly-renewed A.
+    func testARenewedAdmissionIsNotEvictedAheadOfAGenuinelyOlderEntry() {
+        let clock = Clock()
+        let ledger = PresentationLinkLedger(window: 60, capacity: 2, now: { clock.now })
+        XCTAssertTrue(ledger.admit("a"))                 // t0
+        clock.now.addTimeInterval(1)
+        XCTAssertTrue(ledger.admit("b"))                 // t1
+        clock.now.addTimeInterval(60)                    // a's window (from t0) has now expired
+        XCTAssertTrue(ledger.admit("a"), "a's window expired: renewed, not refused")   // t61
+        clock.now.addTimeInterval(1)
+        XCTAssertTrue(ledger.admit("c"), "c is new, capacity is full: evicts the oldest")   // t62
+        // b (still within ITS OWN window from t1) must be the one evicted, not the just-renewed a.
+        XCTAssertFalse(ledger.admit("a"), "a must still be inside its freshly-renewed window")
+        XCTAssertTrue(ledger.admit("b"), "b was evicted (its stale position made it look newer than it was) - an immediate duplicate would otherwise have started a second flow")
+    }
+
     func testReleaseAllForgetsEveryLink() {
         let ledger = PresentationLinkLedger()
         _ = ledger.admit("a")

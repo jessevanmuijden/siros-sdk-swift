@@ -958,19 +958,27 @@ final class WalletViewModel: ObservableObject {
 
     /// - Parameter body: returns `false` when nothing was actually started (a presentation request link identical
     ///   to one started within the last minute - `SirosWallet.startPresentation`'s dedup; an issuer's own web page
-    ///   can re-fire the same request after it was already answered). The interstitial is dismissed either way:
-    ///   there is no flow in progress for `startFlow` to show it for.
+    ///   can re-fire the same request after it was already answered).
+    ///
+    /// A redelivered duplicate can reach here while the ORIGINAL request for the same link is still awaiting its
+    /// connection (`SirosWallet.startPresentation` suspends on `ensureEngineConnected` before the ledger's window has
+    /// anything to do with it): the duplicate's own `body()` returns `false` almost at once, well before the original
+    /// resolves. If this invocation only resets `flowStarting` to the same value an earlier one already showed, it
+    /// did not introduce the interstitial and must not be the one to dismiss it - only the invocation that found
+    /// `flowStarting` nil (and so is the one actually responsible for showing it) ever clears it.
     private func startFlow(type: String, _ body: @escaping () async throws -> Bool) {
-        flowStarting = type
+        let introducedHere = flowStarting == nil
+        if introducedHere { flowStarting = type }
         Task {
+            func dismissIfIntroducedHere() { if introducedHere { flowStarting = nil } }
             do {
-                if try await !body() { flowStarting = nil }
+                if try await !body() { dismissIfIntroducedHere() }
             } catch is CancellationError {
                 // The user cancelled the start (`cancelCurrentFlow()`); the
                 // wallet already reset itself. Not an error.
-                flowStarting = nil
+                dismissIfIntroducedHere()
             } catch {
-                flowStarting = nil
+                dismissIfIntroducedHere()
                 setError(error.localizedDescription)
             }
         }

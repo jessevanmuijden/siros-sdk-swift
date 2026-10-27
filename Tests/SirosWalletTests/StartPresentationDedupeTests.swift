@@ -58,7 +58,7 @@ final class StartPresentationDedupeTests: XCTestCase {
         let w = wallet()
         w.startPresentationConnectHook = { _ in }
         var sent: [String] = []
-        w.startPresentationSendHook = { sent.append($0) }
+        w.startPresentationSendHook = { sent.append($0); return true }
         let link = "openid4vp://?client_id=x&nonce=1"
 
         let first = try await w.startPresentation(requestUri: link)
@@ -73,7 +73,7 @@ final class StartPresentationDedupeTests: XCTestCase {
         let w = wallet()
         w.startPresentationConnectHook = { _ in }
         var sent: [String] = []
-        w.startPresentationSendHook = { sent.append($0) }
+        w.startPresentationSendHook = { sent.append($0); return true }
 
         let first = try await w.startPresentation(requestUri: "openid4vp://?client_id=x")
         let second = try await w.startPresentation(requestUri: "openid4vp://?client_id=y")
@@ -95,7 +95,7 @@ final class StartPresentationDedupeTests: XCTestCase {
 
         var sent: [String] = []
         w.startPresentationConnectHook = { _ in }
-        w.startPresentationSendHook = { sent.append($0) }
+        w.startPresentationSendHook = { sent.append($0); return true }
         let retried = try await w.startPresentation(requestUri: link)
 
         XCTAssertTrue(retried, "the failed attempt did not hold the link against the retry")
@@ -116,9 +116,70 @@ final class StartPresentationDedupeTests: XCTestCase {
         w.engineSession = WalletEngineSession(baseUrl: "https://wallet.example.invalid", tenantId: "t")
         w.startPresentationConnectHook = { _ in }
         var sent: [String] = []
-        w.startPresentationSendHook = { sent.append($0) }
+        w.startPresentationSendHook = { sent.append($0); return true }
         let started = try await w.startPresentation(requestUri: link)
         XCTAssertTrue(started)
+        XCTAssertEqual(sent, [link])
+    }
+
+    /// Cancelling a presentation releases ITS ledger entry: an immediate retry of the SAME request must not be held
+    /// against the window for the rest of the minute, unlike a presentation that reaches its own completion/error.
+    func testCancellingAPresentationReleasesItsLinkSoAnImmediateRetryGoesThrough() async throws {
+        let w = wallet()
+        w.startPresentationConnectHook = { _ in }
+        var sent: [String] = []
+        w.startPresentationSendHook = { sent.append($0); return true }
+        let link = "openid4vp://?client_id=x"
+
+        let first = try await w.startPresentation(requestUri: link)
+        XCTAssertTrue(first)
+        w.cancelCurrentFlow()
+        let retried = try await w.startPresentation(requestUri: link)
+
+        XCTAssertTrue(retried, "cancelling released the link - the retry is not an ignored duplicate")
+        XCTAssertEqual(sent, [link, link])
+    }
+
+    /// A presentation that reaches its OWN completion (not a cancel) is still deduped for the rest of the window:
+    /// only a cancel releases the entry early.
+    func testACompletedPresentationsLinkIsStillDedupedUntilItsWindowExpires() async throws {
+        let w = wallet()
+        w.startPresentationConnectHook = { _ in }
+        var sent: [String] = []
+        w.startPresentationSendHook = { sent.append($0); return true }
+        let link = "openid4vp://?client_id=x"
+
+        let first = try await w.startPresentation(requestUri: link)
+        XCTAssertTrue(first)
+        let completion = try JSONDecoder().decode(
+            FlowCompleteMessage.self, from: Data(#"{"type":"flow_complete","flow_id":"p1"}"#.utf8)
+        )
+        await w.handleFlowComplete(msg: completion)
+        let redelivered = try await w.startPresentation(requestUri: link)
+
+        XCTAssertFalse(redelivered, "the completed presentation's link is still inside its window")
+        XCTAssertEqual(sent, [link], "no second send for the redelivered link")
+    }
+
+    /// `WalletEngineSession.startPresentation` is nonthrowing: a dispatch that finds no live socket (the connection
+    /// dropped in the window after `ensureEngineConnected` succeeded) must not be treated as success, and must
+    /// release the link exactly as a thrown failure does.
+    func testADispatchThatFindsNoSocketIsNotTreatedAsSuccessAndReleasesTheLink() async throws {
+        let w = wallet()
+        let link = "openid4vp://?client_id=x"
+        w.startPresentationConnectHook = { _ in }
+        w.startPresentationSendHook = { _ in false }       // mirrors WalletEngineSession.startPresentation finding no socket
+
+        do {
+            _ = try await w.startPresentation(requestUri: link)
+            XCTFail("a dispatch that found no socket must throw, not return true")
+        } catch {}
+
+        var sent: [String] = []
+        w.startPresentationSendHook = { sent.append($0); return true }
+        let retried = try await w.startPresentation(requestUri: link)
+
+        XCTAssertTrue(retried, "the undelivered dispatch did not hold the link against a retry")
         XCTAssertEqual(sent, [link])
     }
 }

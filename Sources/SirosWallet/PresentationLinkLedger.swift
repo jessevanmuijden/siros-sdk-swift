@@ -45,7 +45,11 @@ final class PresentationLinkLedger: @unchecked Sendable {
     }
 
     /// Whether `link` may start a presentation now: true the first time, or once `window` has passed since it was
-    /// last admitted; false for one still within its window. Records it as admitted either way the answer is true.
+    /// last admitted; false for one still within its window. Records it as admitted either way the answer is true,
+    /// moving it to the most-recently-used end of the eviction order (a RENEWED entry - one admitted again after its
+    /// window expired - is exactly as fresh as a brand new one: without this, its stale position from the earlier
+    /// admission would make it look like the oldest entry and let it be evicted ahead of a genuinely older,
+    /// still-expired one, letting an immediate duplicate of it start a second flow).
     func admit(_ link: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         let key = Self.digest(link)
@@ -53,12 +57,11 @@ final class PresentationLinkLedger: @unchecked Sendable {
         if let last = admittedAt[key], at.timeIntervalSince(last) < window {
             return false
         }
-        if admittedAt[key] == nil {
-            order.append(key)
-            while order.count > capacity {
-                let evicted = order.removeFirst()
-                admittedAt.removeValue(forKey: evicted)
-            }
+        order.removeAll { $0 == key }
+        order.append(key)
+        while order.count > capacity {
+            let evicted = order.removeFirst()
+            admittedAt.removeValue(forKey: evicted)
         }
         admittedAt[key] = at
         return true

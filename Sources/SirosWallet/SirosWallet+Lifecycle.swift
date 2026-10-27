@@ -105,6 +105,12 @@ extension SirosWallet {
         // with any of them.
         lock.lock()
         issuanceStartEpoch.invalidate()
+        // The presentation this wallet was starting or running, if any, is cancelled with everything else here: its
+        // ledger entry is released (unlike a presentation that reaches its own terminal event, which only clears
+        // this pointer - see `handleFlowComplete`/`handleFlowError`), so an immediate retry of the SAME request is
+        // not held against the window for the rest of the minute.
+        let cancelledPresentationLink = pendingPresentationLink
+        pendingPresentationLink = nil
         var reset: WalletState?
         var cancelFlowId: String?
         if case .flowActive(let userId, let displayName, let flowId, _, _, let creds) = _state {
@@ -125,6 +131,7 @@ extension SirosWallet {
         engine?.invalidateBufferedRequests()
         resetIssuanceGuardsLocked()
         lock.unlock()
+        if let cancelledPresentationLink { presentationLinkLedger.release(cancelledPresentationLink) }
         if let cancelFlowId {
             try? engine?.cancelFlow(flowId: cancelFlowId)
             // The flow is over for this wallet: marked ended, so a request for it still buffered on the legacy
