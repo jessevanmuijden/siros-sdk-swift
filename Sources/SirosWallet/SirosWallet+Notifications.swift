@@ -199,22 +199,49 @@ extension SirosWallet {
     /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
     /// for each notification id the entries carry, and the issuance ended locally.
     func refusePlainCompletion(flowId: String, notificationIds: [String]) async {
+        // The notification awaits a transport send, during which this issuance may be cancelled and another begun: the
+        // cleanup runs only if THIS flow still owns the state (checked under the wallet lock, where it also ends the flow).
+        let generation = credentialResponseGeneration(flowId: flowId)
         for id in Set(notificationIds).sorted() where !id.isEmpty {
             await sendCredentialFailure(flowId: flowId, notificationId: id)
         }
-        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet")
+        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet", ifGeneration: generation)
     }
 
     /// Back to `.ready` (with the stored credentials) from an issuance that has ended.
-    func restoreReadyState() async {
-        switch state {
-        case .flowActive(let userId, let displayName, _, _, _, _),
-             .ready(let userId, let displayName, _, _):
-            let creds = await credentialStore.getAll()
-            setState(.ready(userId: userId, displayName: displayName, credentials: creds))
-        default:
-            break
+    ///
+    /// - Parameter ownedBy: the flow, its generation and the issuance attempt this restore belongs to. After the awaited
+    ///   store read they are revalidated, and the state is replaced, under the SAME lock acquisition: a logout that
+    ///   published `.disconnected`, a cancellation, or a replacement issuance that started meanwhile (without cancelling
+    ///   this one) is never overwritten with the previous issuance's `.ready`.
+    func restoreReadyState(ownedBy owner: (flowId: String, generation: [Int], attempt: Int)? = nil) async {
+        lock.lock()
+        let restorable: Bool
+        switch _state {
+        case .flowActive, .ready: restorable = true
+        default: restorable = false
         }
+        lock.unlock()
+        guard restorable else { return }
+        let creds = await credentialStore.getAll()
+        lock.lock()
+        if let owner,
+           credentialResponseGenerationLocked(flowId: owner.flowId) != owner.generation || !issuanceStartEpoch.isCurrent(owner.attempt) {
+            lock.unlock()
+            return
+        }
+        let restored: WalletState
+        switch _state {
+        case .flowActive(let userId, let displayName, _, _, _, _), .ready(let userId, let displayName, _, _):
+            restored = .ready(userId: userId, displayName: displayName, credentials: creds)
+        default:
+            lock.unlock()
+            return
+        }
+        _state = restored
+        let conts = Array(stateContinuations.values)
+        lock.unlock()
+        for c in conts { c.yield(restored) }
     }
 
     // Credential re-issuance/renewal plan (Phase 2): if this flow_complete is

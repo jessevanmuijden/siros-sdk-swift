@@ -883,6 +883,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         dpopProof: String? = nil,
         credentialResponseEncryptionJwk: [String: String]? = nil,
         credentialCount: Int? = nil,
+        responseJwe: String? = nil,
         transactionId: String? = nil,
         interval: Int? = nil,
         error: String? = nil,
@@ -904,6 +905,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
             credentialCount: credentialCount,
             transactionId: transactionId,
             interval: interval,
+            responseJwe: responseJwe,
             error: error,
             errorCode: errorCode
         ))

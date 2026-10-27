@@ -2,7 +2,7 @@
 
 import XCTest
 import SirosAuth
-import SirosCredentials
+@testable import SirosCredentials
 @testable import SirosKeystore
 import SirosTransport
 @testable import SirosWallet
@@ -250,7 +250,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
     private func engineMessage(flow: String = "f1", transactionData: String? = nil, refs: String = #"[{"credential_query_id":"pay","credential_id":"1"}]"#, extra: String = "",
                                nonce: String = "n-1", audience audienceOverride: String? = nil) throws -> SignRequestMessage {
         let td = transactionData ?? #"[{"raw":"\#(raw)","type":"urn:eudi:sca:payment:1","credential_ids":["pay"],"payload":\#(payload),"transaction_data_hashes_alg":["sha-256"]}]"#
-        let json = #"{"type":"sign_request","flow_id":"\#(flow)","message_id":"m1","action":"sign_presentation","params":{"audience":"\#(audienceOverride ?? audience)","nonce":"\#(nonce)","response_mode":"direct_post.jwt","credentials_to_include":\#(refs),"transaction_data":\#(td)\#(extra)}}"#
+        let json = #"{"type":"sign_request","flow_id":"\#(flow)","message_id":"m1","action":"sign_presentation","params":{"audience":"\#(audienceOverride ?? audience)","nonce":"\#(nonce)","response_mode":"direct_post","credentials_to_include":\#(refs),"transaction_data":\#(td)\#(extra)}}"#
         return try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8))
     }
 
@@ -259,7 +259,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
         let token = try XCTUnwrap(sender.sent.first?.vpToken)
-        try assertVerifierContract(try kbClaims(token), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        try assertVerifierContract(try kbClaims(token), responseMode: "direct_post", nonce: "n-1", aud: audience)
         let shown = try XCTUnwrap(f.consent.requests.first)
         XCTAssertEqual(shown.entries.first?.fields.first?.label, "Amount")
         XCTAssertEqual(shown.credentialName, "Visa card")
@@ -997,8 +997,53 @@ final class TransactionDataEndToEndTests: XCTestCase {
 
     private func wmpParams(nonce: String = "n-1", audience audienceOverride: String? = nil, transactionData: String? = nil, refs: String = #"[{"credential_query_id":"pay","credential_id":"1"}]"#) throws -> SignSubFlowParams {
         let td = transactionData ?? #"[{"raw":"\#(raw)","type":"urn:eudi:sca:payment:1","credential_ids":["pay"],"payload":\#(payload),"transaction_data_hashes_alg":["sha-256"]}]"#
-        let json = #"{"action":"sign_presentation","nonce":"\#(nonce)","audience":"\#(audienceOverride ?? audience)","response_mode":"direct_post.jwt","credentials_to_include":\#(refs),"transaction_data":\#(td)}"#
+        let json = #"{"action":"sign_presentation","nonce":"\#(nonce)","audience":"\#(audienceOverride ?? audience)","response_mode":"direct_post","credentials_to_include":\#(refs),"transaction_data":\#(td)}"#
         return try JSONDecoder().decode(SignSubFlowParams.self, from: Data(json.utf8))
+    }
+
+    // MARK: - direct_post.jwt: the JWE is built before the consent is recorded as signed
+
+    private func jwtParams(jwk: [String: String]) throws -> SignSubFlowParams {
+        let td = #"[{"raw":"\#(raw)","type":"urn:eudi:sca:payment:1","credential_ids":["pay"],"payload":\#(payload),"transaction_data_hashes_alg":["sha-256"]}]"#
+        let jwkJson = String(decoding: try JSONSerialization.data(withJSONObject: jwk), as: UTF8.self)
+        let json = #"{"action":"sign_presentation","nonce":"n-1","audience":"\#(audience)","state":"st-1","response_mode":"direct_post.jwt","credentials_to_include":[{"credential_query_id":"pay","credential_id":"1"}],"transaction_data":\#(td),"response_encryption":{"jwk":\#(jwkJson),"alg":"ECDH-ES","enc":"A128GCM"},"verified_request":{"client_id":"\#(audience)","response_mode":"direct_post.jwt","response_uri":"https://shop.example/cb"}}"#
+        return try JSONDecoder().decode(SignSubFlowParams.self, from: Data(json.utf8))
+    }
+
+    /// A transaction presentation for a `direct_post.jwt` request is answered with a `response_jwe` and NO plaintext
+    /// token; the JWE decrypts to the query-grouped `vp_token`, and the consent is recorded as consented.
+    func testAWmpTransactionPresentationInJwtModeIsEncryptedAndRecorded() async throws {
+        let f = try await fixture()
+        let verifier = P256.KeyAgreement.PrivateKey()
+        let point = verifier.publicKey.x963Representation
+        let jwk = ["kty": "EC", "crv": "P-256", "kid": "v1",
+                   "x": CredentialResponseJwe.encode(point.subdata(in: 1..<33)), "y": CredentialResponseJwe.encode(point.subdata(in: 33..<65))]
+        let result = try await f.wallet.handleWmpSignRequest(flowId: "f1", params: try jwtParams(jwk: jwk))
+        XCTAssertNil(result.vpToken, "no plaintext presentation for the engine")
+        let jwe = try XCTUnwrap(result.responseJwe)
+        let plaintext = try CredentialResponseJwe.decrypt(
+            jwe, recipient: verifier, expected: CredentialResponseEncryptionParams(alg: "ECDH-ES", enc: "A128GCM"))
+        let claims = try XCTUnwrap(JSONSerialization.jsonObject(with: plaintext) as? [String: Any])
+        XCTAssertEqual(claims["aud"] as? String, audience)
+        XCTAssertEqual(claims["state"] as? String, "st-1")
+        let grouped = try XCTUnwrap(claims["vp_token"] as? [String: [String]], "query-grouped vp_token")
+        XCTAssertEqual(grouped["pay"]?.count, 1)
+        try assertVerifierContract(try kbClaims(try XCTUnwrap(grouped["pay"]?.first)), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        let log = await f.wallet.transactionLog()
+        XCTAssertEqual(log.first?.outcome, .consented)
+    }
+
+    /// A response that cannot be built after signing (an unusable verifier key) returns no presentation and the
+    /// consent is NOT recorded as consented.
+    func testAnEncryptionFailureAfterSigningReturnsNothingAndIsNotRecordedAsConsented() async throws {
+        let f = try await fixture()
+        do {
+            _ = try await f.wallet.handleWmpSignRequest(flowId: "f1", params: try jwtParams(jwk: ["kty": "EC", "crv": "P-256", "x": "AAAA"]))
+            XCTFail("an unusable verifier key must not produce a presentation")
+        } catch { /* refused */ }
+        let log = await f.wallet.transactionLog()
+        XCTAssertNotEqual(log.first?.outcome, .consented, "the signing happened, but nothing was sent")
+        XCTAssertFalse(log.contains { $0.outcome == .consented })
     }
 
     /// Without a replay challenge or a verifier binding nothing is signed (engine and WMP).
@@ -1035,14 +1080,14 @@ final class TransactionDataEndToEndTests: XCTestCase {
     func testWmpProducesAContractKbJwt() async throws {
         let f = try await fixture()
         let result = try await f.wallet.wmpTransactionPresentation(flowId: "f1", params: try wmpParams())
-        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post", nonce: "n-1", aud: audience)
     }
 
     /// Through the sub-flow handler the profile calls, not just the helper.
     func testWmpSignSubFlowHandlerRoutesTransactionDataToTheScaPath() async throws {
         let f = try await fixture()
         let result = try await f.wallet.handleWmpSignRequest(flowId: "f1", params: try wmpParams())
-        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post.jwt", nonce: "n-1", aud: audience)
+        try assertVerifierContract(try kbClaims(try XCTUnwrap(result.vpToken)), responseMode: "direct_post", nonce: "n-1", aud: audience)
         XCTAssertEqual(f.keystore.scaCalls, 1)
     }
 

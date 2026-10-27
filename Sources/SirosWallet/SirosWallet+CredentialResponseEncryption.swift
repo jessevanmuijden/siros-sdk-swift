@@ -111,7 +111,7 @@ extension SirosWallet {
         return credentialResponseGenerationLocked(flowId: flowId)
     }
 
-    private func credentialResponseGenerationLocked(flowId: String) -> [Int] {
+    func credentialResponseGenerationLocked(flowId: String) -> [Int] {
         [credentialResponseEpoch, flowEndSeq[flowId] ?? 0]
     }
 
@@ -420,14 +420,27 @@ extension SirosWallet {
 
     /// Local terminal handling of a flow the wallet is failing itself: drop its response state, end the
     /// issuance and tell the listener.
-    func failIssuanceLocally(flowId: String, message: String) async {
+    ///
+    /// - Parameter ifGeneration: when given, the cleanup runs only if the flow's generation is still this one, decided
+    ///   under the wallet lock together with ending the flow; otherwise a cancellation (or another issuance) owns the
+    ///   state now and nothing here touches it.
+    func failIssuanceLocally(flowId: String, message: String, ifGeneration: [Int]? = nil) async {
+        // The issuance attempt this failure belongs to, taken before anything below: a replacement issuance that starts
+        // afterwards (without cancelling this one) makes the final restore of the ready state stand down.
+        let attempt = issuanceStartEpoch.current
+        if let ifGeneration {
+            lock.lock()
+            guard ifGeneration == credentialResponseGenerationLocked(flowId: flowId) else { lock.unlock(); return }
+            flowEndSeq[flowId, default: 0] += 1
+            lock.unlock()
+        }
         cancelTransactionTasks(flowId: flowId)
         discardCredentialResponseState(flowId: flowId)
         resetIssuanceGuards()
         lock.lock(); let listener = eventListener; lock.unlock()
         listener?.onFlowError(flowId: flowId, errorMessage: message, redirectUri: nil)
         // A wallet that was flow-active is ready again: the issuance is over.
-        await restoreReadyState()
+        await restoreReadyState(ownedBy: (flowId, credentialResponseGeneration(flowId: flowId), attempt))
     }
 
     /// The WMP `flow_complete` result as a `FlowCompleteMessage`, when it says the issuer's response
