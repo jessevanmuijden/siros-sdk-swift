@@ -27,6 +27,9 @@ public enum PinRetryReason: Equatable, Sendable {
     case mismatch
     /// The authenticator rejected the PIN that was entered.
     case wrongPin
+    /// The PIN typed to ENTER was refused for what it is (too short, too long, not encodable, against policy) rather
+    /// than for being the wrong PIN: it is asked for again, not replaced by a prompt to choose a new one.
+    case notAccepted
 }
 
 /// One PIN prompt: what to ask and, when it repeats an earlier prompt, why.
@@ -95,13 +98,6 @@ public enum PinFailureAction: Equatable, Sendable {
     case repromptEnterPin
     /// Give up with this error.
     case fail(WscdPinError)
-
-    /// The error for a failure that is not retried (an operation that asks once): a wrong or unacceptable PIN is
-    /// `wrongPin`, the others are as in `action(for:)`.
-    public static func terminalError(for reason: PinFailureReason) -> WscdPinError {
-        if case let .fail(error) = action(for: reason) { return error }
-        return .wrongPin
-    }
 
     public static func action(for reason: PinFailureReason) -> PinFailureAction {
         switch reason {
@@ -176,9 +172,13 @@ public struct NewPinChooser {
 public enum PinRecovery {
     /// - Parameters:
     ///   - classify: maps a thrown error to a PIN failure, or nil when it is not one (rethrown unchanged).
+    ///   - askedEnter: whether the last prompt of the failed run asked to ENTER the existing PIN (not to choose one).
+    ///     The authenticator's answer does not say which it was, so a format failure ("too short") after an ENTER
+    ///     prompt asks to enter again, with `.notAccepted`, instead of a prompt to choose a new PIN.
     ///   - operation: receives the retry reason the NEXT prompt should carry (nil on the first run).
     public static func run<T>(
         classify: (Error) -> PinFailureReason?,
+        askedEnter: () -> Bool = { false },
         operation: (_ nextPromptRetry: PinRetryReason?) throws -> T
     ) throws -> T {
         var retry: PinRetryReason?
@@ -191,7 +191,7 @@ public enum PinRecovery {
                 case let .fail(pinError):
                     throw pinError
                 case let .repromptNewPin(why):
-                    retry = why
+                    retry = askedEnter() ? .notAccepted : why
                 case .repromptEnterPin:
                     retry = .wrongPin
                 }

@@ -58,6 +58,7 @@ struct Fido2PinEntryView: View {
         case .policyViolation: return L10n.string("fido2.retryPolicy")
         case .mismatch: return L10n.string("fido2.retryMismatch")
         case .wrongPin: return L10n.string("fido2.retryWrongPin")
+        case .notAccepted: return L10n.string("fido2.retryNotAccepted")
         }
     }
 

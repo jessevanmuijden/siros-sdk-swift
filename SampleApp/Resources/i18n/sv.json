@@ -212,7 +212,8 @@
     "retryInvalidEncoding": "PIN-koden innehåller tecken som nyckeln inte kan använda.",
     "retryPolicy": "Nyckeln godtar inte den PIN-koden. Välj en annan.",
     "retryMismatch": "De två PIN-koderna stämde inte överens. Försök igen.",
-    "retryWrongPin": "Fel PIN-kod. Försök igen."
+    "retryWrongPin": "Fel PIN-kod. Försök igen.",
+    "retryNotAccepted": "PIN-koden godtogs inte. Försök igen."
   },
   "idv": {
     "howItWorks": "Så fungerar det",

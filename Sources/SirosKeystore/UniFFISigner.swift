@@ -296,9 +296,6 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
             // The user backed out of the PIN prompt (the first one or a retry): that is declining the
             // transaction, answered at once like any other decline, not a failure of the wallet.
             throw TransactionDataError(.declined, detail: "the user cancelled the authentication")
-        } catch let FfiWscdError.Pin(reason, _) {
-            // The SCA flow asks once and does not re-run: a PIN the authenticator refused is reported as such.
-            throw PinFailureAction.terminalError(for: Self.sdkPinFailure(reason))
         }
     }
 
@@ -338,14 +335,22 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
                     // these bytes again into its own `RustBuffer` before the call crosses to Rust, so
                     // by the time `signWithFactors` returns, neither copy is needed - `run`'s `defer`
                     // wipes the authoritative `SecureBytes` right after this closure returns.
-                    let outcome = try self.ffi.signWithFactors(
-                        kid: keyId,
-                        data: data,
-                        algorithm: .es256, // inferred from the key by the manager
-                        options: FfiSignOptions(requireFreshUserAuthentication: true, hostVerifiedFactor: nil),
-                        auth: OneShotPinAuthCallback(pin: pin.dataCopy(), fallback: provider),
-                        progress: NoOpProgressCallback()
-                    )
+                    //
+                    // A PIN the authenticator refuses is asked for again (bounded, `WscdPinLimits`): the re-run
+                    // gets no typed PIN, so the plugin's request goes to the user with a "wrong PIN" notice. The
+                    // claim in `data` was made from the first PIN; the report is checked against it afterwards,
+                    // so a retry whose PIN is of another class is refused rather than signed under a wrong claim.
+                    let outcome = try Self.scaSignWithPinRetry(typedPin: pin.dataCopy(), provider: provider) { auth in
+                        try self.ffi.signWithFactors(
+                            kid: keyId,
+                            data: data,
+                            algorithm: .es256, // inferred from the key by the manager
+                            options: FfiSignOptions(requireFreshUserAuthentication: true, hostVerifiedFactor: nil),
+                            auth: auth,
+                            progress: NoOpProgressCallback()
+                        )
+                    }
+
                     return ScaSignReport(
                         signature: outcome.signature.data,
                         factors: outcome.factors.factors.compactMap { Self.sdkFactor($0) },
@@ -355,6 +360,29 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
                     )
                 }
             )
+        }
+    }
+
+    /// Runs one native SCA sign (`nativeSign`, given the callback to hand the plugin) and re-runs it, bounded by
+    /// `WscdPinLimits.operationAttempts`, when the authenticator refuses the PIN: the first run serves `typedPin`,
+    /// every re-run asks the user (through `provider`) with a "wrong PIN" notice. A prompt that failed or was
+    /// cancelled is a cancelled authentication, whatever error the library wraps it in. The native call is injected so
+    /// this loop is testable without an authenticator.
+    static func scaSignWithPinRetry<T>(
+        typedPin: Data,
+        provider: WscdAuthProvider?,
+        nativeSign: (OneShotPinAuthCallback) throws -> T
+    ) throws -> T {
+        var firstPin: Data? = typedPin
+        return try PinRecovery.run(classify: Self.classifyPinFailure, askedEnter: { true }) { retry in
+            let auth = OneShotPinAuthCallback(pin: firstPin, retry: retry, fallback: provider)
+            firstPin = nil
+            do {
+                return try nativeSign(auth)
+            } catch {
+                if auth.promptFailed { throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt") }
+                throw error
+            }
         }
     }
 
@@ -404,8 +432,10 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
     /// or authenticator fails with a clear `WscdPinError`. The error the bridge recorded (the user ran out of
     /// attempts choosing a PIN) replaces the generic "cancelled" the FFI reports.
     func withPinRecovery<T>(_ body: (AuthCallbackBridge) throws -> T) throws -> T {
-        try PinRecovery.run(classify: Self.classifyPinFailure) { retry in
+        let bridgeBox = BridgeBox()
+        return try PinRecovery.run(classify: Self.classifyPinFailure, askedEnter: { bridgeBox.bridge?.lastAskedEnter ?? false }) { retry in
             let bridge = authCallbackBridge()
+            bridgeBox.bridge = bridge
             bridge.setNextPromptRetry(retry)
             do {
                 return try body(bridge)
@@ -413,10 +443,17 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
                 // The library wraps a callback's failure (here: the SDK gave up asking for a PIN) in its own error
                 // (`FfiWscdError.Callback`), not only `AuthCancelled`: the recorded error wins whatever the wrapper.
                 if let recorded = bridge.recordedPinError { throw recorded }
+                // A cancelled prompt must stay a cancel, not the generic `Callback` the library wraps it in.
+                if bridge.promptWasCancelled, Self.classifyPinFailure(error) == nil, !(error is WscdPinError) {
+                    if case FfiWscdError.AuthCancelled = error { throw error }
+                    throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt")
+                }
                 throw error
             }
         }
     }
+
+    private final class BridgeBox { var bridge: AuthCallbackBridge? }
 
     /// The one place `FfiWscdError.Pin` is recognised: nil for every other error.
     static func classifyPinFailure(_ error: Error) -> PinFailureReason? {
@@ -508,6 +545,8 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
     private let lock = NSLock()
     private var nextPromptRetry: PinRetryReason?
     private var pinError: WscdPinError?
+    private var enterAsked = false
+    private var cancelled = false
 
     init(provider: WscdAuthProvider?) {
         self.provider = provider
@@ -531,11 +570,52 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
         return pinError
     }
 
+    /// Whether the last prompt asked to ENTER the existing PIN (not to choose one): the authenticator's refusal of a
+    /// PIN does not say which it was typed for.
+    var lastAskedEnter: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return enterAsked
+    }
+
+    /// Set when a prompt was cancelled or failed. The library reports a failing callback as `FfiWscdError.Callback`
+    /// (siros-wscd-manager v0.11.0 wraps `AuthCancelled` too), so the cancel is recorded here.
+    var promptWasCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    private func recordCancelled() {
+        lock.lock(); cancelled = true; lock.unlock()
+    }
+
+    /// Runs a host prompt at the callback boundary, recording a cancel (see `promptFailsAsCancelled`).
+    private func prompt<T>(_ body: () throws -> T) throws -> T {
+        do { return try Self.promptFailsAsCancelled(body) }
+        catch { recordCancelled(); throw error }
+    }
+
+    private func noteAsked(enter: Bool) {
+        lock.lock(); enterAsked = enter; lock.unlock()
+    }
+
     func requestPin(pluginId: String) throws -> Data {
         guard let provider = provider else {
             throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured")
         }
-        return try provider.requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin, retry: takeNextPromptRetry()))
+        noteAsked(enter: true)
+        let retry = takeNextPromptRetry()
+        return try prompt {
+            try provider.requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin, retry: retry))
+        }
+    }
+
+    /// The callback boundary of a prompt: an error the native side does not know (a host that cancelled by throwing
+    /// its own type) would reach it as an opaque callback failure, so anything but an `FfiWscdError` becomes a
+    /// cancelled authentication with a short message (never PIN material).
+    static func promptFailsAsCancelled<T>(_ body: () throws -> T) throws -> T {
+        do { return try body() }
+        catch let error as FfiWscdError { throw error }
+        catch { throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt") }
     }
 
     /// The authenticator has no PIN: the SDK, not the app, runs "choose, confirm, compare" and enforces `minLength`
@@ -544,6 +624,7 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
         guard let provider = provider else {
             throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured")
         }
+        noteAsked(enter: false)
         let chooser = NewPinChooser { try provider.requestPin(pluginId: pluginId, request: $0) }
         do {
             return try chooser.choose(minLength: Int(minLength), firstRetry: takeNextPromptRetry())
@@ -552,6 +633,7 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
             throw FfiWscdError.AuthCancelled(msg: "PIN entry gave up: too many attempts")
         } catch {
             // The provider throws only when the user cancels, whatever error type it uses.
+            recordCancelled()
             throw FfiWscdError.AuthCancelled(msg: "the user cancelled the PIN prompt")
         }
     }
@@ -565,12 +647,14 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
         guard let provider = provider else {
             throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured")
         }
-        return try provider.requestWebauthnAssertion(
-            pluginId: pluginId,
-            challenge: challenge,
-            rpId: rpId,
-            allowedCredentials: allowedCredentials
-        )
+        return try prompt {
+            try provider.requestWebauthnAssertion(
+                pluginId: pluginId,
+                challenge: challenge,
+                rpId: rpId,
+                allowedCredentials: allowedCredentials
+            )
+        }
     }
 }
 
@@ -581,21 +665,42 @@ final class AuthCallbackBridge: FfiAuthCallback, @unchecked Sendable {
 final class OneShotPinAuthCallback: FfiAuthCallback, @unchecked Sendable {
     private let lock = NSLock()
     private var pin: Data?
+    private var retry: PinRetryReason?
+    private var failed = false
     private weak var fallback: WscdAuthProvider?
 
-    init(pin: Data, fallback: WscdAuthProvider?) {
+    /// - Parameters:
+    ///   - pin: handed to the plugin the first time it asks; nil on a re-run, whose PIN is the user's next entry.
+    ///   - retry: why the user is asked again (the previous PIN was refused), carried by the first prompt.
+    init(pin: Data?, retry: PinRetryReason? = nil, fallback: WscdAuthProvider?) {
         self.pin = pin
+        self.retry = retry
         self.fallback = fallback
+    }
+
+    /// Set when the host's PIN prompt failed or was cancelled, however the native layer wraps that error.
+    var promptFailed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return failed
     }
 
     func requestPin(pluginId: String) throws -> Data {
         lock.lock()
         let once = pin
         pin = nil
+        let why = retry
+        retry = nil
         lock.unlock()
         if let once { return once }
         guard let fallback else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
-        return try fallback.requestPin(pluginId: pluginId)
+        do {
+            return try AuthCallbackBridge.promptFailsAsCancelled {
+                try fallback.requestPin(pluginId: pluginId, request: PinRequest(kind: .enterPin, retry: why))
+            }
+        } catch {
+            lock.lock(); failed = true; lock.unlock()
+            throw error
+        }
     }
 
     /// An SCA sign never sets a PIN: the plugin asking for one is refused rather than inventing a PIN.
@@ -605,9 +710,11 @@ final class OneShotPinAuthCallback: FfiAuthCallback, @unchecked Sendable {
 
     func requestWebauthnAssertion(pluginId: String, challenge: Data, rpId: String, allowedCredentials: [Data]) throws -> Data {
         guard let fallback else { throw FfiWscdError.AuthCancelled(msg: "No AuthProvider configured") }
-        return try fallback.requestWebauthnAssertion(
-            pluginId: pluginId, challenge: challenge, rpId: rpId, allowedCredentials: allowedCredentials
-        )
+        return try AuthCallbackBridge.promptFailsAsCancelled {
+            try fallback.requestWebauthnAssertion(
+                pluginId: pluginId, challenge: challenge, rpId: rpId, allowedCredentials: allowedCredentials
+            )
+        }
     }
 }
 
