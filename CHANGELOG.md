@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The superseded secret-bearing issuance shapes.** `DeliveredSecretReceipt` (`org.siros.secret_seed` receipt, strip-before-merge, seed validation), `SecretSeedCommitment.seed(fromHex:)` and the `DEFERRED_SEED` error are gone. The `ssc` commitment reading and checking (`SecretSeedCommitment.opens/ssc(of:)`), `PrivateSeed` and the proof inputs stay. **Fails closed:** a Credential Response whose `credential_metadata` still carries `org.siros.secret_seed`, `holder_commitments`, `org.siros.psc` or `secret_members` is refused whole, immediate or deferred (`LEGACY_SECRET_MEMBER`): nothing is stored or merged and the issuer is sent `credential_failure`. The Swift SDK has no `auxiliary_data` reader yet, so seed-delivery-based `nym_auth` issuance is not possible in Swift until one exists.
 
 ### Added
+- **PIN retry handling mirrors the Kotlin SDK.** A PIN typed to ENTER that the authenticator refuses for its form (too short, too long, not encodable, against policy) is asked for again with a `PinRetryReason.notAccepted` notice instead of a prompt to choose a new PIN; a prompt that fails with an error of the app's own type is a cancelled authentication at the callback boundary; a transaction (SCA) signature whose PIN the authenticator refuses asks again, bounded (`WscdPinLimits.operationAttempts`), instead of failing at the first wrong PIN.
 - **Set a PIN on a fresh FIDO2 authenticator (siros-wscd-manager v0.11.0).** `WscdAuthProvider` gains
   `requestPin(pluginId:request:)` with a `PinRequest` kind (`enterPin`, `setNewPin(minLength:)`, `confirmNewPin`) and an
   optional retry reason; the default calls the existing `requestPin(pluginId:)`. The SDK, not the app, asks twice,
@@ -23,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after NFC normalisation for transaction signatures (as the manager does), and the sample app's PIN sheet answers each
   prompt exactly once so the next prompt is never cancelled by the previous sheet's dismissal. The sample app shows
   "Choose a PIN" with confirmation. Not verified on hardware.
+
+### Changed
+- **The engine is told only how many credentials matched.** `credentials_matched` and `match_response` (WebSocket and WMP) no longer carry each match's `credential_id`, `vct`, `format` or `available_claims`; each match is just its `credential_query_id` slot. The engine reads only the number of matches and `no_match_reason`. The wallet keeps the rest locally for the consent step. No compatibility shim. `no_match_reason` is now a code, never text: `no_matching_credential`, `credentials_exhausted`, `request_not_answerable`, `no_selection`, or `unspecified` for anything not matching `^[a-z0-9_]{1,64}$` (`NoMatchReason.wire`). The descriptive text (requested types, how many credentials the wallet holds) stays in the wallet's own log; `onNoMatchingCredential`'s `reason` is therefore a code.
 
 ### Fixed
 - **Add passkey: last review items (#197).** `healAccountCache` updates an already-cached passkey's salt in place (position and

@@ -199,7 +199,9 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertTrue(text.contains("\"type\":\"match_response\""))
         XCTAssertTrue(text.contains("\"flow_id\":\"flow-88\""))
         XCTAssertTrue(text.contains("\"credential_query_id\":\"query-1\""))
-        XCTAssertTrue(text.contains("\"credential_id\":\"cred-1\""))
+        for leaked in ["credential_id", "cred-1", "format", "dc+sd-jwt", "vct", "urn:eu:pid:1", "available_claims", "given_name", "family_name"] {
+            XCTAssertFalse(text.contains(leaked), "match_response must not carry \(leaked)")
+        }
     }
 
     /// An empty match set is only half the answer - the reason is what says
@@ -209,12 +211,35 @@ final class EngineTypesTests: XCTestCase {
         let msg = MatchResponseMessage(
             flowId: "flow-89",
             matches: [],
-            noMatchReason: "no stored credential matches the requested type(s): urn:eudi:pid:1"
+            noMatchReason: "no_matching_credential"
         )
         let text = String(data: try encoder.encode(msg), encoding: .utf8)!
 
         XCTAssertTrue(text.contains("\"matches\":[]"))
-        XCTAssertTrue(text.contains("\"no_match_reason\":\"no stored credential matches the requested type(s): urn:eudi:pid:1\""))
+        XCTAssertTrue(text.contains("\"no_match_reason\":\"no_matching_credential\""))
+    }
+
+    /// Free text can never leave: anything that is not a code goes out as `unspecified` (the wallet's description,
+    /// with requested types and its inventory size, stays in its own log).
+    func testNonCodeNoMatchReasonGoesOutAsUnspecifiedOnEveryPath() throws {
+        let free = "2 matching credential(s) stored; no match for urn:eudi:pid:1"
+        let text = String(data: try encoder.encode(MatchResponseMessage(flowId: "f", matches: [], noMatchReason: free)), encoding: .utf8)!
+        XCTAssertTrue(text.contains("\"no_match_reason\":\"unspecified\""))
+        XCTAssertFalse(text.contains("urn:eudi"))
+        XCTAssertEqual(
+            WalletEngineSession.credentialsMatchedPayload(matches: [], noMatchReason: free)["no_match_reason"],
+            .string("unspecified")
+        )
+    }
+
+    func testTheNoMatchReasonGuardIsTheCodeShape() {
+        XCTAssertEqual(NoMatchReason.wire(nil), nil)
+        for ok in ["no_matching_credential", "credentials_exhausted", "request_not_answerable", "no_selection", "unspecified", "a", String(repeating: "a", count: 64)] {
+            XCTAssertEqual(NoMatchReason.wire(ok), ok)
+        }
+        for bad in ["", "No_Match", "has space", "dash-ed", "trailing\n", "caf\u{E9}", String(repeating: "a", count: 65)] {
+            XCTAssertEqual(NoMatchReason.wire(bad), "unspecified", "\(bad.debugDescription)")
+        }
     }
 
     func testMatchResponseOmitsAbsentNoMatchReason() throws {
@@ -234,11 +259,11 @@ final class EngineTypesTests: XCTestCase {
     func testCredentialsMatchedPayloadForEmptyMatchSet() throws {
         let payload = WalletEngineSession.credentialsMatchedPayload(
             matches: [],
-            noMatchReason: "nothing to present"
+            noMatchReason: "no_matching_credential"
         )
 
         XCTAssertEqual(payload["matches"], .array([]))
-        XCTAssertEqual(payload["no_match_reason"], .string("nothing to present"))
+        XCTAssertEqual(payload["no_match_reason"], .string("no_matching_credential"))
     }
 
     func testCredentialsMatchedPayloadEncodesEachMatch() throws {
@@ -259,11 +284,8 @@ final class EngineTypesTests: XCTestCase {
         guard case .array(let matches)? = payload["matches"], case .object_(let match)? = matches.first else {
             return XCTFail("Expected one encoded match")
         }
-        XCTAssertEqual(match["credential_query_id"], .string("query-1"))
-        XCTAssertEqual(match["credential_id"], .string("7"))
-        XCTAssertEqual(match["format"], .string("mso_mdoc"))
-        XCTAssertEqual(match["vct"], .string("urn:eu:pid:1"))
-        XCTAssertEqual(match["available_claims"], .array([.string("given_name")]))
+        // The engine reads the number of matches; the credential itself stays on the device.
+        XCTAssertEqual(match, ["credential_query_id": .string("query-1")])
     }
 
     /// The engine's `NO_MATCHING_CREDENTIAL` error carries the two things an

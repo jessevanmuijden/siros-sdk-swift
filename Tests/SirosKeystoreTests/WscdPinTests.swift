@@ -118,6 +118,28 @@ final class WscdPinTests: XCTestCase {
         XCTAssertEqual(seenRetries, [nil, .wrongPin])
     }
 
+    func testAFormatFailureAfterAnEnterPromptAsksToEnterAgainNotToChooseANewPin() throws {
+        for reason in [PinFailureReason.tooShort(minLength: 4), .tooLong, .invalidEncoding, .policyViolation] {
+            var seenRetries: [PinRetryReason?] = []
+            _ = try PinRecovery.run(classify: classify, askedEnter: { true }) { retry -> Int in
+                seenRetries.append(retry)
+                if seenRetries.count == 1 { throw PinFailure(reason: reason) }
+                return 1
+            }
+            XCTAssertEqual(seenRetries, [nil, .notAccepted], "\(reason)")
+        }
+    }
+
+    func testAFormatFailureAfterAChoosePromptStillAsksForANewPin() throws {
+        var seenRetries: [PinRetryReason?] = []
+        _ = try PinRecovery.run(classify: classify, askedEnter: { false }) { retry -> Int in
+            seenRetries.append(retry)
+            if seenRetries.count == 1 { throw PinFailure(reason: .tooLong) }
+            return 1
+        }
+        XCTAssertEqual(seenRetries, [nil, .tooLong])
+    }
+
     func testABlockedKeyAndABlockedAuthenticatorFailAtOnceWithAClearError() {
         var runs = 0
         XCTAssertThrowsError(try PinRecovery.run(classify: classify) { _ -> Int in
@@ -146,12 +168,6 @@ final class WscdPinTests: XCTestCase {
             XCTAssertTrue($0 is Other)
         }
         XCTAssertEqual(runs, 1)
-    }
-
-    func testTerminalErrorsForAnOperationThatAsksOnce() {
-        XCTAssertEqual(PinFailureAction.terminalError(for: .invalid), .wrongPin)
-        XCTAssertEqual(PinFailureAction.terminalError(for: .blocked), .keyBlocked)
-        XCTAssertEqual(PinFailureAction.terminalError(for: .tooShort(minLength: 4)), .wrongPin)
     }
 
     func testEveryErrorHasAMessageAndALocalizationKey() {

@@ -212,7 +212,8 @@
     "retryInvalidEncoding": "That PIN contains characters the key cannot use.",
     "retryPolicy": "The key does not accept that PIN. Choose a different one.",
     "retryMismatch": "The two PINs did not match. Try again.",
-    "retryWrongPin": "Wrong PIN. Try again."
+    "retryWrongPin": "Wrong PIN. Try again.",
+    "retryNotAccepted": "The PIN was not accepted. Try again."
   },
   "idv": {
     "howItWorks": "How it works",
