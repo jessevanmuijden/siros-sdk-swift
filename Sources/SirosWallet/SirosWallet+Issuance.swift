@@ -938,17 +938,40 @@ extension SirosWallet {
     }
 
     /// Start a presentation flow.
-    public func startPresentation(requestUri: String) async throws {
-        guard let engine = engineSession else {
-            throw SirosError.wallet(message: "Not connected")
+    ///
+    /// - Returns: `false` when `requestUri` is identical to one started within the last minute
+    ///   (`PresentationLinkLedger`) - no second flow is started for it (an issuer's own web page can re-fire the
+    ///   same OpenID4VP redirect-URI request after the first presentation already answered it, and the verifier
+    ///   would refuse a second answer anyway: its nonce is spent). `true` when a flow was started. A start that
+    ///   throws forgets the link, so a retry of the SAME link goes through at once rather than waiting out the
+    ///   window.
+    @discardableResult
+    public func startPresentation(requestUri: String) async throws -> Bool {
+        guard presentationLinkLedger.admit(requestUri) else { return false }
+        do {
+            guard let engine = engineSession else {
+                throw SirosError.wallet(message: "Not connected")
+            }
+            if let connect = startPresentationConnectHook {
+                try await connect(engine)
+            } else {
+                try await ensureEngineConnected(engine)
+            }
+            // Snapshot at flow start: a flag flip applies to the next flow only.
+            let declare = snapshotTransactionDataEnablement()
+            if let send = startPresentationSendHook {
+                send(requestUri)
+            } else {
+                engine.startPresentation(
+                    requestUri: requestUri,
+                    features: TransactionDataDeclaration.engineFeatures(enabled: declare)
+                )
+            }
+            return true
+        } catch {
+            presentationLinkLedger.release(requestUri)
+            throw error
         }
-        try await ensureEngineConnected(engine)
-        // Snapshot at flow start: a flag flip applies to the next flow only.
-        let declare = snapshotTransactionDataEnablement()
-        engine.startPresentation(
-            requestUri: requestUri,
-            features: TransactionDataDeclaration.engineFeatures(enabled: declare)
-        )
     }
 }
 

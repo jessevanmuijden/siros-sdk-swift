@@ -588,6 +588,12 @@ public final class SirosWallet: @unchecked Sendable {
     var authorizationResumeConnectHook: ((WalletEngineSession) async throws -> Void)?
     var authorizationResumeSendHook: ((Int) -> Void)?
 
+    /// The same presentation request link delivered again within its window starts no second flow (`startPresentation`).
+    let presentationLinkLedger = PresentationLinkLedger()
+    /// Test seams for `startPresentation`: replace the connect step and the final `engine.startPresentation` send. Nil in production.
+    var startPresentationConnectHook: ((WalletEngineSession) async throws -> Void)?
+    var startPresentationSendHook: ((String) -> Void)?
+
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one
     // backed by a stub HTTP function, so the SDK's own re-login after a

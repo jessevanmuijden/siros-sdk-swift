@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A presentation request link delivered twice starts one flow, not two.** An issuer that wants a presentation before it issues sends the OpenID4VP request to the wallet's redirect URI from its own web page; after the credential was stored, the same request arrived again (same `response_code`) and opened a second Credential Request screen (siros-sdk-kotlin #333, reproduced there on a Pixel against gdc; ported here, since `SirosWallet.startPresentation` had the identical gap). `startPresentation(requestUri:)` now returns `false` (no second flow started) for a link identical to one started within the last minute (`PresentationLinkLedger`: SHA-256 digests only, at most 16); `true` when a flow was started. A start that throws forgets the link so a retry of the SAME link goes through at once. The sample app's `flowStarting` interstitial is dismissed for the ignored duplicate too (nothing is coming to clear it otherwise). **Breaking:** `startPresentation(requestUri:)` now returns `Bool` instead of `Void`.
+
 ### Removed
 - **The superseded secret-bearing issuance shapes.** `DeliveredSecretReceipt` (`org.siros.secret_seed` receipt, strip-before-merge, seed validation), `SecretSeedCommitment.seed(fromHex:)` and the `DEFERRED_SEED` error are gone. The `ssc` commitment reading and checking (`SecretSeedCommitment.opens/ssc(of:)`), `PrivateSeed` and the proof inputs stay. **Fails closed:** a Credential Response whose `credential_metadata` still carries `org.siros.secret_seed`, `holder_commitments`, `org.siros.psc` or `secret_members` is refused whole, immediate or deferred (`LEGACY_SECRET_MEMBER`): nothing is stored or merged and the issuer is sent `credential_failure`. The Swift SDK has no `auxiliary_data` reader yet, so seed-delivery-based `nym_auth` issuance is not possible in Swift until one exists.
 
