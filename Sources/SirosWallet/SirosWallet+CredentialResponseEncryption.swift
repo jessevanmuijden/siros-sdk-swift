@@ -68,9 +68,7 @@ extension SirosWallet {
 
     /// `credential_metadata` members of the superseded secret-bearing issuance shapes. A response carrying any of them
     /// is refused (`CredentialResponseError.legacySecretMember`).
-    static let legacySecretMembers: Set<String> = [
-        "org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members",
-    ]
+    static let legacySecretMembers = CredentialDisplayMetadata.prohibitedMembers
 
     // MARK: - generate_proof: the wallet's response-encryption key
 

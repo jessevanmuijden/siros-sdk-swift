@@ -51,6 +51,16 @@ extension SirosWallet {
             await refusePlainCompletion(flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId))
             return
         }
+        // A plain completion whose relayed `credential_metadata` carries a superseded secret-bearing member
+        // (`LEGACY_SECRET_MEMBER`): the decoder keeps only the name's presence, and the completion is refused here,
+        // before anything is stored, exactly as an encrypted response carrying one is.
+        if msg.credentialMetadata?.hasProhibitedMember == true {
+            await refusePlainCompletion(
+                flowId: msg.flowId, notificationIds: (msg.credentials ?? []).compactMap(\.notificationId),
+                message: "The issuer's response carries a superseded secret member (LEGACY_SECRET_MEMBER)"
+            )
+            return
+        }
         // Taken before `cancelTransactionTasks`, which also drops the flow's response-encryption key.
         let decryptedResponses = takeDecryptedCredentialResponses(flowId: msg.flowId)
         cancelTransactionTasks(flowId: msg.flowId)
@@ -198,14 +208,16 @@ extension SirosWallet {
 
     /// A completion that should have been wallet-encrypted but was not: refused, nothing stored, `credential_failure`
     /// for each notification id the entries carry, and the issuance ended locally.
-    func refusePlainCompletion(flowId: String, notificationIds: [String]) async {
+    func refusePlainCompletion(
+        flowId: String, notificationIds: [String], message: String = "The issuer's response was not encrypted to this wallet"
+    ) async {
         // The notification awaits a transport send, during which this issuance may be cancelled and another begun: the
         // cleanup runs only if THIS flow still owns the state (checked under the wallet lock, where it also ends the flow).
         let generation = credentialResponseGeneration(flowId: flowId)
         for id in Set(notificationIds).sorted() where !id.isEmpty {
             await sendCredentialFailure(flowId: flowId, notificationId: id)
         }
-        await failIssuanceLocally(flowId: flowId, message: "The issuer's response was not encrypted to this wallet", ifGeneration: generation)
+        await failIssuanceLocally(flowId: flowId, message: message, ifGeneration: generation)
     }
 
     /// Back to `.ready` (with the stored credentials) from an issuance that has ended.

@@ -630,6 +630,22 @@ public struct FlowCompleteMessage: Codable, Sendable {
 public struct CredentialDisplayMetadata: Codable, Sendable, Equatable {
     public var display: AnyCodable?
     public var claims: AnyCodable?
+    /// True when the object had a member of a superseded secret-bearing issuance shape
+    /// (`prohibitedMembers`). Only the NAME is looked at - the value is never held - so a plain
+    /// completion that carries one can still be refused before anything is stored. Not encoded.
+    public var hasProhibitedMember = false
+
+    /// Members of the superseded secret-bearing issuance shapes: a response carrying one is refused.
+    public static let prohibitedMembers: Set<String> = [
+        "org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members",
+    ]
+
+    private struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
 
     enum CodingKeys: String, CodingKey { case display, claims }
 
@@ -643,11 +659,14 @@ public struct CredentialDisplayMetadata: Codable, Sendable, Equatable {
             self.init()
             return
         }
+        let prohibited = ((try? decoder.container(keyedBy: AnyKey.self))?.allKeys ?? [])
+            .contains { Self.prohibitedMembers.contains($0.stringValue) }
         // A member of the wrong shape is ignored, not an error: display metadata must never fail a flow.
         self.init(
             display: try? container.decodeIfPresent(AnyCodable.self, forKey: .display),
             claims: try? container.decodeIfPresent(AnyCodable.self, forKey: .claims)
         )
+        hasProhibitedMember = prohibited
     }
 }
 

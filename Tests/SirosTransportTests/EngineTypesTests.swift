@@ -515,6 +515,21 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertEqual(plain.credentials?.first?.credential, "x.y.z")
     }
 
+    func testCredentialMetadataRemembersOnlyThatASupersededMemberWasPresent() throws {
+        func decode(_ json: String) throws -> CredentialDisplayMetadata {
+            try JSONDecoder().decode(CredentialDisplayMetadata.self, from: Data(json.utf8))
+        }
+        for member in ["org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members"] {
+            let metadata = try decode(#"{"display":[{"name":"n"}],"\#(member)":{"k":"00112233445566778899aabbccddeeff"}}"#)
+            XCTAssertTrue(metadata.hasProhibitedMember, member)
+            let encoded = String(decoding: try JSONEncoder().encode(metadata), as: UTF8.self)
+            XCTAssertFalse(encoded.contains("00112233445566778899aabbccddeeff"), "the value is never held")
+            XCTAssertFalse(encoded.contains(member), "the member is not re-encoded")
+        }
+        XCTAssertFalse(try decode(#"{"display":[],"org.example.extension":{"k":1}}"#).hasProhibitedMember)
+        XCTAssertFalse(try decode("[1]").hasProhibitedMember)
+    }
+
     func testFlowCompleteKeepsOnlyDisplayAndClaimsOfCredentialMetadata() throws {
         let message = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"""
         {"type":"flow_complete","flow_id":"f","credentials":[{"format":"dc+sd-jwt","credential":"x.y.z"}],

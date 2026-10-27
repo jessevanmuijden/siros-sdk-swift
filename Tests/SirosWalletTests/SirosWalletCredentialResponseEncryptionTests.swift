@@ -1052,6 +1052,63 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// No response-encryption key was offered, so the engine relays a PLAIN completion with the response's display
+    /// metadata. A superseded secret-bearing member in it is refused before anything is stored: the decoder keeps only
+    /// that the member was present (never its value), so the plain path cannot store the credentials and report success.
+    func testAPlainCompletionCarryingASupersededSecretMemberIsRefusedBeforeStorage() async throws {
+        for member in ["org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members"] {
+            let w = wallet()
+            let notifier = RecordingNotifier()
+            w.credentialNotifier = notifier
+            let listener = Listener()
+            w.eventListener = listener
+            // No key offered for this flow.
+            let object: [String: Any] = [
+                "type": "flow_complete", "flow_id": "plain",
+                "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-legacy"]],
+                "credential_metadata": ["display": [["name": "x"]], member: ["k": "00112233445566778899aabbccddeeff"]],
+            ]
+            await w.handleFlowComplete(msg: try Self.decodeFlowComplete(object))
+            XCTAssertEqual(listener.errors.count, 1, member)
+            XCTAssertTrue(listener.completed.isEmpty, member)
+            XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-legacy"], member)
+            XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure, member)
+            let stored = await w.credentialStore.getAll()
+            XCTAssertTrue(stored.isEmpty, "\(member): nothing is stored")
+        }
+    }
+
+    func testAWmpCompletionCarryingASupersededSecretMemberIsRefusedBeforeStorage() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        await w.handleWmpFlowComplete(flowId: "wp", result: .object_([
+            "credentials": .array([.object_(["format": .string("dc+sd-jwt"), "credential": .string("a.b.c"), "notification_id": .string("n-w")])]),
+            "credential_metadata": .object_(["holder_commitments": .object_(["k": .string("v")])]),
+        ]))
+        XCTAssertEqual(listener.errors.count, 1)
+        XCTAssertTrue(listener.completed.isEmpty)
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-w"])
+    }
+
+    /// Refused by name: display metadata and another namespaced extension member do not trigger the refusal.
+    func testAPlainCompletionWithOtherMetadataMembersIsNotRefusedForASupersededMember() async throws {
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "plain2",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-ok"]],
+            "credential_metadata": ["display": [["name": "x"]], "org.example.extension": ["k": "v"]],
+        ]
+        let message = try Self.decodeFlowComplete(object)
+        XCTAssertEqual(message.credentialMetadata?.hasProhibitedMember, false)
+        await w.handleFlowComplete(msg: message)
+        XCTAssertFalse(listener.errors.contains { $0.contains("LEGACY_SECRET_MEMBER") }, "refused by name only")
+    }
+
     /// The refusal's `credential_failure` awaits a transport send; if issuance A is cancelled and issuance B begins
     /// meanwhile, A's late cleanup must not reset B's guards, key or state.
     func testALateRefusalOfACancelledIssuanceLeavesTheNextIssuanceAlone() async throws {
