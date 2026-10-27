@@ -14,8 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compares, enforces the minimum length in characters (NFC code points, as the authenticator counts them) and bounds the
   prompts (3 entries of a new PIN, 3 re-runs of an operation). `FfiWscdError.Pin` is classified in one place: a rejected
   new PIN re-prompts for a new one, a wrong PIN re-prompts to enter it, a blocked key or authenticator fails with
-  `WscdPinError` (localised `error_pin_*` strings). The sample app shows "Choose a PIN" with confirmation. Not verified on
-  hardware.
+  `WscdPinError` (localised `error_pin_*` strings). Enrolment and rotation (`registerLifecycle`, `activateLifecycle`,
+  `rotateLifecycle`, `destroyLifecycle`) go through the same recovery, the recorded give-up error survives the library's
+  `Callback` wrapper, the PIN comparison happens inside `SecureBytes` (no plaintext copies), a FIDO2 PIN is classified
+  after NFC normalisation for transaction signatures (as the manager does), and the sample app's PIN sheet answers each
+  prompt exactly once so the next prompt is never cancelled by the previous sheet's dismissal. The sample app shows
+  "Choose a PIN" with confirmation. Not verified on hardware.
 
 ### Fixed
 - **Add passkey: last review items (#197).** `healAccountCache` updates an already-cached passkey's salt in place (position and

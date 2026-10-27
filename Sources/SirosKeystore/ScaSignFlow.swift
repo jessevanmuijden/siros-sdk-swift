@@ -76,6 +76,14 @@ enum ScaSignFlow {
         return n < 12 ? "passphrase_8_to_11_chars" : "passphrase_12_or_more_chars"
     }
 
+    /// The class of the PIN the plugin will actually authenticate with. The CTAP2 (`fido2`) flow NFC-normalises the PIN
+    /// before use and the manager classifies THAT (`classify_pin` in siros-wscd-manager v0.11.0): four decomposed
+    /// characters are four code points, not eight. Any other plugin is classified as typed.
+    static func classifyPin(pluginId: String?, secret: Data) -> String? {
+        guard pluginId == "fido2", let text = String(data: secret, encoding: .utf8) else { return classifySecret(secret) }
+        return classifySecret(Data(text.precomposedStringWithCanonicalMapping.utf8))
+    }
+
     private static func refuse(_ detail: String) -> TransactionDataError {
         TransactionDataError(.insufficientAuthenticationFactors, detail: detail)
     }
@@ -112,7 +120,7 @@ enum ScaSignFlow {
         // Wiped as soon as `run` returns (success or throw): `payload` and `sign` below are the
         // only things that still need it, and both run before this executes.
         defer { pin.wipe() }
-        guard let knowledge = classifySecret(pin.dataCopy()) else {
+        guard let knowledge = classifyPin(pluginId: pluginId, secret: pin.dataCopy()) else {
             throw refuse("the class of the secret entered for this sign could not be established")
         }
         let expected = [AuthenticationFactor(.possession, possession), AuthenticationFactor(.knowledge, knowledge)]

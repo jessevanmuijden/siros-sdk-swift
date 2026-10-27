@@ -49,10 +49,15 @@ final class UniFFIPinBridgeTests: XCTestCase {
     }
 
     func testCancellingTheNewPinPromptIsAnAuthCancelled() {
-        let bridge = AuthCallbackBridge(provider: FakeProvider([nil]))
+        // The bridge holds its provider weakly: retain it, and assert it WAS asked, so the cancel is the user's and
+        // not the "No AuthProvider configured" guard's.
+        let provider = FakeProvider([nil])
+        let bridge = AuthCallbackBridge(provider: provider)
         XCTAssertThrowsError(try bridge.requestNewPin(pluginId: "fido2", minLength: 4)) { error in
-            guard case FfiWscdError.AuthCancelled = error else { return XCTFail("\(error)") }
+            guard case let FfiWscdError.AuthCancelled(msg) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(msg, "the user cancelled the PIN prompt")
         }
+        XCTAssertEqual(provider.requests.map(\.kind), [.setNewPin(minLength: 4)], "the provider received the new-PIN request")
     }
 
     func testRunningOutOfNewPinAttemptsIsRecordedAndReplacesTheGenericCancel() throws {
@@ -60,6 +65,17 @@ final class UniFFIPinBridgeTests: XCTestCase {
         let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
         XCTAssertThrowsError(try signer.withPinRecovery { bridge in
             try bridge.requestNewPin(pluginId: "fido2", minLength: 4)
+        }) { XCTAssertEqual($0 as? WscdPinError, .tooManyAttempts) }
+    }
+
+    /// The library surfaces a failing callback as `FfiWscdError.Callback`, not as the `AuthCancelled` the bridge
+    /// threw: the error the bridge recorded must still win.
+    func testTheRecordedPinErrorSurvivesTheLibrarysCallbackWrapper() throws {
+        let provider = FakeProvider(["1", "1", "1"])
+        let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
+        XCTAssertThrowsError(try signer.withPinRecovery { bridge -> Int in
+            do { _ = try bridge.requestNewPin(pluginId: "fido2", minLength: 4) } catch {}
+            throw FfiWscdError.Callback(msg: "callback failed")      // what the Rust bridge reports after the callback gave up
         }) { XCTAssertEqual($0 as? WscdPinError, .tooManyAttempts) }
     }
 

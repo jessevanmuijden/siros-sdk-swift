@@ -410,7 +410,9 @@ public final class UniFFISigner: Signer, @unchecked Sendable {
             do {
                 return try body(bridge)
             } catch {
-                if let recorded = bridge.recordedPinError, case FfiWscdError.AuthCancelled = error { throw recorded }
+                // The library wraps a callback's failure (here: the SDK gave up asking for a PIN) in its own error
+                // (`FfiWscdError.Callback`), not only `AuthCancelled`: the recorded error wins whatever the wrapper.
+                if let recorded = bridge.recordedPinError { throw recorded }
                 throw error
             }
         }
@@ -736,41 +738,57 @@ extension UniFFISigner: SignerLifecycleManager {
 
     public func registerLifecycle(request: RegisterLifecycleRequest) async throws -> RegistrationOutcome {
         try await onFFIQueue {
-            try self.ffi.registerLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkRegistrationOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.registerLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkRegistrationOutcome()
         }
     }
 
     public func activateLifecycle(request: ActivateLifecycleRequest) async throws -> ActivationOutcome {
         try await onFFIQueue {
-            try self.ffi.activateLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkActivationOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.activateLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkActivationOutcome()
         }
     }
 
     public func rotateLifecycle(request: RotateLifecycleRequest) async throws -> RotationOutcome {
         try await onFFIQueue {
-            try self.ffi.rotateLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkRotationOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.rotateLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkRotationOutcome()
         }
     }
 
     public func destroyLifecycle(request: DestroyLifecycleRequest) async throws -> DestructionOutcome {
         try await onFFIQueue {
-            try self.ffi.destroyLifecycle(
-                request: request.toFfiRequest(),
-                auth: self.authCallbackBridge(),
-                progress: NoOpProgressCallback()
-            ).toSdkDestructionOutcome()
+            // Through the PIN recovery like every other PIN-using call: enrolment and rotation generate keys inside
+            // these Rust methods, so a rejected new PIN must re-prompt and a blocked key must surface as `WscdPinError`.
+            try self.withPinRecovery { auth in
+                try self.ffi.destroyLifecycle(
+                    request: request.toFfiRequest(),
+                    auth: auth,
+                    progress: NoOpProgressCallback()
+                )
+            }.toSdkDestructionOutcome()
         }
     }
 }

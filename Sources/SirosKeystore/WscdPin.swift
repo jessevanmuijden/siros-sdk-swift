@@ -157,7 +157,7 @@ public struct NewPinChooser {
             }
             let second = SecureBytes(try ask(PinRequest(kind: .confirmNewPin)))
             defer { second.wipe() }
-            guard Self.equal(first, second) else {
+            guard first.constantTimeEquals(second) else {
                 retry = .mismatch
                 continue
             }
@@ -169,15 +169,6 @@ public struct NewPinChooser {
     static func characterCount(_ pin: SecureBytes) -> Int {
         let text = String(decoding: pin.dataCopy(), as: UTF8.self)
         return text.precomposedStringWithCanonicalMapping.unicodeScalars.count
-    }
-
-    /// Compares without an early exit on the first differing byte.
-    static func equal(_ a: SecureBytes, _ b: SecureBytes) -> Bool {
-        let x = [UInt8](a.dataCopy()), y = [UInt8](b.dataCopy())
-        guard x.count == y.count else { return false }
-        var diff: UInt8 = 0
-        for i in 0..<x.count { diff |= x[i] ^ y[i] }
-        return diff == 0
     }
 }
 

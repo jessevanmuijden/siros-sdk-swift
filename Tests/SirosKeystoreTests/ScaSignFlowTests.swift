@@ -201,6 +201,28 @@ final class ScaSignFlowTests: XCTestCase {
         assertWiped(pin, "wiped on a refused sign report")
     }
 
+    /// FIDO2 normalises the PIN (NFC) before use and the manager classifies THAT (siros-wscd-manager `classify_pin`):
+    /// four decomposed characters are 8 scalars as typed but 4 after NFC. Other plugins are classified as typed.
+    func testAFido2PinIsClassifiedAfterNfcNormalisationAndOtherPluginsAsTyped() {
+        let decomposed = Data(String(repeating: "e\u{301}", count: 4).utf8)         // 8 scalars typed, 4 after NFC
+        XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: "fido2", secret: decomposed), "passphrase_less_than_8_chars")
+        XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: "r2ps", secret: decomposed), "passphrase_8_to_11_chars")
+        XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: nil, secret: decomposed), "passphrase_8_to_11_chars")
+        XCTAssertNil(ScaSignFlow.classifyPin(pluginId: "fido2", secret: Data([0xFF])), "invalid UTF-8 stays unclassified")
+        XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: "fido2", secret: Data("123456".utf8)), "pin_6_or_more_digits")
+    }
+
+    /// The claim `run` builds for a fido2 PIN uses the NFC-normalised class (so it matches what the manager reports),
+    /// while an r2ps PIN is claimed as typed.
+    func testTheClaimForAFido2PinUsesTheNormalisedClass() throws {
+        let decomposed = String(repeating: "e\u{301}", count: 4)
+        let fido = Trace(), r2ps = Trace()
+        _ = try? run(plugin: "fido2", pin: decomposed, trace: fido)
+        _ = try? run(plugin: "r2ps", pin: decomposed, trace: r2ps)
+        XCTAssertTrue(fido.claimed.contains(AuthenticationFactor(.knowledge, "passphrase_less_than_8_chars")), "\(fido.claimed)")
+        XCTAssertTrue(r2ps.claimed.contains(AuthenticationFactor(.knowledge, "passphrase_8_to_11_chars")), "\(r2ps.claimed)")
+    }
+
     /// The same boundaries the manager measures (`classify_secret` in siros-wscd-manager).
     func testSecretClassesAreMeasuredAtTheVocabularyBoundaries() {
         let cases: [(String, String?)] = [

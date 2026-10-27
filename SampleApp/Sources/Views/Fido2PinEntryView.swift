@@ -9,7 +9,7 @@ import SirosKeystore
 /// authenticator's real PIN. `Identifiable` so it can drive a
 /// `.sheet(item:)` presentation directly, mirroring `PendingWscdChoice`.
 struct PendingFido2PinEntry: Identifiable {
-    let id = UUID()
+    let id: UUID
     /// What the SDK is asking for - enter the PIN, choose a new one, or confirm it - and why it repeats. The SDK runs
     /// the choose/confirm/compare logic; this sheet only shows each prompt.
     let request: PinRequest
