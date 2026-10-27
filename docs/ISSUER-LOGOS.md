@@ -83,7 +83,7 @@ Refused, never repaired:
 | Raster edge | 2048 px |
 | SVG rendered size | at most 512 px on the longest edge; width, height, viewBox and every number at most 1,000,000 |
 | SVG elements / nesting depth | 5000 / 64 |
-| SVG geometry | one document-wide cap of 5000 units (path segments including implicit repeats and `Z`, polygon/polyline points, one per other shape), at most 5000 segments and 1000 subpaths in a single path, and at most 600 curve segments (`C S Q T A`) per document |
+| SVG geometry | one document-wide cap of 5000 units (path segments including implicit repeats and `Z`, polygon/polyline points, one per other shape), at most 5000 segments and 1000 subpaths in a single path, and at most 400 curve segments (`C S Q T A`) per document |
 | SVG gradients | at most 8 gradients and 64 stops per document |
 | Remote fetch | 15 s wall-clock for request and body by default, 120 s maximum (larger values are clamped, NaN/infinite/non-positive are refused) |
 | Redirects | followed only to `https` URLs without credentials; any other target is not followed |

@@ -334,7 +334,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `d="M0 0Z0"`), 4/8-digit alpha hex and plain `href` are refused (SwiftDraw mis-handles
   them), `clipPath`/`clip-path` and duplicate ids are refused, `url(#id)` paint is allowed only
   on leaf shapes (never inherited), and flat caps replace per-use accounting: 5000 geometry
-  units per document, 600 curve segments (CoreGraphics is quadratic in overlapping curves),
+  units per document, 400 curve segments (CoreGraphics is quadratic in overlapping curves),
   8 gradients, 64 stops. The numeric grammar is linear-time (possessive quantifiers).
   See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account

@@ -32,8 +32,8 @@ enum SvgPathData {
     static let maxDocumentSegments = 5000
     /// Curve segments (C S Q T A, implicit repeats included) per document. CoreGraphics fill/stroke is
     /// quadratic in overlapping curves (release build, same-point cubics: 500 = 0.2 s, 1000 = 0.8 s,
-    /// 2000 = 3.5 s; 600 = 0.28 s), whereas 5,000 lines or 4,900 shapes stay far below 0.4 s.
-    static let maxDocumentCurves = 600
+    /// 2000 = 3.5 s; 400 = 0.12 s), whereas 5,000 lines or 4,900 shapes stay far below 0.4 s.
+    static let maxDocumentCurves = 400
 
     static func isValid(_ d: String, maxNumber: Double) -> Bool {
         guard let counts = analyze(d, maxNumber: maxNumber) else { return false }

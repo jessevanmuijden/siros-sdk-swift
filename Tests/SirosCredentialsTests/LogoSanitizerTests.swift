@@ -722,7 +722,7 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertEqual(SvgPathData.analyze("M0 0 C1 1 2 2 3 3 4 4 5 5 6 6 L1 1 Q1 1 2 2 A1 1 0 0 1 2 2 Z", maxNumber: 1e6)?.curves, 4)
     }
 
-    /// The largest document the caps admit (600 overlapping cubics, 1500 zig-zag lines, 2000 gradient circles, dashed strokes)
+    /// The largest document the caps admit (400 overlapping cubics, 1500 zig-zag lines, 2000 gradient circles, dashed strokes)
     /// must go through guard + SwiftDraw + PNG in well under a second on a release build (measured 0.6 s debug-free on the Mac mini);
     /// the bound here is generous so only a real regression (multi-second work) fails.
     func testLargestAdmittedDocumentRendersQuickly() {
@@ -744,8 +744,12 @@ final class LogoSanitizerImageTests: XCTestCase {
     func testGeometryCapCountsPointsPathsAndShapesTogether() {
         let cap = SvgPathData.maxDocumentSegments
         let points = (0..<(cap + 10)).map { "\($0 % 50),\($0 % 40)" }.joined(separator: " ")
-        XCTAssertEqual(guardCheck(svg("<polyline points=\"\(points)\"/>")), .tooLarge, "points beyond the cap")
-        XCTAssertEqual(guardCheck(svg("<polygon points=\"\(points)\"/>")), .tooLarge)
+        // The attribute grammar already stops at 10,000 numbers (= the 5000-pair cap), so this is refused either way.
+        XCTAssertNotNil(guardCheck(svg("<polyline points=\"\(points)\"/>")), "points beyond the cap")
+        XCTAssertNotNil(guardCheck(svg("<polygon points=\"\(points)\"/>")))
+        let exactly = (0..<cap).map { "\($0 % 50),\($0 % 40)" }.joined(separator: " ")
+        XCTAssertNil(guardCheck(svg("<polyline points=\"\(exactly)\"/>")), "exactly the cap is fine")
+        XCTAssertEqual(guardCheck(svg("<polyline points=\"\(exactly)\"/><rect width=\"1\" height=\"1\"/>")), .tooLarge, "one more unit tips it")
         let half = (0..<(cap / 2 + 1)).map { "\($0 % 50),\($0 % 40)" }.joined(separator: " ")
         XCTAssertEqual(guardCheck(svg("<polygon points=\"\(half)\"/><polygon points=\"\(half)\"/>")), .tooLarge, "two polygons add up")
         let path = "M0 0 " + String(repeating: "L1 1 ", count: cap / 2)
