@@ -108,6 +108,40 @@ final class UniFFIPinBridgeTests: XCTestCase {
         XCTAssertEqual(provider.requests.map(\.retry), [nil, .wrongPin])
     }
 
+    func testAFormatRefusalOfTheTypedPinAsksToEnterAgainWithANotAcceptedNotice() throws {
+        let provider = FakeProvider(["12", "1234"])
+        let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
+        var runs = 0
+        _ = try signer.withPinRecovery { bridge -> Int in
+            runs += 1
+            _ = try bridge.requestPin(pluginId: "fido2")
+            if runs == 1 { throw FfiWscdError.Pin(reason: .tooShort(minLength: 4), msg: "") }
+            return 1
+        }
+        XCTAssertEqual(provider.requests.map(\.kind), [.enterPin, .enterPin])
+        XCTAssertEqual(provider.requests.map(\.retry), [nil, .notAccepted])
+    }
+
+    func testAnErrorOfTheHostsOwnTypeFromAPromptBecomesACancelledAuthentication() {
+        let provider = FakeProvider([nil])      // throws PinPromptCancelled, not an FfiWscdError
+        let bridge = AuthCallbackBridge(provider: provider)
+        XCTAssertThrowsError(try bridge.requestPin(pluginId: "fido2")) { error in
+            guard case FfiWscdError.AuthCancelled = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertEqual(provider.requests.count, 1)
+    }
+
+    func testAnScaRetryPromptCarriesTheWrongPinNoticeAndTheTypedPinIsServedOnce() throws {
+        let provider = FakeProvider(["5678"])
+        let callback = OneShotPinAuthCallback(pin: nil, retry: .wrongPin, fallback: provider)
+        XCTAssertEqual(try callback.requestPin(pluginId: "fido2"), Data("5678".utf8))
+        XCTAssertEqual(provider.requests.map(\.retry), [.wrongPin])
+        XCTAssertFalse(callback.promptFailed)
+        let cancelled = OneShotPinAuthCallback(pin: nil, fallback: FakeProvider([nil]))
+        XCTAssertThrowsError(try cancelled.requestPin(pluginId: "fido2"))
+        XCTAssertTrue(cancelled.promptFailed)
+    }
+
     func testABlockedKeyEndsTheOperationWithAClearError() throws {
         let provider = FakeProvider([])
         let signer = try UniFFISigner(config: FfiWscdConfig(defaultPlugin: "softkey"), authProvider: provider)
