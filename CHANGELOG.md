@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **The superseded secret-bearing issuance shapes.** `DeliveredSecretReceipt` (`org.siros.secret_seed` receipt, strip-before-merge, seed validation), `SecretSeedCommitment.seed(fromHex:)` and the `DEFERRED_SEED` error are gone. The `ssc` commitment reading and checking (`SecretSeedCommitment.opens/ssc(of:)`), `PrivateSeed` and the proof inputs stay. **Fails closed:** a Credential Response whose `credential_metadata` still carries `org.siros.secret_seed`, `holder_commitments`, `org.siros.psc` or `secret_members` is refused whole, immediate or deferred (`LEGACY_SECRET_MEMBER`): nothing is stored or merged and the issuer is sent `credential_failure`. The Swift SDK has no `auxiliary_data` reader yet, so seed-delivery-based `nym_auth` issuance is not possible in Swift until one exists.
+
 ### Added
 - **Set a PIN on a fresh FIDO2 authenticator (siros-wscd-manager v0.11.0).** `WscdAuthProvider` gains
   `requestPin(pluginId:request:)` with a `PinRequest` kind (`enterPin`, `setNewPin(minLength:)`, `confirmNewPin`) and an

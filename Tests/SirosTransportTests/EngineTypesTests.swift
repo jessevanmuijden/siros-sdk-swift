@@ -521,7 +521,7 @@ final class EngineTypesTests: XCTestCase {
          "credential_metadata":{
            "display":[{"name":"Nym","locale":"en"}],
            "claims":[{"path":["a"]}],
-           "org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},
+           "org.example.extension":{"org.example.member":"00112233445566778899aabbccddeeff"},
            "x-other":{"k":1}}}
         """#.utf8))
         let metadata = try XCTUnwrap(message.credentialMetadata)
@@ -529,7 +529,7 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertNotNil(metadata.claims)
         // Nothing but display and claims is held, so nothing else can be logged or re-encoded from it.
         let reencoded = String(decoding: try JSONEncoder().encode(metadata), as: UTF8.self)
-        XCTAssertFalse(reencoded.contains("secret_seed"))
+        XCTAssertFalse(reencoded.contains("org.example.extension"))
         XCTAssertFalse(reencoded.contains("00112233445566778899aabbccddeeff"))
         XCTAssertFalse(reencoded.contains("x-other"))
         let whole = String(decoding: try JSONEncoder().encode(message), as: UTF8.self)

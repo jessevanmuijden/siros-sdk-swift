@@ -19,12 +19,6 @@ public enum SecretSeedCommitment {
     /// `ssc` length in bytes: a SHA-256 digest.
     public static let commitmentBytes = 32
 
-    /// `secret_seed` from its delivered form: exactly 32 lowercase hex characters, no prefix,
-    /// no whitespace. Nil otherwise. The caller owns (and wipes) the returned array.
-    public static func seed(fromHex hex: String) -> [UInt8]? {
-        isLowerHex(hex, count: 2 * seedBytes) ? bytes(fromLowerHex: hex) : nil
-    }
-
     /// Whether `SHA256(seed) == ssc`, compared in constant time. False for any wrong length.
     public static func opens(seed: [UInt8], ssc: [UInt8]) -> Bool {
         guard seed.count == seedBytes, ssc.count == commitmentBytes else { return false }

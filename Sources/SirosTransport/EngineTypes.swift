@@ -593,8 +593,8 @@ public struct FlowCompleteMessage: Codable, Sendable {
     public var credentialResponseEncrypted: Bool?
     /// Display-only response-level `credential_metadata` of a PLAIN issuer response, when the engine
     /// relays it: only `display` and `claims`. Every other member is dropped at decoding, so an
-    /// extension member such as `org.siros.secret_seed` can never arrive this way: those come only
-    /// from the wallet's own decryption of an encrypted response.
+    /// extension member can never arrive this way: those come only from the wallet's own
+    /// decryption of an encrypted response.
     public var credentialMetadata: CredentialDisplayMetadata?
     public var timestamp: String?
     /// The engine's own issuer trust evaluation for this flow (the
