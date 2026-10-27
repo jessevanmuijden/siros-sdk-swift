@@ -1143,9 +1143,10 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         w.credentialNotifier = notifier
         let listener = Listener()
         w.eventListener = listener
-        let tagA = w.issuanceStartEpoch.begin()                            // A starts ...
-        let tagB = w.issuanceStartEpoch.begin()                            // ... is superseded; B starts
-        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        // Production-style tags: what `engine.startIssuance(startTag:)` is given is `issuanceEpoch`.
+        w.lock.lock(); let tagA = w.issuanceEpoch; w.lock.unlock()        // A starts ...
+        w.resetIssuanceGuards()                                            // ... is superseded (cancel / new flow bumps the epoch)
+        w.lock.lock(); w.issuanceInFlight = true; let tagB = w.issuanceEpoch; w.lock.unlock()   // B starts
         try installKey(w, flowId: "B")
         w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
         let object: [String: Any] = [
@@ -1158,10 +1159,10 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         await w.handleFlowComplete(msg: message)
         XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-A"], "A is refused for its own notification id")
         XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure)
-        XCTAssertTrue(w.issuanceStartEpoch.isCurrent(tagB), "B's epoch is not advanced by A's cleanup")
         w.lock.lock()
-        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil)
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil, w.issuanceEpoch == tagB)
         w.lock.unlock()
+        XCTAssertTrue(kept.2, "B's epoch is not advanced by A's cleanup")
         XCTAssertTrue(kept.0, "B's in-flight guard is not reset")
         XCTAssertTrue(kept.1, "B's key is kept")
         XCTAssertTrue(listener.errors.isEmpty, "A's failure is not reported as B's")
@@ -1169,6 +1170,29 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(flowId, "B")
         let stored = await w.credentialStore.getAll()
         XCTAssertTrue(stored.isEmpty, "nothing stored")
+    }
+
+    /// A CURRENT refusal (the completion's tag is the epoch in force) does run its cleanup: the in-flight guard is
+    /// released and the failure is reported, so the next issuance is not blocked.
+    func testACurrentIssuancesRefusalReleasesItsGuards() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        w.lock.lock(); w.issuanceInFlight = true; let tag = w.issuanceEpoch; w.lock.unlock()
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "cur",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-cur"]],
+            "credential_metadata": ["holder_commitments": ["k": "v"]],
+        ]
+        var message = try Self.decodeFlowComplete(object)
+        message.startTag = tag
+        await w.handleFlowComplete(msg: message)
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-cur"])
+        XCTAssertEqual(listener.errors.count, 1)
+        w.lock.lock(); let inFlight = w.issuanceInFlight; w.lock.unlock()
+        XCTAssertFalse(inFlight, "the refused issuance's in-flight guard is released")
     }
 
     /// The ready-state restore of a failed issuance waits for the credential store. If a logout publishes
