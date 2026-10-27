@@ -15,6 +15,33 @@ public protocol AuthProvider: AnyObject, Sendable {
 
     /// Obtain PRF output for keystore key derivation.
     func getPrfOutput(credentialId: Data, salt: Data) async throws -> PrfOutput
+
+    /// Best-effort: undo the most recent `register(options:)` this provider
+    /// performed, when the backend then refused the enrolment it was for
+    /// (declined assertion aside - that path never creates anything). A
+    /// provider backed by a real platform authenticator (e.g.
+    /// `ASAuthorizationAuthProvider`) generally has no API to delete a
+    /// platform passkey and leaves this a no-op - the created credential
+    /// simply goes unused on the device, an accepted limitation. A fully
+    /// local/dev provider (`LocalAuthProvider`) can and does remove it.
+    func rollbackLastRegistration()
+
+    /// Best-effort: undo the registration of exactly `credentialId`. Unlike
+    /// ``rollbackLastRegistration()`` this cannot remove another credential:
+    /// "the last one" is whatever the provider touched most recently, which
+    /// can be an authentication with an existing passkey made while the
+    /// enrolment was still pending. Callers that know the credential they
+    /// created use this. The default falls back to ``rollbackLastRegistration()``
+    /// for a provider with no per-credential removal.
+    func rollbackRegistration(credentialId: Data)
+}
+
+public extension AuthProvider {
+    /// Default: nothing to roll back. See the protocol requirement's doc
+    /// comment.
+    func rollbackLastRegistration() {}
+
+    func rollbackRegistration(credentialId: Data) { rollbackLastRegistration() }
 }
 
 // MARK: - Registration types
@@ -29,6 +56,16 @@ public struct RegisterOptions: Sendable {
     public var attestation: String
     public var authenticatorSelection: AuthenticatorSelection?
     public var prfSalt: Data?
+    /// Credentials the backend already has for this RP/user that this
+    /// registration must NOT recreate - WebAuthn's
+    /// `excludeCredentials` (go-wallet-backend#352's "add a passkey" asks for
+    /// this so an authenticator that replaces an existing discoverable
+    /// credential for the same RP/user, when asked to create a new one with
+    /// no exclusions, cannot silently invalidate it before the new
+    /// registration is even accepted). A conforming `AuthProvider` applies
+    /// these to the platform-authenticator AND security-key registration
+    /// requests it offers; empty/nil excludes nothing.
+    public var excludeCredentials: [AllowCredential]?
 
     public init(
         rpId: String,
@@ -39,7 +76,8 @@ public struct RegisterOptions: Sendable {
         challenge: Data,
         attestation: String = "none",
         authenticatorSelection: AuthenticatorSelection? = nil,
-        prfSalt: Data? = nil
+        prfSalt: Data? = nil,
+        excludeCredentials: [AllowCredential]? = nil
     ) {
         self.rpId = rpId
         self.rpName = rpName
@@ -50,6 +88,7 @@ public struct RegisterOptions: Sendable {
         self.attestation = attestation
         self.authenticatorSelection = authenticatorSelection
         self.prfSalt = prfSalt
+        self.excludeCredentials = excludeCredentials
     }
 }
 

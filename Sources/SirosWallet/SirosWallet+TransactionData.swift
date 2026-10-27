@@ -336,7 +336,12 @@ extension SirosWallet {
     /// `persistAndSyncKeystore`, which only logs it).
     func persistKeystoreOrThrow(generation: Int) async throws {
         guard keystore.isUnlocked else { throw TransactionLogError("the container is locked") }
-        try await exportAndSyncKeystore(generation: generation)
+        // Under `keystoreContainerLock`, like `persistAndSyncKeystore()`: an export must not interleave with an
+        // `addPasskey` register-finish that is pending (it would POST a container without the new PRF entry after the
+        // enrolment was accepted). Lock order is container lock, then the persist mutex, as there.
+        try await keystoreContainerLock.withLock {
+            try await exportAndSyncKeystore(generation: generation)
+        }
     }
 
     /// Throws when the operation was cancelled or the account it started under is no longer the active one.
@@ -572,17 +577,19 @@ extension SirosWallet {
                 }
                 toSign.append(WmpSigningItem(cred: cred, ref: ref, binding: binding, queryId: queryId))
             }
-            var parts: [String] = []
+            var parts: [PresentationPart] = []
             for item in toSign {
-                parts.append(try await signTransactionVpToken(
+                parts.append((item.queryId, try await signTransactionVpToken(
                     credential: item.cred.raw, disclosedClaims: item.ref.disclosedClaims, nonce: params.nonce,
                     audience: params.audience, transactionData: item.binding,
                     kid: plan.kid(for: item.queryId, fallback: item.cred.kid)
-                ))
+                )))
             }
             try Task.checkCancellation()   // after the final signing await: an ended flow gets no token and no record
+            // Built before the consent is recorded as signed: a response that cannot be encrypted was not sent.
+            let result = try wmpPresentationResult(params: params, parts: parts)
             await plan.plan.complete(signed: true)
-            return SignSubFlowResult(vpToken: parts.joined(separator: "\n"))
+            return result
         } catch {
             if !Task.isCancelled && !(error is CancellationError) { await plan.plan.complete(failedWith: error) }
             throw error

@@ -6,7 +6,7 @@ import SirosCredentials
 
 /// Settings → Devices: the wallet instances this user has in this tenant
 /// (SID-AUTH-06, go-wallet-backend#319), and the one thing a user can do about
-/// them: delete the account.
+/// them: add a passkey, or delete the account.
 ///
 /// A thin consumer, deliberately: the step-up, the backend outcomes and the
 /// local wipe all live in `SirosWallet.deleteAccount`. This view only renders
@@ -14,6 +14,7 @@ import SirosCredentials
 struct DevicesView: View {
     @EnvironmentObject var viewModel: WalletViewModel
     @State private var showDeleteSheet = false
+    @State private var showAddPasskeySheet = false
 
     var body: some View {
         NavigationStack {
@@ -40,6 +41,23 @@ struct DevicesView: View {
                     Section {
                         Text(error).font(.subheadline).foregroundStyle(.red)
                     }
+                }
+
+                Section {
+                    Button(action: { showAddPasskeySheet = true }) {
+                        Text(L10n.string("devices.addPasskeyButton"))
+                    }
+                    .disabled(viewModel.addingPasskey)
+                    if let done = viewModel.addPasskeyDone {
+                        Text(done).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    if let error = viewModel.addPasskeyError {
+                        Text(error).font(.subheadline).foregroundStyle(.red)
+                    }
+                } header: {
+                    Text(L10n.string("devices.addPasskeyTitle"))
+                } footer: {
+                    Text(L10n.string("devices.addPasskeyDescription"))
                 }
 
                 Section {
@@ -71,6 +89,9 @@ struct DevicesView: View {
             .onAppear { viewModel.refreshDevices() }
             .sheet(isPresented: $showDeleteSheet) {
                 DeleteAccountSheet()
+            }
+            .sheet(isPresented: $showAddPasskeySheet) {
+                AddPasskeySheet()
             }
         }
     }
@@ -105,6 +126,52 @@ private struct DeviceRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// The nickname for a new passkey. The SDK asks an existing passkey to
+/// authorise the addition and then creates the new one.
+private struct AddPasskeySheet: View {
+    @EnvironmentObject var viewModel: WalletViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var nickname = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(L10n.string("devices.addPasskeyMessage")).font(.subheadline)
+                    TextField(L10n.string("devices.addPasskeyNickname"), text: $nickname)
+                        .autocorrectionDisabled()
+                }
+                Section {
+                    Button {
+                        viewModel.addPasskey(nickname: nickname.trimmingCharacters(in: .whitespaces))
+                        dismiss()
+                    } label: {
+                        Text(L10n.string("devices.addPasskeyButton"))
+                    }
+                    // `SirosWallet.addPasskey` rejects a blank name before
+                    // making any request (1-256 characters) - the field is
+                    // required, not optional (review finding: the copy used
+                    // to say otherwise), so submitting with it empty or
+                    // over-length must not even be possible rather than
+                    // always dismissing with an error.
+                    .disabled(
+                        viewModel.addingPasskey
+                            || nickname.trimmingCharacters(in: .whitespaces).isEmpty
+                            || nickname.trimmingCharacters(in: .whitespaces).count > 256
+                    )
+                }
+            }
+            .navigationTitle(L10n.string("devices.addPasskeyTitle"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(L10n.string("devices.cancel")) { dismiss() }
+                }
+            }
+        }
     }
 }
 

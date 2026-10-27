@@ -121,6 +121,30 @@ private final class AnsweringTransport: TransportProtocol, @unchecked Sendable {
     func disconnect() async { lock.lock(); _state = .disconnected; lock.unlock(); stateCont.yield(.disconnected) }
 }
 
+/// A credential store whose `getAll()` suspends until released, so a test can change the wallet while a restore of the
+/// ready state is waiting for its read.
+private final class SuspendingStore: CredentialStore, @unchecked Sendable {
+    private let inner = InMemoryCredentialStore()
+    private let lock = NSLock()
+    private var gate: CheckedContinuation<Void, Never>?
+    private var opened = false
+    private var _waiting = false
+    var waiting: Bool { lock.lock(); defer { lock.unlock() }; return _waiting }
+    func open() { lock.lock(); opened = true; let g = gate; gate = nil; lock.unlock(); g?.resume() }
+    func getAll() async -> [StoredCredential] {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock(); _waiting = true
+            if opened { lock.unlock(); c.resume() } else { gate = c; lock.unlock() }
+        }
+        return await inner.getAll()
+    }
+    func getById(_ id: Int64) async -> StoredCredential? { await inner.getById(id) }
+    func save(_ credential: StoredCredential) async { await inner.save(credential) }
+    func update(_ credential: StoredCredential) async { await inner.update(credential) }
+    func delete(_ id: Int64) async { await inner.delete(id) }
+    func clear() async { await inner.clear() }
+}
+
 /// A notifier whose hand-over takes a while: the failure must be recorded before the rejecting call returns.
 private final class SlowAwaitableNotifier: AwaitableCredentialNotifier, @unchecked Sendable {
     private let lock = NSLock()
@@ -1011,6 +1035,59 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
             XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure, transport)
             let stored = await w.credentialStore.getAll()
             XCTAssertTrue(stored.isEmpty, "\(transport): nothing is stored")
+        }
+    }
+
+    /// The refusal's `credential_failure` awaits a transport send; if issuance A is cancelled and issuance B begins
+    /// meanwhile, A's late cleanup must not reset B's guards, key or state.
+    func testALateRefusalOfACancelledIssuanceLeavesTheNextIssuanceAlone() async throws {
+        let w = wallet()
+        w.credentialNotifier = SlowAwaitableNotifier()                     // the send takes 80 ms
+        try installKey(w, flowId: "A")
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "A", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = ["type": "flow_complete", "flow_id": "A", "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-1"]]]
+        let message = try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
+        let refusing = Task { await w.handleFlowComplete(msg: message) }
+        try await Task.sleep(nanoseconds: 20_000_000)                      // the notification is in flight
+        w.cancelCurrentFlow()                                              // A is cancelled ...
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        try installKey(w, flowId: "B")                                     // ... and B begins
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
+        await refusing.value
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is not reset by A's late cleanup")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
+        XCTAssertEqual(flowId, "B")
+    }
+
+    /// The ready-state restore of a failed issuance waits for the credential store. If a logout publishes
+    /// `.disconnected`, or a replacement issuance begins (without cancelling the failed one), while it waits, the restore
+    /// stands down: the later state is never overwritten with the failed issuance's `.ready`.
+    func testARestoreWaitingForTheStoreNeverOverwritesALaterState() async throws {
+        for scenario in ["logout", "replacement"] {
+            let store = SuspendingStore()
+            let w = SirosWallet(
+                config: WalletConfig(backendUrl: "https://example.invalid", credentialStore: store),
+                authProvider: StubAuthProvider(), keystore: StubKeystoreManager(), accountRegistry: .inMemory()
+            )!
+            w.setState(.flowActive(userId: "u", displayName: nil, flowId: "A", flowType: "oid4vci", status: "active", credentials: []))
+            let failing = Task { await w.failIssuanceLocally(flowId: "A", message: "failed") }
+            for _ in 0..<300 where !store.waiting { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(store.waiting, "the restore is waiting for the store read")
+            let later: WalletState
+            if scenario == "logout" {
+                later = .disconnected()
+            } else {
+                _ = w.issuanceStartEpoch.begin()                                 // B starts; A was never cancelled
+                later = .flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: [])
+            }
+            w.setState(later)
+            store.open()
+            await failing.value
+            XCTAssertEqual(w.state, later, "\(scenario): the restore did not overwrite the later state")
         }
     }
 

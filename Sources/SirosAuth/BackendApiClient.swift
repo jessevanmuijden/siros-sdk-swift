@@ -10,6 +10,47 @@ import SirosCredentials
 /// Parameters: method, URL, headers, optional body. Returns: response data.
 public typealias HttpFunction = @Sendable (String, URL, [String: String], Data?) async throws -> Data
 
+/// The SDK's own transport: `URLSession`, reporting every response with its
+/// headers and throwing only for transport failures.
+public enum UrlSessionTransport {
+    public static let send: HttpResponseFunction = { method, url, headers, body in
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SirosError.network(message: "Invalid response")
+        }
+        var responseHeaders: [String: String] = [:]
+        for (key, value) in httpResponse.allHeaderFields {
+            if let key = key as? String, let value = value as? String { responseHeaders[key] = value }
+        }
+        return HttpResponse(status: httpResponse.statusCode, data: data, headers: responseHeaders)
+    }
+}
+
+/// An HTTP response with its headers and status, whatever the status.
+public struct HttpResponse: Sendable {
+    public let status: Int
+    public let data: Data
+    /// Header names lower-cased.
+    public let headers: [String: String]
+
+    public init(status: Int, data: Data, headers: [String: String] = [:]) {
+        self.status = status
+        self.data = data
+        self.headers = Dictionary(uniqueKeysWithValues: headers.map { ($0.key.lowercased(), $0.value) })
+    }
+}
+
+/// Like `HttpFunction`, but hands back every response - not only a successful
+/// one - with its headers, which `X-Private-Data-ETag` needs. It throws only
+/// for transport failures.
+public typealias HttpResponseFunction = @Sendable (String, URL, [String: String], Data?) async throws -> HttpResponse
+
 /// Authenticated HTTP client for the wallet backend REST API.
 ///
 /// Requires a valid `appToken` (JWT) obtained from `WebAuthnAuthClient.login()`
@@ -18,9 +59,11 @@ public final class BackendApiClient: @unchecked Sendable {
 
     private let baseUrl: String
     private let tenantId: String
-    private let httpFn: HttpFunction
+    private let httpFn: HttpResponseFunction
     private let lock = NSLock()
     private var _appToken: String?
+    private var _privateDataEtag: String?
+    private var _conflictPrivateDataEtag: String?
 
     /// Create a client with a custom HTTP function (for testing).
     public init(
@@ -30,7 +73,58 @@ public final class BackendApiClient: @unchecked Sendable {
     ) {
         self.baseUrl = baseUrl
         self.tenantId = tenantId
-        self.httpFn = httpFn
+        // `HttpFunction` signals a failure by throwing and has no headers:
+        // fold it into a response (no headers, so no ETag is learnt).
+        self.httpFn = { method, url, headers, body in
+            do {
+                return HttpResponse(status: 200, data: try await httpFn(method, url, headers, body))
+            } catch SirosError.backendApi(let code, _, let errorBody) {
+                return HttpResponse(status: code, data: Data((errorBody ?? "").utf8))
+            }
+        }
+    }
+
+    /// Create a client with an HTTP function that reports every response with
+    /// its headers (the SDK's own transport), so the private-data ETag is kept.
+    public init(
+        baseUrl: String,
+        tenantId: String = "default",
+        responseFn: @escaping HttpResponseFunction
+    ) {
+        self.baseUrl = baseUrl
+        self.tenantId = tenantId
+        self.httpFn = responseFn
+    }
+
+    /// The `X-Private-Data-ETag` of the most recent response that carried one
+    /// (private-data reads and writes, a passkey enrolment). Sent as
+    /// `X-Private-Data-If-Match` by `passkeyRegisterFinish` so an enrolment
+    /// cannot overwrite private data another device wrote in the meantime.
+    /// Needs the transport behind `init(baseUrl:tenantId:responseFn:)` (or the
+    /// URLSession convenience init): the plain `HttpFunction` cannot see headers.
+    public var privateDataEtag: String? {
+        lock.lock(); defer { lock.unlock() }
+        return _privateDataEtag
+    }
+
+    /// The `X-Private-Data-ETag` a `412` response most recently reported as
+    /// the backend's CURRENT version - informational only.
+    ///
+    /// Deliberately never folded into `privateDataEtag`: that value is the
+    /// precondition `passkeyRegisterFinish` (and any other conditional write)
+    /// defaults `ifMatch` to, which must stay paired with whatever container
+    /// this client actually has loaded. A `412` means the opposite - the
+    /// loaded container is stale - so recording its reported version there
+    /// would let a caller's naive retry of the SAME (still v1-based) write
+    /// carry an `If-Match` that now matches the server's current (v2) state
+    /// and sail through, silently overwriting whatever changed it (e.g.
+    /// another device's PRF entries) with stale data. A caller that wants to
+    /// retry must explicitly re-fetch private data first (which advances
+    /// `privateDataEtag` through the normal success path) and reconcile its
+    /// locally prepared changes against the newer container.
+    public var conflictPrivateDataEtag: String? {
+        lock.lock(); defer { lock.unlock() }
+        return _conflictPrivateDataEtag
     }
 
     #if !os(Linux)
@@ -39,27 +133,7 @@ public final class BackendApiClient: @unchecked Sendable {
         baseUrl: String,
         tenantId: String = "default"
     ) {
-        self.init(baseUrl: baseUrl, tenantId: tenantId) { method, url, headers, body in
-            var request = URLRequest(url: url)
-            request.httpMethod = method
-            request.httpBody = body
-            for (key, value) in headers {
-                request.setValue(value, forHTTPHeaderField: key)
-            }
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw SirosError.network(message: "Invalid response")
-            }
-            guard (200..<300).contains(httpResponse.statusCode) else {
-                let bodyStr = String(data: data, encoding: .utf8) ?? ""
-                throw SirosError.backendApi(
-                    code: httpResponse.statusCode,
-                    message: "API request failed: \(httpResponse.statusCode)",
-                    body: bodyStr
-                )
-            }
-            return data
-        }
+        self.init(baseUrl: baseUrl, tenantId: tenantId, responseFn: UrlSessionTransport.send)
     }
     #endif
 
@@ -427,6 +501,95 @@ public final class BackendApiClient: @unchecked Sendable {
 
     private static let stepUpErrorCodes: Set<String> = [errorStepUpRequired, errorStepUpFailed]
 
+    // MARK: - Adding a passkey (go-wallet-backend#352)
+
+    /// POST /user/session/webauthn/register-begin - start adding a passkey to
+    /// the signed-in account. On `.ready`, run the creation ceremony and, when
+    /// `authorization` is set, the authorising assertion, then pass both to
+    /// `passkeyRegisterFinish`.
+    ///
+    /// `401` and `403` are values (`.sessionRevoked`, `.forbidden` - the token
+    /// lacks the scope to enrol a passkey); anything else throws.
+    public func passkeyRegisterBegin() async throws -> AddPasskeyBegin {
+        do {
+            let result = TaggedBinary.decode(try await post("/user/session/webauthn/register-begin", body: [:]))
+            return .ready(try PasskeyEnrollmentChallenge(json: result))
+        } catch let error as SirosError {
+            guard case let .backendApi(code, _, _) = error else { throw error }
+            switch code {
+            case 401: return .sessionRevoked(message: error.serverMessage)
+            case 403: return .forbidden(message: error.serverMessage ?? error.apiErrorCode)
+            default: throw error
+            }
+        }
+    }
+
+    /// POST /user/session/webauthn/register-finish - complete adding a passkey.
+    ///
+    /// `credential` is the new passkey, `authorization` the assertion an
+    /// existing passkey made over `PasskeyEnrollmentChallenge.authorization`
+    /// (required unless begin returned none), `privateData` the container with
+    /// the new passkey's PRF entry. `ifMatch` defaults to `privateDataEtag`
+    /// and is sent as `X-Private-Data-If-Match`.
+    ///
+    /// Every outcome the backend defines is an `AddPasskeyOutcome`; only an
+    /// unexpected status or a transport failure throws. An enrolment-
+    /// authorisation `401` does not count as a rejected session token.
+    public func passkeyRegisterFinish(
+        challengeId: String,
+        credential: RegisterResult,
+        nickname: String,
+        privateData: Data?,
+        authorization: AuthenticateResult?,
+        ifMatch: String? = nil
+    ) async throws -> AddPasskeyOutcome {
+        let credentialId = WebAuthnAuthClient.base64UrlEncode(credential.credentialId)
+        var body: [String: Any] = [
+            "challengeId": challengeId,
+            "nickname": nickname,
+            "credential": [
+                "id": credentialId,
+                "rawId": credentialId,
+                "type": "public-key",
+                "response": [
+                    "attestationObject": WebAuthnAuthClient.base64UrlEncode(credential.attestationObject),
+                    "clientDataJSON": WebAuthnAuthClient.base64UrlEncode(credential.clientDataJSON),
+                ],
+            ] as [String: Any],
+        ]
+        if let privateData {
+            body["privateData"] = ["$b64u": WebAuthnAuthClient.base64UrlEncode(privateData)]
+        }
+        if let authorization { body["authorization"] = authorization.assertionJson }
+        let match = ifMatch ?? privateDataEtag
+        do {
+            let data = try await request(
+                "POST", path: "/user/session/webauthn/register-finish",
+                body: try JSONSerialization.data(withJSONObject: body),
+                tokenStillValidOn: Self.enrollmentAuthorizationErrorCodes,
+                extraHeaders: match.map { ["X-Private-Data-If-Match": $0] } ?? [:]
+            )
+            return .added(credentialId: try parseJsonObject(data)["credentialId"] as? String)
+        } catch let error as SirosError {
+            guard case let .backendApi(code, _, _) = error else { throw error }
+            let message = error.serverMessage
+            switch (code, error.apiErrorCode) {
+            case (404, _): return .retryNeeded(message: message)
+            case (412, _): return .privateDataConflict(currentEtag: conflictPrivateDataEtag)
+            case (400, _), (403, _):
+                return .registrationRejected(status: code, message: error.apiErrorCode ?? message)
+            case (401, errorEnrollmentAuthorizationRequired): return .authorizationRequired(message: message)
+            case (401, errorEnrollmentAuthorizationFailed): return .authorizationFailed(message: message)
+            case (401, _): return .sessionRevoked(message: message)
+            default: throw error
+            }
+        }
+    }
+
+    private static let enrollmentAuthorizationErrorCodes: Set<String> = [
+        errorEnrollmentAuthorizationRequired, errorEnrollmentAuthorizationFailed,
+    ]
+
     // MARK: - HTTP primitives
 
     private func get(_ path: String) async throws -> [String: Any] {
@@ -457,7 +620,8 @@ public final class BackendApiClient: @unchecked Sendable {
         _ method: String,
         path: String,
         body: Data? = nil,
-        tokenStillValidOn: Set<String> = []
+        tokenStillValidOn: Set<String> = [],
+        extraHeaders: [String: String] = [:]
     ) async throws -> Data {
         guard let url = URL(string: "\(baseUrl)\(path)") else {
             throw SirosError.network(message: "Invalid URL: \(baseUrl)\(path)")
@@ -466,6 +630,7 @@ public final class BackendApiClient: @unchecked Sendable {
             "X-Tenant-ID": tenantId,
             "Content-Type": "application/json",
         ]
+        headers.merge(extraHeaders) { _, new in new }
         let tokens = currentAuthTokens()
         if let tokens {
             let token = try await tokens.ensureBackendToken()
@@ -473,23 +638,49 @@ public final class BackendApiClient: @unchecked Sendable {
         } else if let token = currentAppToken() {
             headers["Authorization"] = "Bearer \(token)"
         }
-        do {
-            return try await httpFn(method, url, headers, body)
-        } catch {
-            // A 401 here means the backend token itself was rejected (expired/
-            // revoked/session invalidated server-side) - `AuthTokens.
-            // registerTokenRejection` was previously never called from
-            // anywhere (dead code), so repeated silent 401s never triggered
-            // `onSessionRejected`/a forced logout, leaving a stale session
-            // looking "connected" indefinitely. Only applies to the
-            // `AuthTokens`-managed path: the legacy bare `appToken` path has
-            // no `AuthTokens` instance to register against.
-            if let tokens, case let SirosError.backendApi(code, _, _) = error, code == 401,
-               !((error as? SirosError)?.apiErrorCode.map(tokenStillValidOn.contains) ?? false) {
-                tokens.registerTokenRejection(AuthTokens.tokenBackend)
+        let response = try await httpFn(method, url, headers, body)
+        if let etag = response.headers["x-private-data-etag"] {
+            // Only a response that actually carries loaded/written private
+            // data advances the write precondition - see
+            // `conflictPrivateDataEtag`'s doc comment for why a 412's etag
+            // must NOT land here.
+            if (200..<300).contains(response.status) {
+                recordPrivateDataEtag(etag)
+            } else if response.status == 412 {
+                recordConflictPrivateDataEtag(etag)
             }
-            throw error
         }
+        if (200..<300).contains(response.status) { return response.data }
+        let error = SirosError.backendApi(
+            code: response.status,
+            message: "API request failed: \(response.status)",
+            body: String(data: response.data, encoding: .utf8) ?? ""
+        )
+        // A 401 here means the backend token itself was rejected (expired/
+        // revoked/session invalidated server-side) - `AuthTokens.
+        // registerTokenRejection` was previously never called from
+        // anywhere (dead code), so repeated silent 401s never triggered
+        // `onSessionRejected`/a forced logout, leaving a stale session
+        // looking "connected" indefinitely. Only applies to the
+        // `AuthTokens`-managed path: the legacy bare `appToken` path has
+        // no `AuthTokens` instance to register against.
+        if let tokens, response.status == 401,
+           !(error.apiErrorCode.map(tokenStillValidOn.contains) ?? false) {
+            tokens.registerTokenRejection(AuthTokens.tokenBackend)
+        }
+        throw error
+    }
+
+    private func recordPrivateDataEtag(_ etag: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        _privateDataEtag = etag
+    }
+
+    private func recordConflictPrivateDataEtag(_ etag: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        _conflictPrivateDataEtag = etag
     }
 
     private func currentAppToken() -> String? {
@@ -512,5 +703,20 @@ public final class BackendApiClient: @unchecked Sendable {
             return [:]
         }
         return json
+    }
+}
+
+extension AuthenticateResult {
+    /// The assertion as the backend's `PublicKeyCredential` JSON (the login
+    /// `credential` shape).
+    var assertionJson: [String: Any] {
+        var response: [String: Any] = [
+            "authenticatorData": WebAuthnAuthClient.base64UrlEncode(authenticatorData),
+            "clientDataJSON": WebAuthnAuthClient.base64UrlEncode(clientDataJSON),
+            "signature": WebAuthnAuthClient.base64UrlEncode(signature),
+        ]
+        if let userHandle { response["userHandle"] = WebAuthnAuthClient.base64UrlEncode(userHandle) }
+        let id = WebAuthnAuthClient.base64UrlEncode(credentialId)
+        return ["id": id, "rawId": id, "type": "public-key", "response": response]
     }
 }

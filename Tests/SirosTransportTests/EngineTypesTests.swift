@@ -551,6 +551,36 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertNil(absent.credentialMetadata)
     }
 
+    // MARK: - Engine-blind presentation wire shapes
+
+    func testSignPresentationParamsCarryTheResponseEncryptionStateAndVerifiedRequest() throws {
+        let params = try JSONDecoder().decode(SignRequestParams.self, from: Data(#"""
+        {"audience":"a","nonce":"n","state":"st",
+         "response_encryption":{"jwk":{"kty":"EC","crv":"P-256","x":"X","y":"Y","kid":"k1"},"alg":"ECDH-ES","enc":"A128GCM"},
+         "verified_request":{"client_id":"x509_san_dns:v.example","client_id_scheme":"x509_san_dns","response_mode":"direct_post.jwt",
+                             "response_uri":"https://v.example/cb","signed":true,"signature_verification":"verified"}}
+        """#.utf8))
+        XCTAssertEqual(params.state, "st")
+        XCTAssertEqual(params.responseEncryption?.alg, "ECDH-ES")
+        XCTAssertEqual(params.responseEncryption?.enc, "A128GCM")
+        XCTAssertEqual(params.responseEncryption?.jwkStrings["kid"], "k1")
+        XCTAssertEqual(params.verifiedRequest?.clientId, "x509_san_dns:v.example")
+        XCTAssertEqual(params.verifiedRequest?.signed, true)
+        let plain = try JSONDecoder().decode(SignRequestParams.self, from: Data(#"{"audience":"a","nonce":"n"}"#.utf8))
+        XCTAssertNil(plain.responseEncryption)
+        XCTAssertNil(plain.state)
+        XCTAssertNil(plain.verifiedRequest)
+    }
+
+    func testAResponseJweIsSentWithNoVpToken() throws {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(SignResponseMessage(flowId: "f", responseJwe: "a..b.c.d"))
+        ) as? [String: Any])
+        XCTAssertEqual(object["response_jwe"] as? String, "a..b.c.d")
+        XCTAssertNil(object["vp_token"])
+        XCTAssertNil(object["error"])
+    }
+
     /// Losing a connection tells the owner once, before a replacement is attempted, so what it keeps for the flows
     /// that ran on the old socket can go. A session that was told to disconnect says nothing, even when a late
     /// failure from its old socket arrives after a replacement session has begun.
