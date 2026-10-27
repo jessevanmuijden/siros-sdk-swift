@@ -80,7 +80,10 @@ enum ScaSignFlow {
     /// before use and the manager classifies THAT (`classify_pin` in siros-wscd-manager v0.11.0): four decomposed
     /// characters are four code points, not eight. Any other plugin is classified as typed.
     static func classifyPin(pluginId: String?, secret: Data) -> String? {
-        guard pluginId == "fido2", let text = String(data: secret, encoding: .utf8) else { return classifySecret(secret) }
+        // Validate with Foundation, then decode natively (as `classifySecret` does): Foundation's decoder drops a
+        // leading U+FEFF, which the manager keeps through normalisation and counts.
+        guard pluginId == "fido2", String(data: secret, encoding: .utf8) != nil else { return classifySecret(secret) }
+        let text = String(decoding: secret, as: UTF8.self)
         return classifySecret(Data(text.precomposedStringWithCanonicalMapping.utf8))
     }
 

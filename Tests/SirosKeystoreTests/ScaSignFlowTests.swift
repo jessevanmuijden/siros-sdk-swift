@@ -210,6 +210,8 @@ final class ScaSignFlowTests: XCTestCase {
         XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: nil, secret: decomposed), "passphrase_8_to_11_chars")
         XCTAssertNil(ScaSignFlow.classifyPin(pluginId: "fido2", secret: Data([0xFF])), "invalid UTF-8 stays unclassified")
         XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: "fido2", secret: Data("123456".utf8)), "pin_6_or_more_digits")
+        // A leading U+FEFF survives NFC and counts as a scalar: not a 6-digit PIN.
+        XCTAssertEqual(ScaSignFlow.classifyPin(pluginId: "fido2", secret: Data("\u{FEFF}123456".utf8)), "passphrase_less_than_8_chars")
     }
 
     /// The claim `run` builds for a fido2 PIN uses the NFC-normalised class (so it matches what the manager reports),
