@@ -1016,7 +1016,7 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications[0].params?["flow_id"], .string("m-1"))
         let matches = ctx.notifications[0].params?["result"]?.objectValue?["matches"]?.arrayValue
         XCTAssertEqual(matches?.count, 1)
-        XCTAssertEqual(matches?.first?.objectValue?["credential_id"], .string("7"))
+        XCTAssertEqual(matches?.first?.objectValue, ["credential_query_id": .string("pid")], "only the slot, nothing of the credential")
     }
 
     func testStartingAChildFlowReturnsAtOnceAndAnswersLater() async throws {
@@ -1041,7 +1041,7 @@ final class OpenID4xProfileTests: XCTestCase {
         let ctx = MockPeerContext()
         let profile = OpenID4xProfile(config: OpenID4xConfig(
             onMatchRequest: { _, _ in
-                MatchResult(matches: [], noMatchReason: "no stored credential matches the requested type(s): urn:eudi:pid:1")
+                MatchResult(matches: [], noMatchReason: "no stored credential matches the requested type(s): urn:eudi:pid:1")  // free text on purpose: must go out as a code
             }
         ))
         profile.initialize(ctx: ctx)
@@ -1054,7 +1054,7 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(params?["matches"], .array([]))
         XCTAssertEqual(
             params?["no_match_reason"],
-            .string("no stored credential matches the requested type(s): urn:eudi:pid:1")
+            .string("unspecified")
         )
     }
 

@@ -415,6 +415,12 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
 
         XCTAssertEqual(
             SirosWallet.noMatchReason(dcqlQuery: query, candidateCount: 0),
+            "no_matching_credential",
+            "only a code goes to the engine: no requested types"
+        )
+        // The wallet's own words keep the types, for its log only.
+        XCTAssertEqual(
+            SirosWallet.noMatchDescription(dcqlQuery: query, candidateCount: 0),
             "no stored credential matches the requested type(s): urn:eudi:pid:1"
         )
     }
@@ -422,7 +428,7 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
     func testNoMatchReason_noRequestedTypesStillExplains() {
         XCTAssertEqual(
             SirosWallet.noMatchReason(dcqlQuery: nil, candidateCount: 0),
-            "no stored credential matches the request"
+            "no_matching_credential"
         )
     }
 
@@ -436,6 +442,11 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
 
         XCTAssertEqual(
             SirosWallet.noMatchReason(dcqlQuery: query, candidateCount: 2),
+            "credentials_exhausted",
+            "a code, not \"N credential(s)\": the wallet's inventory size stays local"
+        )
+        XCTAssertEqual(
+            SirosWallet.noMatchDescription(dcqlQuery: query, candidateCount: 2),
             "2 matching credential(s) have no eligible copies remaining"
         )
     }
@@ -477,7 +488,7 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
 
         XCTAssertEqual(
             answer,
-            .noMatch(reason: "no stored credential matches the requested type(s): urn:eudi:pid:1")
+            .noMatch(reason: "no_matching_credential")
         )
     }
 
@@ -491,7 +502,7 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
             selection: makeSelection(candidates: [makeCredential(id: 1)], couldHaveConsented: false)
         )
 
-        XCTAssertEqual(answer, .noMatch(reason: "1 matching credential(s) have no eligible copies remaining"))
+        XCTAssertEqual(answer, .noMatch(reason: "credentials_exhausted"))
     }
 
     /// The user was shown a credential they could actually have presented and
@@ -503,7 +514,7 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
         )
 
         XCTAssertEqual(answer, .declined)
-        XCTAssertEqual(answer.reason, "user selected none of the matching credentials")
+        XCTAssertEqual(answer.reason, "no_selection")
     }
 
     // MARK: - a selection that cannot be presented
@@ -567,7 +578,7 @@ final class SirosWalletNoMatchingCredentialTests: XCTestCase {
         let nothingToPresent = makeSelection(candidates: [], couldHaveConsented: false)
         XCTAssertEqual(
             SirosWallet.unpresentableAnswer(dcqlQuery: nil, selection: nothingToPresent),
-            .noMatch(reason: "no stored credential matches the request")
+            .noMatch(reason: "no_matching_credential")
         )
     }
 
