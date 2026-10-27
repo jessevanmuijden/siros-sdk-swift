@@ -1027,16 +1027,8 @@ public final class OpenID4xProfile: WmpProfile, WmpFlowHandler, WmpShutdownProfi
     }
 
     private func matchResponseMembers(_ result: MatchResult) -> [String: AnyCodable] {
-        let matchArray = result.matches.map { match -> [String: AnyCodable] in
-            var dict: [String: AnyCodable] = [
-                "credential_id": .string(match.credentialId),
-                "format": .string(match.format),
-            ]
-            if let qid = match.credentialQueryId { dict["credential_query_id"] = .string(qid) }
-            if let vct = match.vct { dict["vct"] = .string(vct) }
-            if let claims = match.availableClaims { dict["available_claims"] = .array(claims.map { .string($0) }) }
-            return dict
-        }
+        // Only each match's slot: the engine counts matches; credential id, vct, format and claim names stay local.
+        let matchArray = result.matches.map { $0.engineSlot.mapValues { AnyCodable.string($0) } }
         var params: [String: AnyCodable] = ["matches": .array(matchArray.map { AnyCodable.object_($0) })]
         // Without this an empty match set arrives as a bare "nothing matched"
         // and the reason - the only thing that can tell the user *which*

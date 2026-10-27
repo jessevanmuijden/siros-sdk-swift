@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The engine is told only how many credentials matched.** `credentials_matched` and `match_response` (WebSocket and WMP) no longer carry each match's `credential_id`, `vct`, `format` or `available_claims`; each match is just its `credential_query_id` slot. The engine reads only the number of matches and `no_match_reason`. The wallet keeps the rest locally for the consent step. No compatibility shim.
+
 ### Fixed
 - **Add passkey: last review items (#197).** `healAccountCache` updates an already-cached passkey's salt in place (position and
   nickname kept) instead of removing and appending it, so the original passkey stays first and still unlocks with its own

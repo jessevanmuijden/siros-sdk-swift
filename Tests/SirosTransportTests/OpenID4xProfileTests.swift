@@ -1016,7 +1016,7 @@ final class OpenID4xProfileTests: XCTestCase {
         XCTAssertEqual(ctx.notifications[0].params?["flow_id"], .string("m-1"))
         let matches = ctx.notifications[0].params?["result"]?.objectValue?["matches"]?.arrayValue
         XCTAssertEqual(matches?.count, 1)
-        XCTAssertEqual(matches?.first?.objectValue?["credential_id"], .string("7"))
+        XCTAssertEqual(matches?.first?.objectValue, ["credential_query_id": .string("pid")], "only the slot, nothing of the credential")
     }
 
     func testStartingAChildFlowReturnsAtOnceAndAnswersLater() async throws {

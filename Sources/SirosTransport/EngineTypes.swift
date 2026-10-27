@@ -450,6 +450,18 @@ public struct MatchResponseMessage: Codable, Sendable {
         case flowId = "flow_id"
         case noMatchReason = "no_match_reason"
     }
+
+    /// The engine-bound form: each match is only its slot (`CredentialMatch.engineSlot`), never the credential's
+    /// id, type, format or claim names. The engine reads the number of matches and `no_match_reason`.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(flowId, forKey: .flowId)
+        try container.encode(matches.map { $0.engineSlot }, forKey: .matches)
+        try container.encodeIfPresent(noMatchReason, forKey: .noMatchReason)
+        try container.encodeIfPresent(error, forKey: .error)
+        try container.encodeIfPresent(timestamp, forKey: .timestamp)
+    }
 }
 
 public struct CredentialMatch: Codable, Sendable {
@@ -478,6 +490,16 @@ public struct CredentialMatch: Codable, Sendable {
         case credentialQueryId = "credential_query_id"
         case credentialId = "credential_id"
         case availableClaims = "available_claims"
+    }
+}
+
+extension CredentialMatch {
+    /// What the engine is told of one match: the DCQL query it satisfies (`credential_query_id`), nothing about
+    /// the credential. The engine uses only the NUMBER of matches; the credential id, `vct`, `format` and the claim
+    /// names stay on the device (the consent step uses them locally).
+    var engineSlot: [String: String] {
+        guard let queryId = credentialQueryId else { return [:] }
+        return ["credential_query_id": queryId]
     }
 }
 

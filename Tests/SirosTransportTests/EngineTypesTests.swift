@@ -199,7 +199,9 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertTrue(text.contains("\"type\":\"match_response\""))
         XCTAssertTrue(text.contains("\"flow_id\":\"flow-88\""))
         XCTAssertTrue(text.contains("\"credential_query_id\":\"query-1\""))
-        XCTAssertTrue(text.contains("\"credential_id\":\"cred-1\""))
+        for leaked in ["credential_id", "cred-1", "format", "dc+sd-jwt", "vct", "urn:eu:pid:1", "available_claims", "given_name", "family_name"] {
+            XCTAssertFalse(text.contains(leaked), "match_response must not carry \(leaked)")
+        }
     }
 
     /// An empty match set is only half the answer - the reason is what says
@@ -259,11 +261,8 @@ final class EngineTypesTests: XCTestCase {
         guard case .array(let matches)? = payload["matches"], case .object_(let match)? = matches.first else {
             return XCTFail("Expected one encoded match")
         }
-        XCTAssertEqual(match["credential_query_id"], .string("query-1"))
-        XCTAssertEqual(match["credential_id"], .string("7"))
-        XCTAssertEqual(match["format"], .string("mso_mdoc"))
-        XCTAssertEqual(match["vct"], .string("urn:eu:pid:1"))
-        XCTAssertEqual(match["available_claims"], .array([.string("given_name")]))
+        // The engine reads the number of matches; the credential itself stays on the device.
+        XCTAssertEqual(match, ["credential_query_id": .string("query-1")])
     }
 
     /// The engine's `NO_MATCHING_CREDENTIAL` error carries the two things an

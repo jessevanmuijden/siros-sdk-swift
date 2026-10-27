@@ -969,18 +969,9 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         return payload
     }
 
-    /// `CredentialMatch` as the flow-action payload's JSON object - the same
-    /// wire shape its `Codable` conformance produces, hand-built because
-    /// `FlowActionMessage.payload` is `[String: AnyCodable]`.
+    /// A match as the flow-action payload's JSON object: only its slot (`CredentialMatch.engineSlot`).
     private static func encode(match: CredentialMatch) -> AnyCodable {
-        var obj: [String: AnyCodable] = [
-            "credential_id": .string(match.credentialId),
-            "format": .string(match.format),
-        ]
-        if let queryId = match.credentialQueryId { obj["credential_query_id"] = .string(queryId) }
-        if let vct = match.vct { obj["vct"] = .string(vct) }
-        if let claims = match.availableClaims { obj["available_claims"] = .array(claims.map { .string($0) }) }
-        return .object_(obj)
+        .object_(match.engineSlot.mapValues { .string($0) })
     }
 
     /// Send a trust evaluation result back to the server.
