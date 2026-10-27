@@ -173,13 +173,14 @@ private final class Listener: WalletEventListener, @unchecked Sendable {
 final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
 
     private static let recipientD = "xu-cXXiuASoBEWSss5fOJIil0NepofeuDXqNXB9aHTc"
-    private static let jwe = "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIsImN0eSI6IkpXVCIsImVuYyI6IkEyNTZHQ00iLCJlcGsiOnsia3R5IjoiRUMiLCJjcnYiOiJQLTI1NiIsIngiOiJNaURZdF95aGt3U3JRZG9MSFF0WmU5ODFMbnNvWFNSV0l5XzBqTGxTRG9VIiwieSI6IjJUTWRWeWd1RWo2TENFdmZKanBOVTNUY21KVlFDTUNfQWV1cUJ5YnZMTFUifX0.guInIfQMmm3JKXiDuEHdJo6EeZEJDVAc27XZbLeQnnKJQoKsThpbnQ.fxSbn2AHhTP7nKa1.oSd7nnmcGXTh1zeSxyVUnkSk3esX_drDrr6Aj0JafLfdznsjIl8etaV0v6ZNCRnstrSIMWJTOmVOmWjuE_BkR-98BV3oTkAxn6QWKSfQDxnemQq9FHjQDTjYe2rsoeaka2xRPFTFgdV_QyKnvoUNCqKmO3esJMv2RYMjpm-EKyvyCi-bdeOACoyIdvTKw51n5BWw19jj0ovjW7FioZCtdMuOJEnVgKQ_CN5NjUYZNs_LGlcbag2Hox7UiEF_DBO2UoAF55HD0VNGM2F_vJVUyaxkfb4OxdVamWSwYRTXI5AcqxlD33pvUk5FMX9XHgtU.pI1hC1eeZeOsA5c5tP9a3Q"
+    private static let jwe = "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIsImN0eSI6IkpXVCIsImVuYyI6IkEyNTZHQ00iLCJlcGsiOnsia3R5IjoiRUMiLCJjcnYiOiJQLTI1NiIsIngiOiJPeS1XS0doWnFVTFhLQ1dNTmpnak1MQkRVeUVvTVVrV1RXTXZEcERPemQ4IiwieSI6ImlBcjhqUWlOX2ZPWXlNTDRPSFowRDhXNUpIWHBDRHVqTTZZVkplNHE4akEifX0.AVHzAebYl0dJwUIDRXgqhicLksq5U2jbQ8oQF0FHLXGcL9DBygMhlA.k7wZ1dAXylMAU7ro.U0dX-8eeDhyx6ENvowNRTPjyQM4nXwNCBixgCycXbyPRVG3Pzy7ZToqeAyKYllagDo7xUR_Mi_IRwwy5Wo2YnSaYkzFdV6solmOdxgakj_oKQrVJ0Eagh3ht5cOftilYnj4hmlH5f1mRbzBHctzUCZ_ywG9Z_k9ihrHtZOgk5Pn7ez4zDecb-bd6ByLspXjwc07saB0vpd9t2KApnQr5NwVDJfU02BHkzcrt0mYTqSrJlj6sVZZ_cLNyq8L5v74i8E1EsZwBRlegUYMvs9SmJuXTzkdn1RYJtnJIDq7qEGiVW7EmIfB1tLotQ6JFDGqT.Z7XYDoZNqv6-8cqUFJrbFw"
     private static let jweDeferred = "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIsImVuYyI6IkEyNTZHQ00iLCJlcGsiOnsia3R5IjoiRUMiLCJjcnYiOiJQLTI1NiIsIngiOiIyb2hzemZSSUJ4ekg0dENOREpWbHExUU9yYk96a0ZGdGlIOWs2dTNVWjVjIiwieSI6Ik1YU3JVLWJGVzBNdGVyRWpLQmY3MFQwcUt1UG1WVTB1YnZxN0lMSm4wbncifX0.kCtw0ue8R0VZtgRXiPoiSkX1uWyzl4F1Us_O0SR45ZWo3mIK3xKBvg.5vICxNjnqA5hjI-f.oSbTeZez3MjbSUXEYKlDRuEjsbp7gH-oZ9cVJ7g2eRpl_GZPVcw.22SeVPINtknkA6ybIkYH3A"
     private static let jweBoth = "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIsImVuYyI6IkEyNTZHQ00iLCJlcGsiOnsia3R5IjoiRUMiLCJjcnYiOiJQLTI1NiIsIngiOiI3RjV6eklmR1BxWXpJeU1lSjhpTUcwTTV6TlA3NS1nS0xaVWdhVWF0ajhrIiwieSI6Ik5rQnVYbG5NZnllcmdxUjhEQzBEcmFQWVR4WlNWY2hzSTM3YTVoOEZQYm8ifX0.4gIiejmyeA61NLD34AYAyzS4d1aV6XKgMNb50djpFN2UydYSs5pOJg.XvLr8wEicHjZq5rX.bdzX2QY89AErIIqPlHkoxoqui75AxJX1xJQJMrHnBAfGovgYWcZFhjeVmlWROVspiPoZWGfc9lB6Zd6y.IrvlN4kLnwztYvamFu3GbA"
     private static let jweBatch = "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyIsImVuYyI6IkEyNTZHQ00iLCJlcGsiOnsia3R5IjoiRUMiLCJjcnYiOiJQLTI1NiIsIngiOiJnQlM3N3NhQ0NvSVplQ2RtUThVSjJtRXhXbkdPN0tEN0sxMFVqSEhjOTlnIiwieSI6ImFxLVZOUDRHckF1T1h1V05qa1RCSFNOek94V21ZMlVmRUhqZFoySkRYX1UifX0.5xroyleSTxZturr07WS5QoiHmPr-H_MUJFupCxnEXs4J4eEboTTAxA.1ZAWZI-0JYLuJ33G.IAZQlqX0NHRs4cXgrCwS5D-2ojsvCA7Kadw85ouLUeWR5dkxeFgZ4UIdIZXbZpZy57yJNudT6iFgVoY6li1WldJdxmONV_ehm_6D8NFJQMyeC3eYUA.Iv3yi3MTWOE-2t8EuglsSA"
     private static let credential = "eyJhbGciOiJFUzI1NiJ9.eyJ2Y3QiOiJ1cm46ZXVkaTpwaWQ6MSJ9.c2ln~disclosure~"
-    private static let seedNamespace = "org.siros.nym_auth"
-    private static let seed = "00112233445566778899aabbccddeeff"
+    private static let extensionName = "org.example.extension"
+    private static let extensionMember = "org.example.member"
+    private static let sentinel = "00112233445566778899aabbccddeeff"
 
     private let pair = CredentialResponseEncryptionParams(alg: "ECDH-ES+A256KW", enc: "A256GCM")
     private let request = CredentialResponseEncryptionRequest(alg: "ECDH-ES+A256KW", enc: "A256GCM", required: true)
@@ -213,6 +214,13 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
     private static func decodeFlowComplete(_ object: [String: Any]) throws -> FlowCompleteMessage {
         var msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
         msg.startTag = 0
+        return msg
+    }
+
+    /// A completion the session could not associate with an issuance: no start tag at all.
+    private static func decodeUntaggedFlowComplete(_ object: [String: Any]) throws -> FlowCompleteMessage {
+        let msg = try JSONDecoder().decode(FlowCompleteMessage.self, from: try JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(msg.startTag)
         return msg
     }
 
@@ -511,24 +519,37 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         } catch { XCTAssertEqual(error as? CredentialResponseError, .sessionEnded) }
     }
 
-    /// A pending (deferred) response that carries the delivered seed is refused, and the issuer is told, whether or
-    /// not a metadata receiver is installed; it is not dropped as an ordinary pending answer.
-    func testAPendingResponseCarryingTheSeedIsRefusedAndTheIssuerTold() async throws {
+    /// A response that still carries a superseded secret-bearing member - immediate or pending, with or without a
+    /// metadata receiver - is refused whole and the issuer is told; nothing is stored. It is refused by NAME: a
+    /// different namespaced extension member, or plain display metadata, is accepted.
+    func testAResponseCarryingASupersededSecretMemberIsRefusedAndTheIssuerTold() async throws {
+        for member in ["org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members"] {
+            for deferred in [true, false] {
+                let w = wallet()
+                let notifier = RecordingNotifier()
+                w.credentialNotifier = notifier
+                let key = try installOwnKey(w, flowId: "ds")
+                let payload = deferred ? #""transaction_id":"tx","interval":1"# : #""credentials":[{"credential":"c"}]"#
+                let body = #"{\#(payload),"notification_id":"n-legacy","credential_metadata":{"\#(member)":{"x":"00112233445566778899aabbccddeeff"}}}"#
+                do {
+                    _ = try await w.decryptCredentialResponse(flowId: "ds", jwe: try encrypt(body, to: key), deferred: deferred)
+                    XCTFail("\(member) (deferred \(deferred)) must be refused")
+                } catch { XCTAssertEqual(error as? CredentialResponseError, .legacySecretMember, member) }
+                XCTAssertEqual(notifier.sent.map(\.event), [CredentialNotificationEvent.failure], member)
+                XCTAssertEqual(notifier.sent.first?.notificationId, "n-legacy")
+                XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "ds").isEmpty, "nothing from a refused response is kept")
+            }
+        }
+        XCTAssertEqual(CredentialResponseError.legacySecretMember.wmpErrorCode, "LEGACY_SECRET_MEMBER")
+    }
+
+    func testDisplayMetadataAndOtherNamespacedExtensionMembersAreStillAccepted() async throws {
         let w = wallet()
-        let notifier = RecordingNotifier()
-        w.credentialNotifier = notifier
-        let key = try installOwnKey(w, flowId: "ds")
-        let body = #"{"transaction_id":"tx","interval":1,"notification_id":"n-seed","credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}"#
-        do {
-            _ = try await w.decryptCredentialResponse(flowId: "ds", jwe: try encrypt(body, to: key), deferred: true)
-            XCTFail("a pending response must not carry the seed")
-        } catch { XCTAssertEqual(error as? CredentialResponseError, .deferredSeed) }
-        XCTAssertEqual(notifier.sent.map(\.event), [CredentialNotificationEvent.failure])
-        XCTAssertEqual(notifier.sent.first?.notificationId, "n-seed")
-        // An ordinary pending response is still accepted.
-        let plain = #"{"transaction_id":"tx","interval":1}"#
-        let control = try await w.decryptCredentialResponse(flowId: "ds", jwe: try encrypt(plain, to: key), deferred: true)
-        XCTAssertEqual(control.transactionId, "tx")
+        let key = try installOwnKey(w, flowId: "ok")
+        let body = #"{"credentials":[{"credential":"c"}],"credential_metadata":{"display":[{"name":"Nym"}],"org.example.extension":{"k":"v"},"org.siros.other_extension":{"k":"v"}}}"#
+        let control = try await w.decryptCredentialResponse(flowId: "ok", jwe: try encrypt(body, to: key), deferred: false)
+        XCTAssertEqual(control.credentialCount, 1)
+        XCTAssertEqual(w.takeDecryptedCredentialResponses(flowId: "ok").first?.credentialMetadata?["org.siros.other_extension"]?["k"]?.stringValue, "v")
     }
 
     /// A proof that finishes after its flow was cancelled must not write the old flow's key ids into the issuance
@@ -754,8 +775,8 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let bodies = [
             #"{"a":1,"a":2}"#,
             #"{"a":1,"\u0061":2}"#,
-            #"{"org.siros.secret_seed":{"ns":"00112233445566778899aabbccddeeff","ns":"00112233445566778899aabbccddeeff"}}"#,
-            #"{"org.siros.secret_seed":{"n\u0073":"00112233445566778899aabbccddeeff","ns":"00112233445566778899aabbccddeeff"}}"#,
+            #"{"org.example.extension":{"ns":"00112233445566778899aabbccddeeff","ns":"00112233445566778899aabbccddeeff"}}"#,
+            #"{"org.example.extension":{"n\u0073":"00112233445566778899aabbccddeeff","ns":"00112233445566778899aabbccddeeff"}}"#,
         ]
         for metadata in bodies {
             let w = wallet()
@@ -895,13 +916,13 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertNil(reply.transactionId)
         XCTAssertNil(reply.interval)
         let wire = String(decoding: try JSONEncoder().encode(reply), as: UTF8.self)
-        for secret in [Self.credential, Self.seed, "3fwe98js", "credential_metadata", "secret_seed"] {
+        for secret in [Self.credential, Self.sentinel, "3fwe98js", "credential_metadata", "org.example"] {
             XCTAssertFalse(wire.contains(secret), "the sign_response must not carry \(secret)")
         }
         let held = w.takeDecryptedCredentialResponses(flowId: "f1")
         XCTAssertEqual(held.first?.credentials, [Self.credential])
         XCTAssertEqual(held.first?.notificationId, "3fwe98js")
-        XCTAssertEqual(held.first?.credentialMetadata?["org.siros.secret_seed"]?[Self.seedNamespace]?.stringValue, Self.seed)
+        XCTAssertEqual(held.first?.credentialMetadata?[Self.extensionName]?[Self.extensionMember]?.stringValue, Self.sentinel)
     }
 
     func testAnUndecryptableResponseAnswersWithAnErrorThatCarriesNothingAndDropsTheFlow() async throws {
@@ -916,7 +937,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let reply = try XCTUnwrap(sender.sent.first)
         XCTAssertEqual(reply.errorCode, "DECRYPT_FAILED")
         XCTAssertNotNil(reply.error)
-        XCTAssertFalse(String(decoding: try JSONEncoder().encode(reply), as: UTF8.self).contains(Self.seed))
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(reply), as: UTF8.self).contains(Self.sentinel))
         XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "f2").isEmpty)
         // The flow's key is gone: a second attempt has nothing to decrypt with.
         let again = RecordingSender()
@@ -978,7 +999,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         // The credentials are there, so a commitment can be checked against each one of a batch.
         XCTAssertEqual(facts?.0.credentials, [Self.credential])
         XCTAssertEqual(facts?.0.notificationId, "3fwe98js")
-        XCTAssertEqual(facts?.0.credentialMetadata?["org.siros.secret_seed"]?[Self.seedNamespace]?.stringValue, Self.seed)
+        XCTAssertEqual(facts?.0.credentialMetadata?[Self.extensionName]?[Self.extensionMember]?.stringValue, Self.sentinel)
         XCTAssertEqual(facts?.1, true, "the caller said deferred")
         XCTAssertTrue(w.takeDecryptedCredentialResponses(flowId: "f5").isEmpty, "nothing from a refused response is kept")
         // The issuer is told: the engine registered the notification context before relaying the JWE.
@@ -987,9 +1008,9 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure)
     }
 
-    /// A pending response carrying the seed is refused on EVERY poll, and one response's metadata is never carried
-    /// into the next: each receiver call sees only its own response's metadata.
-    func testSeedInAPendingResponseIsRefusedOnEveryPollAndMetadataIsNotCarriedOver() async throws {
+    /// A pending response carrying a superseded member is refused on EVERY poll, and one response's metadata is never
+    /// carried into the next: each receiver call sees only its own response's metadata.
+    func testASupersededMemberInAPendingResponseIsRefusedOnEveryPollAndMetadataIsNotCarriedOver() async throws {
         let w = wallet()
         let notifier = RecordingNotifier()
         w.credentialNotifier = notifier
@@ -997,7 +1018,7 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         let seeded = #"{"transaction_id":"tx","interval":1,"notification_id":"n-s","credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}"#
         for _ in 0..<2 {
             do { _ = try await w.decryptCredentialResponse(flowId: "pp", jwe: try encrypt(seeded, to: key), deferred: true); XCTFail("refused") }
-            catch { XCTAssertEqual(error as? CredentialResponseError, .deferredSeed) }
+            catch { XCTAssertEqual(error as? CredentialResponseError, .legacySecretMember) }
         }
         XCTAssertEqual(notifier.sent.count, 2, "the issuer is told on every poll")
         actor Seen { var metadata: [JSONValue?] = []; func add(_ m: JSONValue?) { metadata.append(m) } }
@@ -1038,6 +1059,64 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         }
     }
 
+    /// No response-encryption key was offered, so the engine relays a PLAIN completion with the response's display
+    /// metadata. A superseded secret-bearing member in it is refused before anything is stored: the decoder keeps only
+    /// that the member was present (never its value), so the plain path cannot store the credentials and report success.
+    func testAPlainCompletionCarryingASupersededSecretMemberIsRefusedBeforeStorage() async throws {
+        for member in ["org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members"] {
+            let w = wallet()
+            let notifier = RecordingNotifier()
+            w.credentialNotifier = notifier
+            let listener = Listener()
+            w.eventListener = listener
+            // No key offered for this flow.
+            let object: [String: Any] = [
+                "type": "flow_complete", "flow_id": "plain",
+                "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-legacy"]],
+                "credential_metadata": ["display": [["name": "x"]], member: ["k": "00112233445566778899aabbccddeeff"]],
+            ]
+            await w.handleFlowComplete(msg: try Self.decodeFlowComplete(object))
+            XCTAssertEqual(listener.errors.count, 1, member)
+            XCTAssertTrue(listener.completed.isEmpty, member)
+            XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-legacy"], member)
+            XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure, member)
+            let stored = await w.credentialStore.getAll()
+            XCTAssertTrue(stored.isEmpty, "\(member): nothing is stored")
+        }
+    }
+
+    func testAWmpCompletionCarryingASupersededSecretMemberIsRefusedBeforeStorage() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "wp", flowType: "oid4vci", status: "active", credentials: []))
+        await w.handleWmpFlowComplete(flowId: "wp", result: .object_([
+            "credentials": .array([.object_(["format": .string("dc+sd-jwt"), "credential": .string("a.b.c"), "notification_id": .string("n-w")])]),
+            "credential_metadata": .object_(["holder_commitments": .object_(["k": .string("v")])]),
+        ]))
+        XCTAssertEqual(listener.errors.count, 1)
+        XCTAssertTrue(listener.completed.isEmpty)
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-w"])
+    }
+
+    /// Refused by name: display metadata and another namespaced extension member do not trigger the refusal.
+    func testAPlainCompletionWithOtherMetadataMembersIsNotRefusedForASupersededMember() async throws {
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "plain2",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-ok"]],
+            "credential_metadata": ["display": [["name": "x"]], "org.example.extension": ["k": "v"]],
+        ]
+        let message = try Self.decodeFlowComplete(object)
+        XCTAssertEqual(message.credentialMetadata?.hasProhibitedMember, false)
+        await w.handleFlowComplete(msg: message)
+        XCTAssertFalse(listener.errors.contains { $0.contains("LEGACY_SECRET_MEMBER") }, "refused by name only")
+    }
+
     /// The refusal's `credential_failure` awaits a transport send; if issuance A is cancelled and issuance B begins
     /// meanwhile, A's late cleanup must not reset B's guards, key or state.
     func testALateRefusalOfACancelledIssuanceLeavesTheNextIssuanceAlone() async throws {
@@ -1061,6 +1140,114 @@ final class SirosWalletCredentialResponseEncryptionTests: XCTestCase {
         XCTAssertTrue(kept.1, "B's key is kept")
         guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
         XCTAssertEqual(flowId, "B")
+    }
+
+    /// Issuance A is cancelled before its flow id is known and B starts; A's LATE completion carries a superseded
+    /// secret member. A's own notification is refused (credential_failure for ITS id), but the cleanup stands down:
+    /// B's guards, epoch, key and state are untouched, so B's valid completion is not dropped.
+    func testASupersededIssuancesRefusalNeverTouchesTheCurrentIssuance() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        // Production-style tags: what `engine.startIssuance(startTag:)` is given is `issuanceEpoch`.
+        w.lock.lock(); let tagA = w.issuanceEpoch; w.lock.unlock()        // A starts ...
+        w.resetIssuanceGuards()                                            // ... is superseded (cancel / new flow bumps the epoch)
+        w.lock.lock(); w.issuanceInFlight = true; let tagB = w.issuanceEpoch; w.lock.unlock()   // B starts
+        try installKey(w, flowId: "B")
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "A",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-A"]],
+            "credential_metadata": ["org.siros.secret_seed": ["k": "00112233445566778899aabbccddeeff"]],
+        ]
+        var message = try Self.decodeFlowComplete(object)
+        message.startTag = tagA
+        await w.handleFlowComplete(msg: message)
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-A"], "A is refused for its own notification id")
+        XCTAssertEqual(notifier.sent.first?.event, CredentialNotificationEvent.failure)
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil, w.issuanceEpoch == tagB)
+        w.lock.unlock()
+        XCTAssertTrue(kept.2, "B's epoch is not advanced by A's cleanup")
+        XCTAssertTrue(kept.0, "B's in-flight guard is not reset")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        XCTAssertTrue(listener.errors.isEmpty, "A's failure is not reported as B's")
+        guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
+        XCTAssertEqual(flowId, "B")
+        let stored = await w.credentialStore.getAll()
+        XCTAssertTrue(stored.isEmpty, "nothing stored")
+    }
+
+    /// A late completion with NO start tag (nothing ties it to an issuance by epoch) for a flow the wallet cannot prove
+    /// it owns is refused for its own notification ids only: it must not clear the active issuance's guards or advance
+    /// its epoch. A flow that IS the active one (state or offered key) still gets its cleanup.
+    func testAnUntaggedLateRefusalNeverTouchesAnotherActiveIssuance() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        w.lock.lock(); w.issuanceInFlight = true; let epochB = w.issuanceEpoch; w.lock.unlock()
+        try installKey(w, flowId: "B")
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "B", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "A",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-A"]],
+            "credential_metadata": ["secret_members": ["k": "v"]],
+        ]
+        await w.handleFlowComplete(msg: try Self.decodeUntaggedFlowComplete(object))
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-A"], "still refused for its own notification id")
+        w.lock.lock()
+        let kept = (w.issuanceInFlight, w.credentialResponseKeys["B"] != nil, w.issuanceEpoch == epochB)
+        w.lock.unlock()
+        XCTAssertTrue(kept.0, "B's in-flight guard is kept")
+        XCTAssertTrue(kept.1, "B's key is kept")
+        XCTAssertTrue(kept.2, "B's epoch is not advanced")
+        XCTAssertTrue(listener.errors.isEmpty)
+        guard case .flowActive(_, _, let flowId, _, _, _) = w.state else { return XCTFail("B's state was changed: \(w.state)") }
+        XCTAssertEqual(flowId, "B")
+    }
+
+    func testAnUntaggedRefusalOfTheActiveFlowStillCleansUp() async throws {
+        let w = wallet()
+        let listener = Listener()
+        w.eventListener = listener
+        w.lock.lock(); w.issuanceInFlight = true; w.lock.unlock()
+        w.setState(.flowActive(userId: "u", displayName: nil, flowId: "cur", flowType: "oid4vci", status: "active", credentials: []))
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "cur",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-c"]],
+            "credential_metadata": ["secret_members": ["k": "v"]],
+        ]
+        await w.handleFlowComplete(msg: try Self.decodeUntaggedFlowComplete(object))
+        XCTAssertEqual(listener.errors.count, 1)
+        w.lock.lock(); let inFlight = w.issuanceInFlight; w.lock.unlock()
+        XCTAssertFalse(inFlight)
+    }
+
+    /// A CURRENT refusal (the completion's tag is the epoch in force) does run its cleanup: the in-flight guard is
+    /// released and the failure is reported, so the next issuance is not blocked.
+    func testACurrentIssuancesRefusalReleasesItsGuards() async throws {
+        let w = wallet()
+        let notifier = RecordingNotifier()
+        w.credentialNotifier = notifier
+        let listener = Listener()
+        w.eventListener = listener
+        w.lock.lock(); w.issuanceInFlight = true; let tag = w.issuanceEpoch; w.lock.unlock()
+        let object: [String: Any] = [
+            "type": "flow_complete", "flow_id": "cur",
+            "credentials": [["format": "dc+sd-jwt", "credential": "a.b.c", "notification_id": "n-cur"]],
+            "credential_metadata": ["holder_commitments": ["k": "v"]],
+        ]
+        var message = try Self.decodeFlowComplete(object)
+        message.startTag = tag
+        await w.handleFlowComplete(msg: message)
+        XCTAssertEqual(notifier.sent.map(\.notificationId), ["n-cur"])
+        XCTAssertEqual(listener.errors.count, 1)
+        w.lock.lock(); let inFlight = w.issuanceInFlight; w.lock.unlock()
+        XCTAssertFalse(inFlight, "the refused issuance's in-flight guard is released")
     }
 
     /// The ready-state restore of a failed issuance waits for the credential store. If a logout publishes

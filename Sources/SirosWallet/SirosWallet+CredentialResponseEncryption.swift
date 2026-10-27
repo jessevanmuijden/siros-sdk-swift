@@ -17,14 +17,14 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
     case noKey
     case decryptFailed
     case malformedResponse
-    /// The receiver of `credential_metadata` (delivered-secret validation) refused the response.
+    /// The receiver of `credential_metadata` refused the response.
     case refused
     /// The engine REQUIRES response encryption with an `alg`/`enc` pair this build cannot open.
     case unsupportedRequiredPair
     /// The session this request arrived on has ended (logout, destroy, terminal failure): nothing is allocated for it.
     case sessionEnded
-    /// A pending (deferred) response carried a delivered seed.
-    case deferredSeed
+    /// The response's `credential_metadata` carries a superseded secret-bearing member (see `legacySecretMembers`).
+    case legacySecretMember
     /// The request arrived on a socket that has since been replaced: dropped, never answered.
     case staleSocket
     /// The request is for a flow that already ended.
@@ -32,7 +32,7 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
 
     var wmpErrorCode: String? {
         switch self {
-        case .deferredSeed: return "DEFERRED_SEED"
+        case .legacySecretMember: return "LEGACY_SECRET_MEMBER"
         case .staleSocket: return "STALE_SOCKET"
         case .flowEnded: return "FLOW_ENDED"
         case .sessionEnded: return "SESSION_ENDED"
@@ -47,13 +47,9 @@ enum CredentialResponseError: Error, WmpErrorCodeProviding, Equatable {
 
 /// What the wallet does with a decrypted Credential Response before it keeps it.
 ///
-/// This is the seam where delivered-secret receipt belongs (`DeliveredSecretReceipt`, privatedata-spec
-/// section 5A: 1 to 8 namespaces, 32 lowercase hex, a seed needs an encrypted, non-deferred response
-/// with a `notification_id`, strip before merge, `SHA256(seed) == ssc`). It gets the whole response
-/// (the credentials, so a commitment such as `ssc` can be checked against each one of a batch, the
-/// `notification_id` and the `credential_metadata`) and whether it answers a deferred request; the
-/// response reached it through the wallet's own decryption, so it IS encrypted. It throws to refuse
-/// the whole response: nothing from it is then stored, and the issuer is told `credential_failure`.
+/// It gets the whole response (the credentials, the `notification_id` and the `credential_metadata`) and whether it
+/// answers a deferred request; the response reached it through the wallet's own decryption, so it IS encrypted. It
+/// throws to refuse the whole response: nothing from it is then stored, and the issuer is told `credential_failure`.
 public typealias CredentialMetadataReceiver = @Sendable (
     _ flowId: String,
     _ response: DecryptedCredentialResponse,
@@ -69,6 +65,10 @@ struct CredentialResponseControl: Equatable {
 }
 
 extension SirosWallet {
+
+    /// `credential_metadata` members of the superseded secret-bearing issuance shapes. A response carrying any of them
+    /// is refused (`CredentialResponseError.legacySecretMember`).
+    static let legacySecretMembers = CredentialDisplayMetadata.prohibitedMembers
 
     // MARK: - generate_proof: the wallet's response-encryption key
 
@@ -161,13 +161,13 @@ extension SirosWallet {
             await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
             throw CredentialResponseError.malformedResponse
         }
-        // A PENDING response (transaction_id) never carries the delivered seed: a seed needs the final, encrypted
-        // response. It is refused here whether or not a receiver is installed, and the issuer is told, not left
-        // to have it silently dropped before any seed check runs.
-        if response.transactionId != nil, case .object(let members)? = response.credentialMetadata,
-           members["org.siros.secret_seed"] != nil {
+        // The superseded secret-bearing members (a delivered seed, holder commitments, the PSC shape) are no longer
+        // part of any issuance this wallet accepts: a response that still carries one, immediate or deferred, is
+        // refused whole - nothing is stored or merged, and the issuer is told - never stripped and carried on.
+        if case .object(let members)? = response.credentialMetadata,
+           members.keys.contains(where: { Self.legacySecretMembers.contains($0) }) {
             await sendCredentialFailure(flowId: flowId, notificationId: response.notificationId)
-            throw CredentialResponseError.deferredSeed
+            throw CredentialResponseError.legacySecretMember
         }
         if let receiver = credentialMetadataReceiver {
             do {
@@ -424,13 +424,18 @@ extension SirosWallet {
     /// - Parameter ifGeneration: when given, the cleanup runs only if the flow's generation is still this one, decided
     ///   under the wallet lock together with ending the flow; otherwise a cancellation (or another issuance) owns the
     ///   state now and nothing here touches it.
-    func failIssuanceLocally(flowId: String, message: String, ifGeneration: [Int]? = nil) async {
+    ///   - ifEpoch: the `issuanceEpoch` the failing completion's start tag carries (`FlowCompleteMessage.startTag`, the
+    ///     value `engine.startIssuance(startTag:)` was given). Checked under the same lock as
+    ///     `ifGeneration`: a completion of a SUPERSEDED issuance (cancelled, then another begun) must not clear the new
+    ///     issuance's guards, advance its epoch or end its state, so it does nothing here.
+    func failIssuanceLocally(flowId: String, message: String, ifGeneration: [Int]? = nil, ifEpoch: Int? = nil) async {
         // The issuance attempt this failure belongs to, taken before anything below: a replacement issuance that starts
         // afterwards (without cancelling this one) makes the final restore of the ready state stand down.
         let attempt = issuanceStartEpoch.current
-        if let ifGeneration {
+        if ifGeneration != nil || ifEpoch != nil {
             lock.lock()
-            guard ifGeneration == credentialResponseGenerationLocked(flowId: flowId) else { lock.unlock(); return }
+            if let ifGeneration, ifGeneration != credentialResponseGenerationLocked(flowId: flowId) { lock.unlock(); return }
+            if let ifEpoch, issuanceEpoch != ifEpoch { lock.unlock(); return }
             flowEndSeq[flowId, default: 0] += 1
             lock.unlock()
         }

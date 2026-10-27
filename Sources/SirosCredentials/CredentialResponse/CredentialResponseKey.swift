@@ -66,7 +66,7 @@ public struct DecryptedCredentialResponse: Sendable, Equatable {
     public let transactionId: String?
     public let interval: Int?
     /// The response-level `credential_metadata`, exactly as received: absent, or any JSON value (a
-    /// consumer such as `DeliveredSecretReceipt` decides what a non-object means).
+    /// consumer decides what a non-object means).
     public let credentialMetadata: JSONValue?
     /// A digest of the JWE this response was opened from, set by the owner that retains it: the same encrypted response
     /// delivered again (a retried child) is recognised and not retained twice.

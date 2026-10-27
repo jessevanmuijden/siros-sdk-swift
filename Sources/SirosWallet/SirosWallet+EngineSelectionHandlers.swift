@@ -81,6 +81,9 @@ extension SirosWallet {
             if let answer = Self.unpresentableAnswer(dcqlQuery: dcqlQuery, selection: selection) {
                 switch answer {
                 case .noMatch(let reason):
+                    #if canImport(os)
+                    logger.info("Nothing to present: \(Self.noMatchDescription(dcqlQuery: dcqlQuery, candidateCount: selection.candidates.count))")
+                    #endif
                     engine.sendCredentialsMatched(flowId: flowId, matches: [], noMatchReason: reason)
                 case .declined:
                     engine.sendFlowAction(flowId: flowId, action: "decline", payload: ["reason": .string("user_declined")])

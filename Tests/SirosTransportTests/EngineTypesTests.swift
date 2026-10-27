@@ -199,7 +199,9 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertTrue(text.contains("\"type\":\"match_response\""))
         XCTAssertTrue(text.contains("\"flow_id\":\"flow-88\""))
         XCTAssertTrue(text.contains("\"credential_query_id\":\"query-1\""))
-        XCTAssertTrue(text.contains("\"credential_id\":\"cred-1\""))
+        for leaked in ["credential_id", "cred-1", "format", "dc+sd-jwt", "vct", "urn:eu:pid:1", "available_claims", "given_name", "family_name"] {
+            XCTAssertFalse(text.contains(leaked), "match_response must not carry \(leaked)")
+        }
     }
 
     /// An empty match set is only half the answer - the reason is what says
@@ -209,12 +211,35 @@ final class EngineTypesTests: XCTestCase {
         let msg = MatchResponseMessage(
             flowId: "flow-89",
             matches: [],
-            noMatchReason: "no stored credential matches the requested type(s): urn:eudi:pid:1"
+            noMatchReason: "no_matching_credential"
         )
         let text = String(data: try encoder.encode(msg), encoding: .utf8)!
 
         XCTAssertTrue(text.contains("\"matches\":[]"))
-        XCTAssertTrue(text.contains("\"no_match_reason\":\"no stored credential matches the requested type(s): urn:eudi:pid:1\""))
+        XCTAssertTrue(text.contains("\"no_match_reason\":\"no_matching_credential\""))
+    }
+
+    /// Free text can never leave: anything that is not a code goes out as `unspecified` (the wallet's description,
+    /// with requested types and its inventory size, stays in its own log).
+    func testNonCodeNoMatchReasonGoesOutAsUnspecifiedOnEveryPath() throws {
+        let free = "2 matching credential(s) stored; no match for urn:eudi:pid:1"
+        let text = String(data: try encoder.encode(MatchResponseMessage(flowId: "f", matches: [], noMatchReason: free)), encoding: .utf8)!
+        XCTAssertTrue(text.contains("\"no_match_reason\":\"unspecified\""))
+        XCTAssertFalse(text.contains("urn:eudi"))
+        XCTAssertEqual(
+            WalletEngineSession.credentialsMatchedPayload(matches: [], noMatchReason: free)["no_match_reason"],
+            .string("unspecified")
+        )
+    }
+
+    func testTheNoMatchReasonGuardIsTheCodeShape() {
+        XCTAssertEqual(NoMatchReason.wire(nil), nil)
+        for ok in ["no_matching_credential", "credentials_exhausted", "request_not_answerable", "no_selection", "unspecified", "a", String(repeating: "a", count: 64)] {
+            XCTAssertEqual(NoMatchReason.wire(ok), ok)
+        }
+        for bad in ["", "No_Match", "has space", "dash-ed", "trailing\n", "caf\u{E9}", String(repeating: "a", count: 65)] {
+            XCTAssertEqual(NoMatchReason.wire(bad), "unspecified", "\(bad.debugDescription)")
+        }
     }
 
     func testMatchResponseOmitsAbsentNoMatchReason() throws {
@@ -234,11 +259,11 @@ final class EngineTypesTests: XCTestCase {
     func testCredentialsMatchedPayloadForEmptyMatchSet() throws {
         let payload = WalletEngineSession.credentialsMatchedPayload(
             matches: [],
-            noMatchReason: "nothing to present"
+            noMatchReason: "no_matching_credential"
         )
 
         XCTAssertEqual(payload["matches"], .array([]))
-        XCTAssertEqual(payload["no_match_reason"], .string("nothing to present"))
+        XCTAssertEqual(payload["no_match_reason"], .string("no_matching_credential"))
     }
 
     func testCredentialsMatchedPayloadEncodesEachMatch() throws {
@@ -259,11 +284,8 @@ final class EngineTypesTests: XCTestCase {
         guard case .array(let matches)? = payload["matches"], case .object_(let match)? = matches.first else {
             return XCTFail("Expected one encoded match")
         }
-        XCTAssertEqual(match["credential_query_id"], .string("query-1"))
-        XCTAssertEqual(match["credential_id"], .string("7"))
-        XCTAssertEqual(match["format"], .string("mso_mdoc"))
-        XCTAssertEqual(match["vct"], .string("urn:eu:pid:1"))
-        XCTAssertEqual(match["available_claims"], .array([.string("given_name")]))
+        // The engine reads the number of matches; the credential itself stays on the device.
+        XCTAssertEqual(match, ["credential_query_id": .string("query-1")])
     }
 
     /// The engine's `NO_MATCHING_CREDENTIAL` error carries the two things an
@@ -515,13 +537,28 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertEqual(plain.credentials?.first?.credential, "x.y.z")
     }
 
+    func testCredentialMetadataRemembersOnlyThatASupersededMemberWasPresent() throws {
+        func decode(_ json: String) throws -> CredentialDisplayMetadata {
+            try JSONDecoder().decode(CredentialDisplayMetadata.self, from: Data(json.utf8))
+        }
+        for member in ["org.siros.secret_seed", "holder_commitments", "org.siros.psc", "secret_members"] {
+            let metadata = try decode(#"{"display":[{"name":"n"}],"\#(member)":{"k":"00112233445566778899aabbccddeeff"}}"#)
+            XCTAssertTrue(metadata.hasProhibitedMember, member)
+            let encoded = String(decoding: try JSONEncoder().encode(metadata), as: UTF8.self)
+            XCTAssertFalse(encoded.contains("00112233445566778899aabbccddeeff"), "the value is never held")
+            XCTAssertFalse(encoded.contains(member), "the member is not re-encoded")
+        }
+        XCTAssertFalse(try decode(#"{"display":[],"org.example.extension":{"k":1}}"#).hasProhibitedMember)
+        XCTAssertFalse(try decode("[1]").hasProhibitedMember)
+    }
+
     func testFlowCompleteKeepsOnlyDisplayAndClaimsOfCredentialMetadata() throws {
         let message = try JSONDecoder().decode(FlowCompleteMessage.self, from: Data(#"""
         {"type":"flow_complete","flow_id":"f","credentials":[{"format":"dc+sd-jwt","credential":"x.y.z"}],
          "credential_metadata":{
            "display":[{"name":"Nym","locale":"en"}],
            "claims":[{"path":["a"]}],
-           "org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},
+           "org.example.extension":{"org.example.member":"00112233445566778899aabbccddeeff"},
            "x-other":{"k":1}}}
         """#.utf8))
         let metadata = try XCTUnwrap(message.credentialMetadata)
@@ -529,7 +566,7 @@ final class EngineTypesTests: XCTestCase {
         XCTAssertNotNil(metadata.claims)
         // Nothing but display and claims is held, so nothing else can be logged or re-encoded from it.
         let reencoded = String(decoding: try JSONEncoder().encode(metadata), as: UTF8.self)
-        XCTAssertFalse(reencoded.contains("secret_seed"))
+        XCTAssertFalse(reencoded.contains("org.example.extension"))
         XCTAssertFalse(reencoded.contains("00112233445566778899aabbccddeeff"))
         XCTAssertFalse(reencoded.contains("x-other"))
         let whole = String(decoding: try JSONEncoder().encode(message), as: UTF8.self)

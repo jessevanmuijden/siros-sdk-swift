@@ -104,6 +104,16 @@ final class CredentialStackInteractionUITests: XCTestCase {
         }
     }
 
+    /// Whether `element` is gone within `timeout` (polling, so it does not depend on `waitForNonExistence` availability).
+    private func waitForDisappearance(of element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !element.exists { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        return !element.exists
+    }
+
     /// This app's i18n JSON loading (`L10n.swift`) does not resolve under
     /// every build/launch configuration this suite has been run under -
     /// confirmed pre-existing and unrelated to `CredentialStack` (it
@@ -112,6 +122,26 @@ final class CredentialStackInteractionUITests: XCTestCase {
     /// key itself (e.g. `"common.delete"` instead of "Delete"). Matching
     /// either form keeps this suite valid regardless of whether/when that
     /// separate, pre-existing issue is fixed.
+    /// Goes back from a card's detail screen to the deck and waits until the deck is really there again: the Back
+    /// button exists, the detail's navigation bar is gone (the pop is animated) and the cards have stopped moving.
+    /// Tapping a card while the pop is still running lands on the detail screen's remains, not on the deck.
+    private func goBackToDeck(from title: String) {
+        let back = button(labeled: "Back", "nav.back")
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "the detail screen of \(title) must have a Back button")
+        back.tap()
+        XCTAssertTrue(waitForDisappearance(of: app.navigationBars[title], timeout: 8),
+                      "going back from \(title) must leave its detail screen")
+        waitForDeckToSettle()
+    }
+
+    /// Asserts that `title`'s detail screen is NOT open, after everything the preceding gesture set in motion (a
+    /// reorder, a push) has had time to finish - a bare "not there yet" would also pass on a slow runner when the
+    /// screen is merely late. The deck is settled first; a push animation outlasts the settle's two samples.
+    private func assertNotOpened(_ title: String, _ message: String) {
+        waitForDeckToSettle()
+        XCTAssertFalse(app.navigationBars[title].exists, message)
+    }
+
     private func button(labeled candidates: String...) -> XCUIElement {
         let predicate = NSPredicate(
             format: candidates.map { _ in "label == %@" }.joined(separator: " OR "),
@@ -133,8 +163,7 @@ final class CredentialStackInteractionUITests: XCTestCase {
 
         // 1 ("Alpha") starts at the back of the deck, not the front.
         cardPoint(1).tap()
-        XCTAssertFalse(app.navigationBars["Alpha"].waitForExistence(timeout: 1),
-                       "a tap on a buried card must not open it")
+        assertNotOpened("Alpha", "a tap on a buried card must not open it")
 
         // Tapping the SAME card again now opens it - proof the first tap
         // actually moved it to the front rather than doing nothing. Now
@@ -143,7 +172,7 @@ final class CredentialStackInteractionUITests: XCTestCase {
         cardPoint(1).tap()
         XCTAssertTrue(app.navigationBars["Alpha"].waitForExistence(timeout: 5),
                       "the second tap on the same card must open it now that it's frontmost")
-        button(labeled: "Back", "nav.back").tap()
+        goBackToDeck(from: "Alpha")
     }
 
     func testALongDragPullsABuriedCardToTheFront() {
@@ -163,7 +192,7 @@ final class CredentialStackInteractionUITests: XCTestCase {
         cardPoint(2).tap()
         XCTAssertTrue(app.navigationBars["Bravo"].waitForExistence(timeout: 5),
                       "a long drag past the pull threshold must commit the reorder")
-        button(labeled: "Back", "nav.back").tap()
+        goBackToDeck(from: "Bravo")
     }
 
     func testAShortDragSpringsBackWithoutReorderingTheDeck() {
@@ -179,15 +208,15 @@ final class CredentialStackInteractionUITests: XCTestCase {
         // The drag did not reach the threshold, so the deck's front is
         // unchanged: 3 ("Charlie") still opens on the first tap...
         cardPoint(3).tap()
-        XCTAssertTrue(app.navigationBars["Charlie"].waitForExistence(timeout: 5))
-        button(labeled: "Back", "nav.back").tap()
+        XCTAssertTrue(app.navigationBars["Charlie"].waitForExistence(timeout: 5),
+                      "the short drag must leave Charlie frontmost")
+        goBackToDeck(from: "Charlie")
 
         // ...and 1 ("Alpha"), which is what was actually dragged, is still
         // buried: one tap on it only brings it forward, exactly as if the
         // drag had never happened.
         cardPoint(1).tap()
-        XCTAssertFalse(app.navigationBars["Alpha"].waitForExistence(timeout: 1),
-                       "the short drag must not have brought Alpha to the front")
+        assertNotOpened("Alpha", "the short drag must not have brought Alpha to the front")
     }
 
     func testALongPressReportsLongClickWithoutOpeningOrReordering() {
@@ -222,7 +251,17 @@ final class CredentialStackInteractionUITests: XCTestCase {
         // itself is clipped below the visible screen edge and isn't in the
         // accessibility tree at all. Tapping outside is the standard way to
         // dismiss any popover-style presentation regardless.
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 40, dy: 60)).tap()
+        let deleteButton = button(labeled: "Delete", "common.delete")
+        let outside = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 40, dy: 60))
+        outside.tap()
+        // The dismissal is animated: a tap on the deck while the popover is still going away is swallowed by it (the
+        // source of this test's flake on slow runners). Wait until the dialog is really gone - tapping outside again
+        // once if the first tap did not dismiss it - and the deck has stopped moving before interacting with it.
+        if !waitForDisappearance(of: deleteButton, timeout: 4) {
+            outside.tap()
+            XCTAssertTrue(waitForDisappearance(of: deleteButton, timeout: 6), "the long-press dialog must dismiss")
+        }
+        waitForDeckToSettle()
 
         // The deck's front is unaffected by a long-press: 3 ("Charlie")
         // still opens directly.

@@ -402,7 +402,7 @@ extension SirosWallet {
         // Before the credential read: a snapshot that resumes after an account wipe must not repopulate the cleared
         // match cache with deleted credentials, nor offer them.
         guard let token = currentTeardownToken() else {
-            return MatchResult(matches: [], noMatchReason: "The account is being deleted")
+            return MatchResult(matches: [], noMatchReason: NoMatchReason.requestNotAnswerable)
         }
         let allCreds = await credentialStore.getAll()
         // WMP's "matching_credentials"/"match_request" progress step carries
@@ -451,7 +451,7 @@ extension SirosWallet {
         lock.lock()
         guard isCurrentLocked(token) else {
             lock.unlock()
-            return MatchResult(matches: [], noMatchReason: "The account was deleted")
+            return MatchResult(matches: [], noMatchReason: NoMatchReason.requestNotAnswerable)
         }
         pendingMatchResultsByFlow[flowId] = matchResults
         lock.unlock()
@@ -472,6 +472,12 @@ extension SirosWallet {
         // An empty match set with no reason tells the other end nothing at all
         // - see `noMatchReason`.
         let reason = matches.isEmpty ? Self.noMatchReason(dcqlQuery: dcqlQuery, candidateCount: candidates.count) : nil
+        #if canImport(os)
+        // The description stays here: only the code goes to the engine.
+        if matches.isEmpty {
+            logger.info("Nothing to present: \(Self.noMatchDescription(dcqlQuery: dcqlQuery, candidateCount: candidates.count))")
+        }
+        #endif
         return MatchResult(matches: matches, noMatchReason: reason)
     }
 

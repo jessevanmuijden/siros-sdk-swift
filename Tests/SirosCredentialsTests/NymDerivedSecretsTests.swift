@@ -209,14 +209,6 @@ final class SecretSeedCommitmentTests: XCTestCase {
         }
     }
 
-    func testSeedFromHexIsStrict() {
-        XCTAssertEqual(SecretSeedCommitment.seed(fromHex: "00112233445566778899aabbccddeeff"), hex("00112233445566778899aabbccddeeff"))
-        for bad in ["00112233445566778899AABBCCDDEEFF", "0011223344556677", "00112233445566778899aabbccddeeff00",
-                    "0x112233445566778899aabbccddeeff", " 0112233445566778899aabbccddeeff", "", "0011223344556677889gaabbccddeeff"] {
-            XCTAssertNil(SecretSeedCommitment.seed(fromHex: bad), bad)
-        }
-    }
-
     // MARK: ssc from credentials
 
     private let sscBytes = hex("a8faed6abbf35c12a4b26e40f6feb19d736d90045c83b9f9a31f638d323e6811")
