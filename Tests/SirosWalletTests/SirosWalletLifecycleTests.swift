@@ -725,6 +725,47 @@ final class SirosWalletLifecycleTests: XCTestCase {
         )
     }
 
+    /// Review finding (go-wallet-backend#502 follow-up): `consentByFlow` (and `pendingMatchResultsByFlow`) used to
+    /// survive a cut-off-triggered re-login untouched - a modified engine reusing a flow/credential id after the
+    /// replacement session logs in could pass `handleSignRequest`'s consent check against the PREVIOUS session's
+    /// recorded consent, never actually granted in the new one.
+    func testReloginAfterCutOffClearsRecordedConsentAndPendingMatchResults() async throws {
+        let wallet = makeWallet(registry: seededRegistry())
+        wallet.setState(.ready(userId: "user-1", displayName: "Alice", credentials: []))
+        let generation = try XCTUnwrap(wallet.beginSelfDrivenRelogin())
+
+        wallet.consentByFlow["stale-flow"] = ["7": ["given_name"]]
+        wallet.pendingMatchResultsByFlow["stale-flow"] = [
+            CredentialMatcher.MatchResult(queryId: "q1", format: "dc+sd-jwt", candidates: [], requestedClaims: []),
+        ]
+
+        // Same technique as testReloginAfterCutOffClearsTheCredentialStatusCaches: makes login() unreachable so
+        // this exercises only the teardown half of reloginAfterCutOff.
+        wallet.bumpSessionGeneration()
+        await wallet.reloginAfterCutOff(replacing: generation)
+        wallet.endSelfDrivenRelogin()
+
+        XCTAssertTrue(wallet.consentByFlow.isEmpty, "a cut-off re-login must not leave the superseded session's recorded consent behind")
+        XCTAssertTrue(wallet.pendingMatchResultsByFlow.isEmpty)
+    }
+
+    /// Same review finding, for the ordinary `logout()`/`endSessionLocally()` path: a flow/credential id replayed
+    /// by a modified engine after a fresh login must not find a PREVIOUS session's consent still recorded.
+    func testEndSessionLocallyClearsRecordedConsentAndPendingMatchResults() {
+        let wallet = makeWallet(registry: seededRegistry())
+        wallet.setState(.ready(userId: "user-1", displayName: "Alice", credentials: []))
+
+        wallet.consentByFlow["stale-flow"] = ["7": ["given_name"]]
+        wallet.pendingMatchResultsByFlow["stale-flow"] = [
+            CredentialMatcher.MatchResult(queryId: "q1", format: "dc+sd-jwt", candidates: [], requestedClaims: []),
+        ]
+
+        wallet.endSessionLocally()
+
+        XCTAssertTrue(wallet.consentByFlow.isEmpty, "logout must not leave a prior session's recorded consent behind")
+        XCTAssertTrue(wallet.pendingMatchResultsByFlow.isEmpty)
+    }
+
     // MARK: - This device
 
     /// The facade marks the row that is this installation by comparing the

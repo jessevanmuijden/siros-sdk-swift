@@ -563,6 +563,13 @@ public final class SirosWallet: @unchecked Sendable {
     /// needs to clear it too, the same cross-file-extension-access reason as
     /// `activeOffer`/`activeAttestedKeyIds` etc. above; guarded by the same `lock`.
     var pendingMatchResultsByFlow: [String: [CredentialMatcher.MatchResult]] = [:]
+    /// What this wallet recorded as consented for each credential of a flow (the WMP wire-protocol credential id ->
+    /// the claim names consented, `ConsentMatcher.consentedClaims`'s derivation - the same one
+    /// `buildConsentPayload` used to tell the engine). `handleSignRequest`'s `sign_presentation` checks the
+    /// engine's `disclosed_claims` against this before signing anything (go-wallet-backend#502 defense in depth): a
+    /// credential with no entry here, or a `disclosed_claims` naming more than its entry, refuses. Cleared at the
+    /// same points as `pendingMatchResultsByFlow` (consumed, or the flow terminates).
+    var consentByFlow: [String: [String: Set<String>]] = [:]
     /// Authorization context captured from a flow's `authorization_required`
     /// progress message, keyed by flow ID - needed to resume issuance via a
     /// fresh `flow_start` once the OAuth browser redirect returns, since the
@@ -587,6 +594,20 @@ public final class SirosWallet: @unchecked Sendable {
     var authorizationResumeTokenHook: (() async throws -> String)?
     var authorizationResumeConnectHook: ((WalletEngineSession) async throws -> Void)?
     var authorizationResumeSendHook: ((Int) -> Void)?
+
+    /// The same presentation request link delivered again within its window starts no second flow (`startPresentation`).
+    let presentationLinkLedger = PresentationLinkLedger()
+    /// The link currently admitted by `presentationLinkLedger` for the presentation this wallet is starting or
+    /// running, if any - so `cancelCurrentFlow()` can release ITS entry (a cancel-then-immediate-retry of the same
+    /// request must not wait out the window), while a presentation that reaches its own terminal event
+    /// (`handleFlowComplete`/`handleFlowError`) merely clears this pointer and leaves the ledger entry to expire
+    /// normally (an issuer's page re-firing the SAME link after a completed presentation is still deduped).
+    var pendingPresentationLink: String?
+    /// Test seams for `startPresentation`: replace the connect step and the final `engine.startPresentation` send. Nil in production.
+    var startPresentationConnectHook: ((WalletEngineSession) async throws -> Void)?
+    /// Returns whether the request was actually dispatched (mirrors `WalletEngineSession.startPresentation`'s own
+    /// return value); `false` must not be treated as success.
+    var startPresentationSendHook: ((String) -> Bool)?
 
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one
@@ -1243,6 +1264,23 @@ public final class SirosWallet: @unchecked Sendable {
         await credentialStatusEvaluator.clearCache()
     }
 
+    /// Drops `pendingMatchResultsByFlow` and `consentByFlow` together - every session-teardown path that keeps
+    /// this instance alive for a LATER session must call this (review finding, go-wallet-backend#502 follow-up):
+    /// without it, `consentByFlow`'s recorded authorizations (and `pendingMatchResultsByFlow`'s cached match
+    /// metadata) survive a logout or a self-driven cut-off re-login untouched, so a flow/credential id reused by a
+    /// modified engine after re-login could pass `handleSignRequest`'s consent check against a PREVIOUS session's
+    /// consent - never actually asked for or granted in the new one. Already paired the same way at every
+    /// *per-flow* clearing point (`SirosWallet+AccountDeletion.swift`'s `dropInMemoryHolderState`,
+    /// `SirosWallet+Notifications.swift`'s per-flow terminal handlers, `SirosWallet+Engine.swift`'s consumption on
+    /// sign and its own cleanup); this is the missing *session-boundary* pairing. Takes `lock` itself: every
+    /// caller (`endSessionLocally`, `destroy`, `reloginAfterCutOff`) calls this OUTSIDE its own locked section.
+    func clearPerFlowAuthorizationState() {
+        lock.lock()
+        pendingMatchResultsByFlow.removeAll()
+        consentByFlow.removeAll()
+        lock.unlock()
+    }
+
     /// Everything `logout()` does except ending the server session: drop the
     /// engine, the WMP peer, the API client, the cached tokens, the keystore
     /// and the account-scoped session, and end this session's generation.
@@ -1276,6 +1314,7 @@ public final class SirosWallet: @unchecked Sendable {
         accountRegistry.activeAccountId = nil
         authTokens?.clear()
         clearCredentialStatusCaches()
+        clearPerFlowAuthorizationState()
         // The WIA cache is wallet-wide but the instance key it attests is
         // account-scoped, so a WIA kept across a logout would answer
         // `thisInstanceId` (and `wallet_instance_id`) with the PREVIOUS

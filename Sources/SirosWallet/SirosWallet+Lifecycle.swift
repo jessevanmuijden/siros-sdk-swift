@@ -105,6 +105,12 @@ extension SirosWallet {
         // with any of them.
         lock.lock()
         issuanceStartEpoch.invalidate()
+        // The presentation this wallet was starting or running, if any, is cancelled with everything else here: its
+        // ledger entry is released (unlike a presentation that reaches its own terminal event, which only clears
+        // this pointer - see `handleFlowComplete`/`handleFlowError`), so an immediate retry of the SAME request is
+        // not held against the window for the rest of the minute.
+        let cancelledPresentationLink = pendingPresentationLink
+        pendingPresentationLink = nil
         var reset: WalletState?
         var cancelFlowId: String?
         if case .flowActive(let userId, let displayName, let flowId, _, _, let creds) = _state {
@@ -125,6 +131,7 @@ extension SirosWallet {
         engine?.invalidateBufferedRequests()
         resetIssuanceGuardsLocked()
         lock.unlock()
+        if let cancelledPresentationLink { presentationLinkLedger.release(cancelledPresentationLink) }
         if let cancelFlowId {
             try? engine?.cancelFlow(flowId: cancelFlowId)
             // The flow is over for this wallet: marked ended, so a request for it still buffered on the legacy
@@ -312,6 +319,7 @@ extension SirosWallet {
         clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
+        clearPerFlowAuthorizationState()
         // Same reason as logout()'s: a self-driven re-login still awaiting the
         // old session's teardown must not log back in after the host has torn
         // this wallet down. The flag is what stops a *later* signal - the
@@ -556,6 +564,15 @@ extension SirosWallet {
         credentialResponseKeys.removeAll()
         decryptedCredentialResponses.removeAll()
         credentialResponseEpoch += 1
+        // Review finding (go-wallet-backend#502, second pass): this function's only 3 current callers
+        // (`endSessionLocally`, `destroy`, `reloginAfterCutOff`) each happen to also call
+        // `clearPerFlowAuthorizationState()` nearby, but that is incidental, not guaranteed here - this is itself a
+        // session-teardown path (every outstanding flow and transaction task is being torn down right above), so
+        // it must not depend on every CALLER remembering to also drop `pendingMatchResultsByFlow`/`consentByFlow`
+        // separately. Cleared in the SAME locked section as `flowEndSeq.removeAll()` above (which the atomic
+        // `recordConsent`/`trackedTransaction` checks key off), not as a later, separate call.
+        pendingMatchResultsByFlow.removeAll()
+        consentByFlow.removeAll()
         lock.unlock()
         for cancel in consentTasks { cancel() }
     }

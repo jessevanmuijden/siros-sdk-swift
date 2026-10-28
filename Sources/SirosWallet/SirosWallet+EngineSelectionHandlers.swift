@@ -30,6 +30,15 @@ extension SirosWallet {
         // Captured before the first await: the consent listener can return
         // after the account was deleted, and nothing below may then be applied.
         guard let token = currentTeardownToken() else { return }   // a wipe has closed the gate
+        // Also captured before the first await, alongside `token` (review finding, go-wallet-backend#502 second
+        // pass): re-validated atomically with `recordConsent`'s write at the end of this round, not just checked
+        // once up front - see that function's doc comment.
+        let epoch = currentTaskEpoch()
+        let flowSeq = currentFlowEndSeq(flowId)
+        // A new round of selection for this flow must not leave an EARLIER round's grant usable if this one is
+        // declined, matches nothing, or errors before a fresh `recordConsent` call below restores it - see
+        // `revokePreviousConsent`'s doc comment.
+        revokePreviousConsent(flowId: flowId)
         do {
             let dcqlQuery = payload?["dcql_query"]?.objectValue.map { anyCodableDictToAny($0) }
 
@@ -106,6 +115,13 @@ extension SirosWallet {
             guard recorded else { return }
 
             let consentPayload = Self.buildConsentPayload(matchResults: matchResults, selectedIds: selectedIds, allCreds: allCreds)
+            // Recorded BEFORE telling the engine, so `sign_presentation`'s defense-in-depth check (go-wallet-backend
+            // #502) has something to verify against even if the engine's own reply never arrives or races the send.
+            // A stale write (the flow or session ended while this round was suspended on the consent UI above) is
+            // suppressed rather than applied (review finding, second pass) - and the "consent" answer below is
+            // suppressed right along with it, since telling the engine consent was granted while actually recording
+            // none would be worse than neither.
+            guard recordConsent(flowId: flowId, matchResults: matchResults, selectedIds: selectedIds, token: token, epoch: epoch, flowSeq: flowSeq) else { return }
             engine.sendFlowAction(flowId: flowId, action: "consent", payload: consentPayload)
         } catch {
             engine.sendFlowAction(
@@ -118,6 +134,10 @@ extension SirosWallet {
 
     func handleMatchRequest(engine: WalletEngineSession, msg: MatchRequestMessage) async {
         guard let token = currentTeardownToken() else { return }   // see `handleCredentialSelection`
+        // See `handleCredentialSelection`'s identical setup, right after its own `token`.
+        let epoch = currentTaskEpoch()
+        let flowSeq = currentFlowEndSeq(msg.flowId)
+        revokePreviousConsent(flowId: msg.flowId)
         let allCreds = await credentialStore.getAll()
         lock.lock()
         // Read only - do NOT remove. The later `sign_presentation` step
@@ -207,6 +227,10 @@ extension SirosWallet {
                 vct: CredentialUtils.vctOf(cred)
             )
         }
+        // Same recording as handleCredentialSelection - see recordConsent's doc comment. A stale write is
+        // suppressed the same way (second pass review finding): no matches are reported for a round whose consent
+        // could not actually be recorded.
+        guard recordConsent(flowId: msg.flowId, matchResults: matchResults, selectedIds: selectedIds, token: token, epoch: epoch, flowSeq: flowSeq) else { return }
         let noMatchReason = matches.isEmpty ? Self.answerForEmptySelection(dcqlQuery: dcqlQuery, selection: selection).reason : nil
         engine.sendMatchResponse(flowId: msg.flowId, matches: matches, noMatchReason: noMatchReason)
     }

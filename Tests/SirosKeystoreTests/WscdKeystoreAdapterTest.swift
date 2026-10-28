@@ -425,6 +425,29 @@ final class WscdKeystoreAdapterTest: XCTestCase {
         XCTAssertNil(header?["jwk"], "must not also embed the unrelated cnf.jwk key")
     }
 
+    /// Review finding (go-wallet-backend#502): a non-nil EMPTY `disclosedClaims` used to fall into the same "no
+    /// filter" branch as `nil` and disclose every disclosure the credential carried. It must disclose NONE -
+    /// distinct from `nil`, which still means "no filter was given at all" for callers outside the consent-gated
+    /// `sign_presentation` path.
+    func testSignVpTokenWithExplicitEmptyDisclosedClaimsDisclosesNothing() async throws {
+        let adapter = try await unlockedAdapter()
+        let issuerJwt = sdJwt(#"{"vct":"urn:example:x"}"#).replacingOccurrences(of: "~", with: "")
+        let d1 = EncryptedContainer.base64UrlEncode(Data(#"["salt1","given_name","Alice"]"#.utf8))
+        let d2 = EncryptedContainer.base64UrlEncode(Data(#"["salt2","family_name","Smith"]"#.utf8))
+        let credential = "\(issuerJwt)~\(d1)~\(d2)~"
+
+        let vp = try await adapter.signVpToken(
+            credential: credential, disclosedClaims: [], nonce: "n",
+            audience: "https://verifier.example", kid: nil
+        )
+
+        let parts = vp.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+        // Should have ONLY: issuerJwt, KB-JWT - no disclosures at all.
+        XCTAssertEqual(parts.count, 2, "an explicit empty disclosedClaims must disclose zero claims, not every claim")
+        XCTAssertEqual(parts[0], issuerJwt)
+        XCTAssertEqual(parts[1].split(separator: ".").count, 3) // KB-JWT
+    }
+
     /// Regression (review finding): checking only `kty` let a malformed WSCD
     /// export (no `x`/`y`) mint a `did:jwk` that `Did.resolveDidJwk` itself
     /// would reject - this must fail at mint time instead.
