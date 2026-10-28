@@ -969,16 +969,15 @@ final class WalletViewModel: ObservableObject {
     private func startFlow(type: String, _ body: @escaping () async throws -> Bool) {
         let introducedHere = flowStarting == nil
         if introducedHere { flowStarting = type }
-        Task {
-            func dismissIfIntroducedHere() { if introducedHere { flowStarting = nil } }
+        Task { @MainActor in
             do {
-                if try await !body() { dismissIfIntroducedHere() }
+                if try await !body() { if introducedHere { flowStarting = nil } }
             } catch is CancellationError {
                 // The user cancelled the start (`cancelCurrentFlow()`); the
                 // wallet already reset itself. Not an error.
-                dismissIfIntroducedHere()
+                if introducedHere { flowStarting = nil }
             } catch {
-                dismissIfIntroducedHere()
+                if introducedHere { flowStarting = nil }
                 setError(error.localizedDescription)
             }
         }

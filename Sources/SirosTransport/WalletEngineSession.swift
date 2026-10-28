@@ -641,11 +641,12 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
     @discardableResult
     private func sendFlowStart(_ message: FlowStartMessage, tag: Int? = nil) -> Bool {
         flowStartLock.lock(); defer { flowStartLock.unlock() }
-        // A start sent with no socket is dropped by send(); it must not be queued.
-        connLock.lock(); let hasSocket = webSocketTask != nil; connLock.unlock()
-        if hasSocket { startTags.enqueue(tag) }
-        send(message)
-        return hasSocket
+        // A start sent with no socket is dropped by send(); it must not be queued. `send`'s own return is the one
+        // source of truth for whether a socket existed - never a separate, earlier lookup, which a concurrent
+        // socketEnded()/disconnect() could invalidate in the gap before send()'s own acquisition.
+        let dispatched = send(message)
+        if dispatched { startTags.enqueue(tag) }
+        return dispatched
     }
 
     /// The start tag the flow `flowId` carries now (set by its first message), or nil.
@@ -1169,7 +1170,11 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         pending?.cancel()
     }
 
-    private func send<T: Encodable>(_ message: T) {
+    /// - Returns: whether a socket existed to write to, from the SAME acquisition `sendText` is called on - never a
+    ///   separate, earlier snapshot (a caller must not derive success from a `webSocketTask` lookup made before this
+    ///   one: the socket can be cleared by a concurrent `socketEnded`/`disconnect` in between).
+    @discardableResult
+    private func send<T: Encodable>(_ message: T) -> Bool {
         // Crashing the whole process here (the original `preconditionFailure`)
         // meant any caller racing a concurrent `disconnect()` - or invoked
         // just after a dropped connection the receive loop hasn't yet
@@ -1184,11 +1189,11 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
         connLock.unlock()
         guard let ws else {
             logWarning("send: not connected, dropping message")
-            return
+            return false
         }
         guard let data = try? encoder.encode(message),
               let text = String(data: data, encoding: .utf8) else {
-            return
+            return false
         }
         // Mirrors the handshake send's own completion handler (above): a
         // send failure here means the same dead socket the receive loop
@@ -1201,6 +1206,7 @@ public final class WalletEngineSession: CredentialNotifier, @unchecked Sendable 
                 self?.socketEnded(epoch: sentOn)
             }
         }
+        return true
     }
 
     private func setState(_ state: State) {
