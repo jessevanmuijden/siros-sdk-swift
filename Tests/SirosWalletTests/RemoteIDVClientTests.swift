@@ -112,7 +112,13 @@ final class RemoteIDVClientTests: XCTestCase {
     ) async throws -> IDVError {
         let server = try LoopbackServer(status: status, body: body)
         defer { server.stop() }
-        let client = RemoteIDVClient(config: .init(serverUrl: "http://127.0.0.1:\(server.port)", authToken: "Bearer test"))
+        let client = RemoteIDVClient(config: .init(
+            serverUrl: "http://127.0.0.1:\(server.port)",
+            authToken: "Bearer test",
+            sessionTokenPath: "/v1/session-token",
+            livenessPath: "/v1/liveness",
+            idScanPath: "/v1/id-scan"
+        ))
         do {
             try await step(client)
         } catch let error as IDVError {

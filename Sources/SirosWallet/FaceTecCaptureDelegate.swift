@@ -2,8 +2,8 @@
 
 import Foundation
 
-/// FaceTec biometric capture delegate for the legacy `/v1/liveness` +
-/// `/v1/id-scan` flow (``RemoteIDVClient``).
+/// FaceTec biometric capture delegate for the session → liveness → document
+/// flow (``RemoteIDVClient``).
 ///
 /// - Important: Deprecated and no longer functional. It was written against the
 ///   FaceTec **9** API (`createSessionVC`, `FaceTecFaceScanProcessorDelegate`),

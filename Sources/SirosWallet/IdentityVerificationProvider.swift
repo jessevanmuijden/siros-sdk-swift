@@ -38,12 +38,11 @@ public enum IDVError: Error, Sendable {
     /// (sirosfoundation/facetec-api#65). `reason` is the backend's `nfc_*` code
     /// and ``errorCode`` is `idv_<reason>`.
     ///
-    /// Through ``RemoteIDVClient`` (facetec-api's `/v1/id-scan`) the reason is
-    /// always `nfc_skipped`: that path only learns whether the chip was
-    /// verified, not why it was not. facetec-api's `/process-request` flow
-    /// distinguishes `nfc_not_requested`, `nfc_device_not_capable`,
-    /// `nfc_chip_read_failed` and `nfc_not_authenticated` as well, and any
-    /// `nfc_*` code a backend sends maps here.
+    /// facetec-api's `/process-request` flow, which ``FaceTecIDVProvider``
+    /// speaks, distinguishes `nfc_not_requested`, `nfc_device_not_capable`,
+    /// `nfc_chip_read_failed`, `nfc_not_authenticated` and `nfc_skipped`. Any
+    /// `nfc_*` code a backend reached through ``RemoteIDVClient`` sends maps
+    /// here too.
     case documentChipNotVerified(reason: String, message: String)
     /// The backend refused to issue because the document's chip data could not
     /// be verified against a trusted document signer (facetec-api's

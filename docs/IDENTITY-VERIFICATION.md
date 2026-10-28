@@ -59,10 +59,12 @@ facetec-api reports a refusal in the process-request response as
 `credentialIssueErrorCode` (message in `credentialIssueError`).
 `FaceTecIDVProvider` maps it as below. siros-sdk-kotlin maps the same way, with the same dedicated errors (`IDVException.ChipUntrusted`, `ChipPhotoMismatch`, `DocumentExpired`, `SessionExpired`) and `errorCode`s.
 
-The legacy `/v1` endpoints (`RemoteIDVClient`) answer 422 with `error_code`
+A backend reached through `RemoteIDVClient` answers 422 with `error_code`
 instead, and `RemoteIDVClient` maps it the same way (`IDVError(refusalCode:message:)`),
 with the backend's `error` text as the message. A 422 body without a code stays a `verificationFailed` (or
-`livenessFailed` on the liveness step) carrying the raw body.
+`livenessFailed` on the liveness step) carrying the raw body. facetec-api itself no longer
+serves that flow (sirosfoundation/facetec-api#82), so `RemoteIDVClient` needs the three
+endpoint paths of whichever backend does.
 
 | Code | `IDVError` | `errorCode` |
 |---|---|---|
