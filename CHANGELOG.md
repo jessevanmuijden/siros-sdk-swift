@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A presentation request link delivered twice starts one flow, not two.** An issuer that wants a presentation before it issues sends the OpenID4VP request to the wallet's redirect URI from its own web page; after the credential was stored, the same request arrived again (same `response_code`) and opened a second Credential Request screen (siros-sdk-kotlin #333, reproduced there on a Pixel against gdc; ported here, since `SirosWallet.startPresentation` had the identical gap). `startPresentation(requestUri:)` now returns `false` (no second flow started) for a link identical to one started within the last minute (`PresentationLinkLedger`: SHA-256 digests only, at most 16); `true` when a flow was started. A start that throws forgets the link so a retry of the SAME link goes through at once. The sample app's `flowStarting` interstitial is dismissed for the ignored duplicate too (nothing is coming to clear it otherwise). **Breaking:** `startPresentation(requestUri:)` now returns `Bool` instead of `Void`.
+
 ## [0.15.0] - 2026-10-27
 
 ### Breaking

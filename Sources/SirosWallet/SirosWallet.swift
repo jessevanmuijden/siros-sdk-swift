@@ -588,6 +588,20 @@ public final class SirosWallet: @unchecked Sendable {
     var authorizationResumeConnectHook: ((WalletEngineSession) async throws -> Void)?
     var authorizationResumeSendHook: ((Int) -> Void)?
 
+    /// The same presentation request link delivered again within its window starts no second flow (`startPresentation`).
+    let presentationLinkLedger = PresentationLinkLedger()
+    /// The link currently admitted by `presentationLinkLedger` for the presentation this wallet is starting or
+    /// running, if any - so `cancelCurrentFlow()` can release ITS entry (a cancel-then-immediate-retry of the same
+    /// request must not wait out the window), while a presentation that reaches its own terminal event
+    /// (`handleFlowComplete`/`handleFlowError`) merely clears this pointer and leaves the ledger entry to expire
+    /// normally (an issuer's page re-firing the SAME link after a completed presentation is still deduped).
+    var pendingPresentationLink: String?
+    /// Test seams for `startPresentation`: replace the connect step and the final `engine.startPresentation` send. Nil in production.
+    var startPresentationConnectHook: ((WalletEngineSession) async throws -> Void)?
+    /// Returns whether the request was actually dispatched (mirrors `WalletEngineSession.startPresentation`'s own
+    /// return value); `false` must not be treated as success.
+    var startPresentationSendHook: ((String) -> Bool)?
+
     // New AS-based auth.
     // Not `private`: the wallet instance lifecycle tests replace it with one
     // backed by a stub HTTP function, so the SDK's own re-login after a
