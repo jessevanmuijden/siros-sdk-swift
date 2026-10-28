@@ -134,6 +134,10 @@ final class TransactionDataRefusalTests: XCTestCase {
     func testEngineAnswersAsBeforeWithoutTransactionData() async throws {
         for member in [nil, "[]"] {
             let (wallet, keystore, listener) = try await makeWallet()
+            // go-wallet-backend#502 defense in depth: this file is about transaction_data validation, not
+            // consent-enforcement (covered by SignPresentationConsentEnforcementTests) - grant what a real
+            // credential_selection would have for the one credential this fixture always uses.
+            wallet.recordConsent(flowId: "f1", matchResults: [], selectedIds: [1])
             let sender = Sender()
             await wallet.handleSignRequest(engine: sender, msg: try engineMessage(transactionData: member))
             XCTAssertEqual(keystore.calls, ["signVpToken"], "\(member ?? "absent")")
