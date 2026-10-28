@@ -64,7 +64,6 @@ enum SvgActiveContentGuard {
     private static let namedColorRe = re("^[A-Za-z]{3,20}$")
     private static let paintUrlRe = re("^url\\(#" + idPattern + "\\)$")
     private static let transformFnRe = re("\\G\\s*(matrix|translate|scale|rotate|skewX|skewY)\\s*\\(([^()]*)\\)\\s*,?")
-    private static let aspectRe = re("^(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max))(?: (?:meet|slice))?$")
 
     private static func matches(_ r: NSRegularExpression, _ v: String) -> Bool {
         r.firstMatch(in: v, range: NSRange(v.startIndex..., in: v)) != nil
@@ -79,42 +78,6 @@ enum SvgActiveContentGuard {
     private static func isNumberList(_ v: String, max count: Int = 10_000) -> Bool {
         let parts = v.split(whereSeparator: { " ,\t\r\n".contains($0) })
         return !parts.isEmpty && parts.count <= count && parts.allSatisfy { isNumber(String($0)) }
-    }
-
-    private static func isLengthList(_ v: String) -> Bool {
-        let parts = v.split(whereSeparator: { " ,\t\r\n".contains($0) })
-        return !parts.isEmpty && parts.count <= 64 && parts.allSatisfy { lengthProblem(String($0)) == nil }
-    }
-
-    /// See `SvgPathData`.
-    static func isValidPathData(_ d: String) -> Bool { SvgPathData.isValid(d, maxNumber: maxSvgNumber) }
-
-    /// Transform list with exact argument counts per function.
-    static func isValidTransform(_ t: String) -> Bool {
-        let ns = t as NSString
-        var pos = 0
-        var count = 0
-        while pos < ns.length {
-            guard let m = transformFnRe.firstMatch(in: t, options: [.anchored], range: NSRange(location: pos, length: ns.length - pos)),
-                  m.range.location == pos else {
-                return ns.substring(from: pos).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && count > 0
-            }
-            let fn = ns.substring(with: m.range(at: 1))
-            let args = ns.substring(with: m.range(at: 2)).split(whereSeparator: { " ,\t\r\n".contains($0) }).map(String.init)
-            guard args.allSatisfy(isNumber) else { return false }
-            let ok: Bool
-            switch fn {
-            case "matrix": ok = args.count == 6
-            case "translate", "scale": ok = args.count == 1 || args.count == 2
-            case "rotate": ok = args.count == 1 || args.count == 3
-            default: ok = args.count == 1 // skewX, skewY
-            }
-            guard ok else { return false }
-            count += 1
-            guard count <= 16 else { return false }
-            pos = m.range.location + m.range.length
-        }
-        return count > 0
     }
 
     private static func isOpacity(_ v: String) -> Bool {
@@ -140,6 +103,21 @@ enum SvgActiveContentGuard {
         return matches(paintUrlRe, url) && isColor(rest)
     }
 
+    /// Stop offsets: a number, or a percentage (SwiftDraw resolves these; verified).
+    static func isOffset(_ v: String) -> Bool { isOpacity(v) }
+
+    /// Geometry lengths: a length without a percentage (SwiftDraw 0.29.0 does not resolve percentages on shapes).
+    static func isGeometryLength(_ v: String) -> Bool {
+        lengthProblem(v) == nil && !v.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("%")
+    }
+
+    /// A bare number or `px`: other units would be silently ignored by SwiftDraw's stroke-width parsing.
+    static func isUnitlessLength(_ v: String) -> Bool {
+        let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+        let number = t.hasSuffix("px") ? String(t.dropLast(2)) : t
+        return isNumber(number)
+    }
+
     private static func isEnum(_ v: String, _ values: [String]) -> Bool { values.contains(v.trimmingCharacters(in: .whitespaces)) }
 
     /// A CSS/SVG length: number, optional unit, magnitude within `maxSvgNumber`.
@@ -154,40 +132,37 @@ enum SvgActiveContentGuard {
     /// Validators for the attributes that may appear on any allowed element.
     private static let attributeValidators: [String: (String) -> Bool] = [
         "id": { matches(idRe, $0) },
-        "x": { lengthProblem($0) == nil }, "y": { lengthProblem($0) == nil },
-        "width": { lengthProblem($0) == nil }, "height": { lengthProblem($0) == nil },
-        "cx": { lengthProblem($0) == nil }, "cy": { lengthProblem($0) == nil }, "r": { lengthProblem($0) == nil },
-        "rx": { lengthProblem($0) == nil }, "ry": { lengthProblem($0) == nil },
-        "x1": { lengthProblem($0) == nil }, "y1": { lengthProblem($0) == nil },
-        "x2": { lengthProblem($0) == nil }, "y2": { lengthProblem($0) == nil },
-        "fx": { lengthProblem($0) == nil }, "fy": { lengthProblem($0) == nil }, "fr": { lengthProblem($0) == nil },
-        "offset": isOpacity,
+        "x": isGeometryLength, "y": isGeometryLength,
+        "width": isGeometryLength, "height": isGeometryLength,
+        "cx": isGeometryLength, "cy": isGeometryLength, "r": isGeometryLength,
+        "rx": isGeometryLength, "ry": isGeometryLength,
+        "x1": isGeometryLength, "y1": isGeometryLength,
+        "x2": isGeometryLength, "y2": isGeometryLength,
+        "fx": isGeometryLength, "fy": isGeometryLength, "fr": isGeometryLength,
+        "offset": isOffset,
         "points": { isNumberList($0) && $0.split(whereSeparator: { " ,\t\r\n".contains($0) }).count % 2 == 0 },
         "d": { isValidPathData($0) },
         "transform": { isValidTransform($0) }, "gradientTransform": { isValidTransform($0) },
         "viewBox": { isNumberList($0, max: 4) && $0.split(whereSeparator: { " ,\t\r\n".contains($0) }).count == 4 },
-        "preserveAspectRatio": { matches(aspectRe, $0) },
         "version": { isEnum($0, ["1.0", "1.1", "2.0"]) },
         "fill": isPaint, "stroke": isPaint,
         "stop-color": isColor, "color": isColor,
-        "stroke-width": { lengthProblem($0) == nil },
+        "stroke-width": isUnitlessLength, // SwiftDraw parses stroke-width as a bare float: units would be ignored
         "stroke-linecap": { isEnum($0, ["butt", "round", "square"]) },
         "stroke-linejoin": { isEnum($0, ["miter", "round", "bevel"]) },
-        "stroke-miterlimit": isNumber,
-        "stroke-dasharray": { $0.trimmingCharacters(in: .whitespaces) == "none" || isLengthList($0) },
-        "stroke-dashoffset": { lengthProblem($0) == nil },
         "fill-rule": { isEnum($0, ["nonzero", "evenodd"]) },
         "opacity": isOpacity, "fill-opacity": isOpacity, "stroke-opacity": isOpacity, "stop-opacity": isOpacity,
-        "display": { isEnum($0, ["inline", "none"]) },
         "gradientUnits": { isEnum($0, ["userSpaceOnUse", "objectBoundingBox"]) },
-        "spreadMethod": { isEnum($0, ["pad", "reflect", "repeat"]) },
+        "spreadMethod": { isEnum($0, ["pad"]) }, // reflect/repeat render as pad in SwiftDraw 0.29.0
     ]
 
     /// nil when the SVG may be rasterized, otherwise why not.
     static func check(_ data: Data) -> LogoRejection? {
         // DOCTYPE/ENTITY: refused up front (also catches declarations the
         // parser would not report). A false positive inside a comment is fine.
-        let text = String(decoding: data, as: UTF8.self).lowercased()
+        // UTF-8 only: UTF-16 (or any NUL-bearing) input would hide a DOCTYPE from this scan, so it is refused.
+        guard !data.contains(0), let decoded = String(data: data, encoding: .utf8) else { return .invalidSvg }
+        let text = decoded.lowercased()
         if text.contains("<!doctype") || text.contains("<!entity") { return .activeContent }
 
         let delegate = Delegate()
@@ -215,11 +190,14 @@ enum SvgActiveContentGuard {
                 // inherit (verified); refused rather than rewritten.
                 return .activeContent
             case "xlink:href":
-                // Same-document gradient inheritance only.
-                guard ["linearGradient", "radialGradient"].contains(element),
-                      matches(fragmentRe, value) else { return .activeContent }
+                // SwiftDraw 0.29.0 copies only the referenced gradient's immediate stops, not its
+                // coordinates, units, transform or further links, so inheritance would render wrongly.
+                return .activeContent
             case "width", "height", "viewBox":
-                if isRoot && key != "viewBox" { if let bad = lengthProblem(value) { return bad } }
+                if isRoot && key != "viewBox" {
+                    if let bad = lengthProblem(value) { return bad }
+                    if !isGeometryLength(value) { return .invalidSvg } // no percentage viewport
+                }
                 guard attributeValidators[key]?(value) == true else { return .invalidSvg }
                 if key == "viewBox", let bad = viewBoxProblem(value) { return bad }
             default:

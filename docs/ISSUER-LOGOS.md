@@ -38,24 +38,27 @@ Accepted elements: `svg` (root only), `g`, `defs`, `title`, `desc`, `path`,
 `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `linearGradient`,
 `radialGradient`, `stop`.
 
-Accepted attributes, each with a strict value grammar: `id`; geometry (`x`, `y`,
-`width`, `height`, `cx`, `cy`, `r`, `rx`, `ry`, `x1`..`y2`, `fx`, `fy`, `fr`,
-`offset`, `points`, `d`); `viewBox`, `preserveAspectRatio`; `transform` and
-`gradientTransform` (a strict list of `matrix`, `translate`, `scale`, `rotate`,
-`skewX`, `skewY` with the right number of arguments); path data `d` (strict SVG
-syntax: valid commands with exactly the right argument counts, nothing after
-`Z`/`z` except whitespace, ASCII only); `points` (an even number of coordinates); paint and stroke (`fill`, `stroke`, `stop-color`,
-`stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
-`stroke-dasharray`, `stroke-dashoffset`, `fill-rule`); opacity
-attributes; `display`; gradient `gradientUnits`, `spreadMethod`; and `href`/`xlink:href` on gradients. The only references
-accepted are same-document `url(#id)` and `#id`; gradient inheritance must be
-written `xlink:href` (a plain `href` is refused); a `url(#id)` fill or stroke is only allowed on a leaf shape
-(`path`, `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`), never on `g`, `svg`, `defs` or any
-other element, so paint references are never inherited; colours are `#rgb`, `#rrggbb`,
-`rgb()`, `rgba()`, named colours, `none` and `currentColor` (4- and 8-digit
-alpha hex such as `#ff000080` is refused, use `rgba()` or `*-opacity`): no whitespace inside `url(`,
-no quotes, no comments, no `data:` or external URLs. The only `xmlns` values
-accepted are the SVG and xlink namespaces on the root.
+The allowlist is deliberately limited to what SwiftDraw 0.29.0 actually
+implements, so what you draw is what renders. Accepted attributes, each with a
+strict value grammar: `id`; geometry (`x`, `y`, `width`, `height`, `cx`, `cy`,
+`r`, `rx`, `ry`, `x1`..`y2`, `fx`, `fy`, `fr`: lengths **without percentages**,
+`points`, `d`, and a stop `offset` as a number or percentage); `viewBox`;
+`transform` and `gradientTransform` (a strict list of `matrix`, `translate`,
+`scale`, `rotate`, `skewX`, `skewY` with the right number of arguments); path
+data `d` (strict SVG syntax: valid commands with exactly the right argument
+counts, nothing after `Z`/`z` except whitespace, ASCII only); `points` (an even
+number of coordinates); paint and stroke (`fill`, `stroke`, `stop-color`,
+`stroke-width` as a bare number or `px`, `stroke-linecap`, `stroke-linejoin`,
+`fill-rule`); opacity attributes; gradient `gradientUnits` and `spreadMethod="pad"`.
+The root's `width`/`height` must have the same aspect ratio as its `viewBox`
+(1% tolerance, unitless or `px`), because the renderer ignores
+`preserveAspectRatio` and would stretch the drawing. The only references accepted
+are same-document `url(#id)` paints on leaf shapes; colours are `#rgb`, `#rrggbb`,
+`rgb()`, `rgba()`, named colours, `none` and `currentColor` (4- and 8-digit alpha
+hex such as `#ff000080` is refused, use `rgba()` or `*-opacity`): no whitespace
+inside `url(`, no quotes, no comments, no `data:` or external URLs. The only `xmlns`
+values accepted are the SVG and xlink namespaces on the root. The document must be
+UTF-8 (a UTF-8 BOM is fine); UTF-16/32 and any NUL byte are refused.
 
 Refused, never repaired:
 
@@ -69,6 +72,11 @@ Refused, never repaired:
 - `clipPath` and `clip-path` entirely
 - duplicate `id`s
 - a `url(...)` fill/stroke on anything but a leaf shape
+- `preserveAspectRatio`, `stroke-dasharray`, `stroke-dashoffset`, `stroke-miterlimit`, `display`
+  (the renderer ignores them), `spreadMethod` other than `pad`, percentages on geometry, `stroke-width`
+  with units other than `px`, any gradient `xlink:href`/`href` (inheritance is not implemented), and a
+  root whose width/height aspect differs from its viewBox
+- UTF-16/UTF-32 or otherwise non-UTF-8 input, and any NUL byte
 - 4- and 8-digit hex colours, a plain `href`, malformed path data or transforms,
   odd `points` counts
 - a nested `<svg>` (only the root is allowed)
@@ -101,7 +109,7 @@ refused with `platformUnsupported`; `https` URLs still pass through.
 - Prefer a PNG, or an `https` URL that serves the right `Content-Type`. For SVG, keep to simple shapes and
   gradients.
 - Convert text to outlines; fonts are not supported.
-- Use presentation attributes (`fill="#0a84ff"`) instead of `style` or CSS, `rgba()`/`fill-opacity` instead of alpha hex, and `xlink:href` for gradient inheritance.
+- Use presentation attributes (`fill="#0a84ff"`) instead of `style` or CSS, `rgba()`/`fill-opacity` instead of alpha hex, repeat each gradient's coordinates instead of inheriting with `xlink:href`, and give the root a `viewBox` that matches its width/height aspect.
 - Strip editor metadata (Inkscape/Illustrator namespaces, DOCTYPE,
   `enable-background`, `xml:space`) and avoid `use`, filters, masks and
   patterns.

@@ -343,6 +343,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on leaf shapes (never inherited), and flat caps replace per-use accounting: 5000 geometry
   units per document, 400 curve segments (CoreGraphics is quadratic in overlapping curves),
   8 gradients, 64 stops. The numeric grammar is linear-time (possessive quantifiers).
+  The SVG allowlist is limited to what SwiftDraw implements: `preserveAspectRatio`,
+  `stroke-dasharray/-dashoffset/-miterlimit`, `display`, non-`pad` `spreadMethod`, geometry
+  percentages, non-`px` `stroke-width` units and gradient `xlink:href` are refused, the root
+  width/height aspect must match the viewBox, and non-UTF-8/NUL input is refused.
   See docs/ISSUER-LOGOS.md.
 - **`SirosWallet.deleteAccount(confirmation:stepUp:)`: self-service account
   deletion (go-wallet-backend#352, backend PR #453).** A fresh passkey

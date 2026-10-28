@@ -587,8 +587,8 @@ final class LogoSanitizerImageTests: XCTestCase {
     func testRealisticLogosPassTheAllowlistAndRender() {
         let logos = [
             "<svg \(Self.ns) viewBox=\"0 0 100 100\" width=\"100\" height=\"100\"><title>Dot</title><circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"#0a84ff\" stroke=\"#003\" stroke-width=\"4\"/></svg>",
-            "<svg \(Self.ns) xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"120\" height=\"60\" viewBox=\"0 0 120 60\"><defs><linearGradient id=\"a\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"100%\" stop-color=\"rgb(0,0,255)\" stop-opacity=\"0.8\"/></linearGradient><linearGradient id=\"b\" xlink:href=\"#a\"/></defs><rect width=\"120\" height=\"60\" rx=\"8\" fill=\"url(#a)\"/></svg>",
-            "<svg \(Self.ns) width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g transform=\"translate(32 32) rotate(45)\" fill=\"none\" stroke=\"black\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M-20,-20 L20,-20 L20,20 Z\" fill-rule=\"evenodd\"/><ellipse rx=\"10\" ry=\"5\" opacity=\".5\"/><line x1=\"-5\" y1=\"0\" x2=\"5\" y2=\"0\" stroke-dasharray=\"2 1\"/></g></svg>",
+            "<svg \(Self.ns) xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"120\" height=\"60\" viewBox=\"0 0 120 60\"><defs><linearGradient id=\"a\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"rgb(0,0,255)\" stop-opacity=\"0.8\"/></linearGradient></defs><rect width=\"120\" height=\"60\" rx=\"8\" fill=\"url(#a)\"/></svg>",
+            "<svg \(Self.ns) width=\"64\" height=\"64\" viewBox=\"0 0 64 64\"><g transform=\"translate(32 32) rotate(45)\" fill=\"none\" stroke=\"black\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M-20,-20 L20,-20 L20,20 Z\" fill-rule=\"evenodd\"/><ellipse rx=\"10\" ry=\"5\" opacity=\".5\"/><line x1=\"-5\" y1=\"0\" x2=\"5\" y2=\"0\"/></g></svg>",
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg \(Self.ns) width=\"32\" height=\"32\" viewBox=\"0 0 32 32\"><defs><radialGradient id=\"r\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"#123456\"/></radialGradient></defs><polygon points=\"0,0 32,0 16,32\" fill=\"url(#r)\"/><polyline points=\"0,32 16,16 32,32\" fill=\"none\" stroke=\"gray\"/></svg>",
         ]
         for (i, doc) in logos.enumerated() {
@@ -644,16 +644,68 @@ final class LogoSanitizerImageTests: XCTestCase {
         XCTAssertGreaterThan(px[3], 100); XCTAssertLessThan(px[3], 160)
     }
 
-    /// SwiftDraw 0.29.0 reads only xlink:href: a plain href silently stops inheriting.
-    func testGradientInheritanceViaXlinkHrefWorksPlainHrefRefused() {
+    /// SwiftDraw 0.29.0 copies only the immediate stops of an xlink:href target (not coordinates, units, transform or
+    /// chains), and ignores a plain href: gradient inheritance is refused in both spellings.
+    func testGradientInheritanceIsRefusedInBothSpellings() {
         func doc(_ link: String) -> String {
-            svg("<defs><linearGradient id=\"a\" x1=\"0\" x2=\"1\"><stop offset=\"0\" stop-color=\"#ff0000\"/><stop offset=\"1\" stop-color=\"#ff0000\"/></linearGradient><linearGradient id=\"b\" \(link)=\"#a\"/></defs><rect width=\"64\" height=\"32\" fill=\"url(#b)\"/>")
+            svg("<defs><linearGradient id=\"a\" x1=\"0\" x2=\"1\"><stop offset=\"0\" stop-color=\"#ff0000\"/></linearGradient><linearGradient id=\"b\" \(link)=\"#a\"/></defs><rect width=\"64\" height=\"32\" fill=\"url(#b)\"/>")
         }
         XCTAssertEqual(guardCheck(doc("href")), .activeContent)
-        XCTAssertNil(guardCheck(doc("xlink:href")))
-        guard case .success(.image(let data)) = LogoSanitizer.sanitize(svgUri(doc("xlink:href"))) else { return XCTFail() }
-        let px = pixel(data, x: 10, y: 10)
-        XCTAssertEqual(px[0], 255); XCTAssertEqual(px[3], 255, "inherited stops paint the rect")
+        XCTAssertEqual(guardCheck(doc("xlink:href")), .activeContent)
+        XCTAssertEqual(guardCheck(svg("<linearGradient id=\"g\" xlink:href=\"#g\"/>")), .activeContent, "self link")
+    }
+
+    /// The allowlist was shrunk to what SwiftDraw 0.29.0 actually implements (each of these was verified or is cheaply unprovable).
+    func testAllowlistIsLimitedToWhatTheRendererImplements() {
+        func shape(_ attr: String) -> String { svg("<rect width=\"4\" height=\"4\" \(attr)/>") }
+        // Ignored by the renderer: refused outright.
+        for attr in ["stroke-dasharray=\"2 1\"", "stroke-dasharray=\"none\"", "stroke-dashoffset=\"1\"", "stroke-miterlimit=\"4\"",
+                     "display=\"none\"", "display=\"inline\"", "preserveAspectRatio=\"xMidYMid meet\"", "preserveAspectRatio=\"none\""] {
+            XCTAssertEqual(guardCheck(shape(attr)), .activeContent, attr)
+        }
+        XCTAssertEqual(guardCheck(svg("<rect width=\"4\" height=\"4\"/>", attrs: "width=\"8\" height=\"8\" preserveAspectRatio=\"none\"")), .activeContent)
+        // stroke-width: bare number or px only.
+        for ok in ["2", "2.5", "2px", "0.5px"] { XCTAssertNil(guardCheck(shape("stroke-width=\"\(ok)\"")), ok) }
+        for bad in ["2mm", "1in", "2pt", "1em", "50%", "2 px", "px"] { XCTAssertNotNil(guardCheck(shape("stroke-width=\"\(bad)\"")), bad) }
+        // spreadMethod: only pad.
+        let g = { (m: String) in self.svg("<linearGradient id=\"g\" spreadMethod=\"\(m)\"><stop offset=\"0\" stop-color=\"red\"/></linearGradient>") }
+        XCTAssertNil(guardCheck(g("pad")))
+        XCTAssertEqual(guardCheck(g("reflect")), .activeContent)
+        XCTAssertEqual(guardCheck(g("repeat")), .activeContent)
+        // Percentages on geometry are not resolved: refused on shapes, gradients and the root viewport.
+        for attr in ["x=\"10%\"", "y=\"50%\"", "width=\"50%\"", "height=\"100%\"", "cx=\"50%\"", "r=\"50%\"", "rx=\"10%\"", "x1=\"0%\"", "y2=\"100%\""] {
+            XCTAssertNotNil(guardCheck(svg("<rect \(attr)/>")), attr)
+        }
+        XCTAssertNotNil(guardCheck(svg("<linearGradient id=\"g\" x1=\"0%\" x2=\"100%\"/>")))
+        XCTAssertNotNil(guardCheck("<svg \(Self.ns) width=\"100%\" height=\"100%\"/>"))
+        XCTAssertNil(guardCheck(svg("<rect x=\"1\" y=\"2px\" width=\"4\" height=\"4\"/>")))
+    }
+
+    /// SwiftDraw ignores preserveAspectRatio and scales the axes independently: a viewport whose aspect differs from the viewBox's is refused.
+    func testViewportAspectMustMatchTheViewBox() {
+        func root(_ w: String, _ h: String, _ vb: String) -> String { "<svg \(Self.ns) width=\"\(w)\" height=\"\(h)\" viewBox=\"\(vb)\"><rect width=\"1\" height=\"1\"/></svg>" }
+        XCTAssertNil(guardCheck(root("100", "50", "0 0 200 100")), "same aspect, different scale")
+        XCTAssertNil(guardCheck(root("64px", "64px", "0 0 32 32")))
+        XCTAssertNil(guardCheck(root("120", "60.5", "0 0 120 60")), "within 1%")
+        XCTAssertNotNil(guardCheck(root("100", "100", "0 0 200 100")), "stretched")
+        XCTAssertNotNil(guardCheck(root("64", "32", "0 0 32 32")))
+        XCTAssertNotNil(guardCheck(root("2in", "1in", "0 0 200 100")), "units not comparable")
+        XCTAssertNil(guardCheck("<svg \(Self.ns) viewBox=\"0 0 10 20\"><rect width=\"1\" height=\"1\"/></svg>"), "no width/height: nothing to compare")
+        XCTAssertNil(guardCheck("<svg \(Self.ns) width=\"10\" height=\"20\"><rect width=\"1\" height=\"1\"/></svg>"))
+    }
+
+    /// The DOCTYPE scan reads UTF-8: UTF-16 (NUL bytes) or invalid UTF-8 would hide a DOCTYPE from it, so such input is refused.
+    func testNonUtf8AndNulInputIsRefusedBeforeScanning() {
+        let bareDoctype = "<!DOCTYPE svg><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>"
+        XCTAssertEqual(SvgActiveContentGuard.check(Data(bareDoctype.utf8)), .activeContent, "UTF-8 control case")
+        for enc in [String.Encoding.utf16, .utf16LittleEndian, .utf16BigEndian, .utf32] {
+            let d = bareDoctype.data(using: enc)!
+            XCTAssertNotNil(SvgActiveContentGuard.check(d), "\(enc)")
+            XCTAssertEqual(SvgActiveContentGuard.check(d), .invalidSvg, "\(enc)")
+        }
+        XCTAssertEqual(SvgActiveContentGuard.check(Data("<svg xmlns=\"http://www.w3.org/2000/svg\"/>\u{0}".utf8)), .invalidSvg)
+        XCTAssertEqual(SvgActiveContentGuard.check(Data([0x3C, 0x73, 0x76, 0x67, 0xFF, 0xFE, 0x2F, 0x3E])), .invalidSvg, "invalid UTF-8")
+        XCTAssertNil(SvgActiveContentGuard.check(Data([0xEF, 0xBB, 0xBF] + Array("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".utf8))), "a UTF-8 BOM is fine")
     }
 
     // MARK: Flat caps (replace the earlier per-use accounting that kept leaking)
@@ -726,7 +778,7 @@ final class LogoSanitizerImageTests: XCTestCase {
     /// must go through guard + SwiftDraw + PNG in well under a second on a release build (measured 0.6 s debug-free on the Mac mini);
     /// the bound here is generous so only a real regression (multi-second work) fails.
     func testLargestAdmittedDocumentRendersQuickly() {
-        let cubics = "<path d=\"M0 0 " + String(repeating: "C1 1 2 2 3 0 ", count: SvgPathData.maxDocumentCurves) + "\" fill=\"red\" stroke=\"blue\" stroke-dasharray=\"0.2 0.2\"/>"
+        let cubics = "<path d=\"M0 0 " + String(repeating: "C1 1 2 2 3 0 ", count: SvgPathData.maxDocumentCurves) + "\" fill=\"red\" stroke=\"blue\"/>"
         let zig = "<path d=\"M0 0 " + (0..<1500).map { $0 % 2 == 0 ? "L60 \($0 % 60) " : "L0 \(($0 * 7) % 60) " }.joined() + "\" fill=\"red\" stroke=\"blue\"/>"
         let stops = (0..<SvgActiveContentGuard.maxStops).map { "<stop offset=\"\(Double($0) / 63)\" stop-color=\"#\(String(format: "%02x", $0 * 3 % 256))40ff\"/>" }.joined()
         let grad = "<defs><linearGradient id=\"g\">\(stops)</linearGradient></defs>"
@@ -763,7 +815,7 @@ final class LogoSanitizerImageTests: XCTestCase {
         let digits = String(repeating: "1", count: 300_000)
         let cases: [(String, String)] = [("width", digits + "x"), ("stroke-width", digits + "x"), ("opacity", digits + "x"),
                                           ("x", digits + "." + digits + "x"), ("offset", digits + "%x"), ("fill", "rgb(" + digits + "x"),
-                                          ("stroke-miterlimit", digits + "e"), ("viewBox", digits + " 0 1 1x")]
+                                          ("stroke-width", digits + "pxx"), ("viewBox", digits + " 0 1 1x")]
         // Run on a worker with a watchdog: a backtracking regression fails cleanly instead of hanging the suite.
         let done = DispatchSemaphore(value: 0)
         let results = LogoRemoteSvgTests.Locked<[Bool]>([])
