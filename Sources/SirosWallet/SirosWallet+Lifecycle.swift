@@ -564,6 +564,15 @@ extension SirosWallet {
         credentialResponseKeys.removeAll()
         decryptedCredentialResponses.removeAll()
         credentialResponseEpoch += 1
+        // Review finding (go-wallet-backend#502, second pass): this function's only 3 current callers
+        // (`endSessionLocally`, `destroy`, `reloginAfterCutOff`) each happen to also call
+        // `clearPerFlowAuthorizationState()` nearby, but that is incidental, not guaranteed here - this is itself a
+        // session-teardown path (every outstanding flow and transaction task is being torn down right above), so
+        // it must not depend on every CALLER remembering to also drop `pendingMatchResultsByFlow`/`consentByFlow`
+        // separately. Cleared in the SAME locked section as `flowEndSeq.removeAll()` above (which the atomic
+        // `recordConsent`/`trackedTransaction` checks key off), not as a later, separate call.
+        pendingMatchResultsByFlow.removeAll()
+        consentByFlow.removeAll()
         lock.unlock()
         for cancel in consentTasks { cancel() }
     }

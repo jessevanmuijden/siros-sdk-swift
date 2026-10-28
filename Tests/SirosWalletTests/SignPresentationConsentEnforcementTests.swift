@@ -225,4 +225,55 @@ final class SignPresentationConsentEnforcementTests: XCTestCase {
         XCTAssertNotNil(sender.sent.first?.error)
         XCTAssertTrue(keystore.signVpTokenCalls.isEmpty, "credential 7 must not be signed before credential 8's consent is checked")
     }
+
+    /// Review finding (second pass): `handleCredentialSelection`/`handleMatchRequest` capture `token`/`epoch`/
+    /// `flowSeq` before their own first `await` (the consent UI, which can take arbitrarily long) and pass them
+    /// back to `recordConsent`, which must then validate all three atomically, in the SAME locked section as the
+    /// write - not trust a check made before the suspension. Reproduces that shape directly: capture a flow's
+    /// generation, let the flow end (an error, a cancellation - `cancelTransactionTasks` is what `handleFlowError`
+    /// and `reportSignFailure` both do), then attempt the write with the now-stale generation.
+    func testRecordConsentSuppressesAStaleWriteAfterTheFlowEndedWhileSelectionWasSuspended() async throws {
+        let keystore = RecordingKeystoreManager()
+        let w = await wallet(keystore: keystore)
+        let token = try XCTUnwrap(w.currentTeardownToken())
+        let epoch = w.currentTaskEpoch()
+        let flowSeq = w.currentFlowEndSeq("f7")   // 0: nothing has happened to this flow yet
+
+        // The flow ends (e.g. a sign error, a cancellation) while this round's consent UI is imagined to still be
+        // showing - exactly what `cancelTransactionTasks`/`reportSignFailure` do for a terminated flow.
+        w.cancelTransactionTasks(flowId: "f7")
+
+        let recorded = w.recordConsent(
+            flowId: "f7",
+            matchResults: [CredentialMatcher.MatchResult(queryId: "q1", format: "dc+sd-jwt", candidates: [await w.credentialStore.getAll()[0]], requestedClaims: [["given_name"]])],
+            selectedIds: [7],
+            token: token, epoch: epoch, flowSeq: flowSeq
+        )
+        XCTAssertFalse(recorded, "the flow ended since flowSeq was captured - this write must be suppressed, not applied")
+
+        let sender = RecordingSender()
+        await w.handleSignRequest(engine: sender, msg: try signPresentationMessage(flowId: "f7", disclosedClaims: ["given_name"]))
+        XCTAssertNotNil(sender.sent.first?.error, "nothing was actually recorded for this (ended) flow - must still refuse")
+    }
+
+    /// Review finding (second pass): a REPLACEMENT round of selection for a flow that already has a recorded
+    /// consent must not leave that earlier grant usable if the replacement is declined, matches nothing, or errors
+    /// before its own `recordConsent` call - `handleCredentialSelection`/`handleMatchRequest` call
+    /// `revokePreviousConsent` up front, before their own first `await`, for exactly this reason.
+    func testRevokePreviousConsentLeavesNoGrantForAReplacementRoundThatIsThenDeclined() async throws {
+        let keystore = RecordingKeystoreManager()
+        let w = await wallet(keystore: keystore)
+        w.recordConsent(
+            flowId: "f8",
+            matchResults: [CredentialMatcher.MatchResult(queryId: "q1", format: "dc+sd-jwt", candidates: [await w.credentialStore.getAll()[0]], requestedClaims: [["given_name"]])],
+            selectedIds: [7]
+        )
+        // A later round for the same flow starts (revoking up front, as the real handlers do) and is then
+        // declined/matches nothing - it never reaches `recordConsent` again.
+        w.revokePreviousConsent(flowId: "f8")
+
+        let sender = RecordingSender()
+        await w.handleSignRequest(engine: sender, msg: try signPresentationMessage(flowId: "f8", disclosedClaims: ["given_name"]))
+        XCTAssertNotNil(sender.sent.first?.error, "the first round's grant must not survive a revoked, declined replacement round")
+    }
 }
