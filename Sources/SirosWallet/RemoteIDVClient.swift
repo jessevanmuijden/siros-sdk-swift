@@ -202,7 +202,10 @@ public protocol BiometricCaptureDelegate: AnyObject, Sendable {
 /// a pluggable ``BiometricCaptureDelegate``.
 ///
 /// ```swift
-/// let client = RemoteIDVClient(config: .init(serverUrl: "...", authToken: "..."))
+/// let client = RemoteIDVClient(config: .init(
+///     serverUrl: "...", authToken: "...",
+///     sessionTokenPath: "...", livenessPath: "...", idScanPath: "..."
+/// ))
 /// let delegate = MyCaptureDelegate() // your BiometricCaptureDelegate
 /// let provider = RemoteIDVProvider(client: client, delegate: delegate)
 /// try await wallet.verifyIdentityAndIssue(provider: provider, presentingViewController: vc)
