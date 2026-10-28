@@ -35,6 +35,11 @@ extension SirosWallet {
     /// crash the app. The backend authenticates the notification using ephemeral
     /// issuance state and never stores credential data.
     func handleFlowComplete(msg: FlowCompleteMessage) async {
+        // Any flow reaching its own terminal event (this one, or `handleFlowError`) gives up its claim on
+        // `pendingPresentationLink` WITHOUT releasing the ledger entry: a presentation that genuinely completed is
+        // still deduped against an issuer's page re-firing the same link, for the rest of the window. Only an
+        // explicit `cancelCurrentFlow()` releases it. A no-op when this completion is not a presentation's own.
+        lock.lock(); pendingPresentationLink = nil; lock.unlock()
         // The admission ticket is taken ONCE, before any await, and passed to
         // every credential save: a wipe that lands while the first credential
         // awaits its metadata refuses the whole batch. While a wipe has closed

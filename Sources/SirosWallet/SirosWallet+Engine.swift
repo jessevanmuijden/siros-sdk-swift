@@ -1236,6 +1236,9 @@ extension SirosWallet {
         pendingMatchResultsByFlow.removeValue(forKey: fid)
         consentByFlow.removeValue(forKey: fid)
         legacyFlowSnapshots.removeValue(forKey: fid)
+        // Gives up this flow's claim on `pendingPresentationLink` without releasing the ledger entry - see
+        // `handleFlowComplete`'s matching comment. A no-op when this error is not a presentation's own.
+        pendingPresentationLink = nil
         lock.unlock()
         let redirectUri = msg.error.details?["redirect_uri"]?.stringValue
         // This one error's details name the credential the user is missing, so
