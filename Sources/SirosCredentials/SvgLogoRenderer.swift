@@ -80,6 +80,37 @@ enum SvgActiveContentGuard {
         return !parts.isEmpty && parts.count <= count && parts.allSatisfy { isNumber(String($0)) }
     }
 
+    /// See `SvgPathData`.
+    static func isValidPathData(_ d: String) -> Bool { SvgPathData.isValid(d, maxNumber: maxSvgNumber) }
+
+    /// Transform list with exact argument counts per function.
+    static func isValidTransform(_ t: String) -> Bool {
+        let ns = t as NSString
+        var pos = 0
+        var count = 0
+        while pos < ns.length {
+            guard let m = transformFnRe.firstMatch(in: t, options: [.anchored], range: NSRange(location: pos, length: ns.length - pos)),
+                  m.range.location == pos else {
+                return ns.substring(from: pos).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && count > 0
+            }
+            let fn = ns.substring(with: m.range(at: 1))
+            let args = ns.substring(with: m.range(at: 2)).split(whereSeparator: { " ,\t\r\n".contains($0) }).map(String.init)
+            guard args.allSatisfy(isNumber) else { return false }
+            let ok: Bool
+            switch fn {
+            case "matrix": ok = args.count == 6
+            case "translate", "scale": ok = args.count == 1 || args.count == 2
+            case "rotate": ok = args.count == 1 || args.count == 3
+            default: ok = args.count == 1 // skewX, skewY
+            }
+            guard ok else { return false }
+            count += 1
+            guard count <= 16 else { return false }
+            pos = m.range.location + m.range.length
+        }
+        return count > 0
+    }
+
     private static func isOpacity(_ v: String) -> Bool {
         let t = v.trimmingCharacters(in: .whitespaces)
         if t.hasSuffix("%") { return isNumber(String(t.dropLast())) }
@@ -204,7 +235,22 @@ enum SvgActiveContentGuard {
                 guard let validate = attributeValidators[key], validate(value) else { return .activeContent }
             }
         }
+        if isRoot, let bad = aspectProblem(attrs) { return bad }
         return nil
+    }
+
+    /// SwiftDraw 0.29.0 ignores `preserveAspectRatio` and scales the axes independently, so a viewport whose
+    /// aspect differs from the viewBox's would be rendered stretched: refused (compared on unitless/px numbers).
+    static func aspectProblem(_ attrs: [String: String]) -> LogoRejection? {
+        guard let vb = attrs["viewBox"], let ws = attrs["width"], let hs = attrs["height"] else { return nil }
+        let box = vb.split(whereSeparator: { " ,\t\r\n".contains($0) }).compactMap { Double($0) }
+        func number(_ v: String) -> Double? {
+            let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            return Double(t.hasSuffix("px") ? String(t.dropLast(2)) : t) // other units: not comparable
+        }
+        guard box.count == 4, let w = number(ws), let h = number(hs), w > 0, h > 0, box[3] > 0 else { return .invalidSvg }
+        let viewport = w / h, boxAspect = box[2] / box[3]
+        return abs(viewport - boxAspect) / boxAspect > 0.01 ? .invalidSvg : nil
     }
 
     /// Geometry units one element adds to the document total: path segments, polygon/polyline point
