@@ -587,13 +587,11 @@ public final class WscdKeystoreAdapter: @unchecked Sendable, KeystoreManager, Ws
         let issuerJwt = parts[0]
         let disclosures = parts.dropFirst().filter { !$0.isEmpty }
 
-        // Filter disclosures if specific claims requested
-        let selectedDisclosures: [String]
-        if let claims = disclosedClaims, !claims.isEmpty {
-            selectedDisclosures = filterDisclosures(disclosures, claimNames: claims)
-        } else {
-            selectedDisclosures = Array(disclosures)
-        }
+        // See SdJwtDisclosureSelection.select's doc comment for the nil-vs-empty distinction (review finding,
+        // go-wallet-backend#502).
+        let selectedDisclosures = SdJwtDisclosureSelection.select(
+            disclosures, disclosedClaims: disclosedClaims, filter: filterDisclosures
+        )
 
         // Build SD-JWT presentation (with trailing ~)
         var sdJwtPresentation = issuerJwt

@@ -93,6 +93,7 @@ extension SirosWallet {
         // forever, mirroring Kotlin's identical
         // `pendingMatchResultsByFlow.remove(msg.flowId)` here.
         pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
+        consentByFlow.removeValue(forKey: msg.flowId)
         lock.unlock()
 
         var credentialsToStore = msg.credentials

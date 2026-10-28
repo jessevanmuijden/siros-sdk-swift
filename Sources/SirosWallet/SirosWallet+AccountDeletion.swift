@@ -125,6 +125,7 @@ extension SirosWallet {
         resetPresentationHistoryLocked()
         lastTrustResults.removeAll()
         pendingMatchResultsByFlow.removeAll()
+        consentByFlow.removeAll()
         pendingAuthorizations.removeAll()
         lock.unlock()
         resetIssuanceGuards()

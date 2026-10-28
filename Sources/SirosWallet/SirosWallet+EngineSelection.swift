@@ -296,4 +296,63 @@ extension SirosWallet {
         }
         return ["selected_credentials": .array(entries)]
     }
+
+    /// Records what was actually consented for `selectedIds` of this flow (`consentByFlow`), per credential id, with
+    /// the SAME derivation `buildConsentPayload` uses for the engine's `disclosed_claims` - so `handleSignRequest`'s
+    /// defense-in-depth check (go-wallet-backend#502) never disagrees with what the engine was told was consented.
+    ///
+    /// REPLACES this flow's entire recorded consent (review finding), never merges a new selection into an older
+    /// one: `selectedIds` is this flow's complete, current selection, so a credential omitted from it (deselected,
+    /// or simply not part of a later `handleMatchRequest`/`handleCredentialSelection` call for the same flow) must
+    /// stop being authorized, not keep an earlier call's entry alive underneath the new one.
+    ///
+    /// `token`/`epoch`/`flowSeq` (review finding, second pass): `handleCredentialSelection`/`handleMatchRequest`
+    /// capture all three before their own first `await` (the consent UI, which can take arbitrarily long) and pass
+    /// them back here, so this write is validated ATOMICALLY, in the same locked section, against whatever may have
+    /// happened while this call was suspended - not just checked once earlier and trusted. `token` (the
+    /// `TeardownGate`/`sessionGeneration` pair `isCurrentLocked` already protects `pendingMatchResultsByFlow`/
+    /// `recordPresentation` with) catches a wipe or an already-completed account/session replacement; `epoch`
+    /// (`transactionTaskEpoch`, bumped by `cancelEngineTasks()` - called from `logout()`/`destroy()`/
+    /// `reloginAfterCutOff()` alike) catches a session teardown still UNDERWAY (its own `sessionGeneration` bump can
+    /// land later, or never, if a self-driven re-login's replacement `login()` fails); `flowSeq` (`flowEndSeq`)
+    /// catches THIS flow specifically ending (an error, a cancellation) without any session-wide teardown at all.
+    /// Without this, a flow error or a teardown that happens to land between this handler's earlier checks and this
+    /// write could leave a resurrected grant for a flow or session that has already ended (review finding:
+    /// `clearPerFlowAuthorizationState()`'s wholesale clear and a teardown's generation bump are two separate
+    /// locked sections, not atomic with each other - a late write between them survives both).
+    ///
+    /// All three default to nil (unconditional write, the original behavior) for callers that only want to seed
+    /// consent state directly - tests, mainly - and are not racing a live teardown.
+    @discardableResult
+    func recordConsent(
+        flowId: String, matchResults: [CredentialMatcher.MatchResult], selectedIds: [Int64],
+        token: TeardownToken? = nil, epoch: Int? = nil, flowSeq: Int? = nil
+    ) -> Bool {
+        var entries: [String: Set<String>] = [:]
+        for id in selectedIds {
+            let matchResult = matchResults.first(where: { result in result.candidates.contains(where: { $0.id == id }) })
+            entries[String(id)] = ConsentMatcher.consentedClaims(
+                requestedClaims: matchResult?.requestedClaims ?? [], credentialIds: [String(id)]
+            )[String(id)] ?? []
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if let token, !isCurrentLocked(token) { return false }
+        if let epoch, transactionTaskEpoch != epoch { return false }
+        if let flowSeq, (flowEndSeq[flowId] ?? 0) != flowSeq { return false }
+        consentByFlow[flowId] = entries
+        return true
+    }
+
+    /// Revokes whatever was recorded by a PREVIOUS round of selection for this flow (review finding): a new
+    /// `credential_selection`/`match_request` for a flow that already has a recorded consent must not leave that
+    /// older grant usable if THIS round is declined, matches nothing, or errors before reaching `recordConsent`
+    /// again - an engine that ignored the decline/no-match answer could otherwise still `sign_presentation` against
+    /// the previous round's credentials, which were never consented to for whatever this new round was actually
+    /// asking. Called before either handler's first `await`, so every one of their early-return paths (unpresentable
+    /// answer, ineligible selection, an error) leaves this flow with NO recorded consent rather than a stale one -
+    /// only a FRESH, successful `recordConsent` call at the end of the same round restores it.
+    func revokePreviousConsent(flowId: String) {
+        lock.lock(); consentByFlow.removeValue(forKey: flowId); lock.unlock()
+    }
 }

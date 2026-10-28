@@ -348,6 +348,36 @@ final class JweKeystoreTests: XCTestCase {
         XCTAssertEqual(parts[2].split(separator: ".").count, 3) // KB-JWT
     }
 
+    /// Review finding (go-wallet-backend#502): a non-nil EMPTY `disclosedClaims` used to fall into the same "no
+    /// filter" branch as `nil` and disclose every disclosure the credential carried. It must disclose NONE -
+    /// distinct from `nil`, which still means "no filter was given at all" for callers outside the consent-gated
+    /// `sign_presentation` path (see `ConsentMatcher.claimsToDisclose`, which never lets a nil reach this call from
+    /// THAT path without replacing it with the recorded consent first).
+    func testSignVpTokenWithExplicitEmptyDisclosedClaimsDisclosesNothing() async throws {
+        let keystore = JweKeystore()
+        try await keystore.unlock(prfOutput: fakePrfOutput, encryptedContainer: Data(), hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)
+        let _ = try await keystore.generateKey()
+
+        let issuerJwt = "eyJhbGciOiJFUzI1NiJ9.eyJ0ZXN0IjoxfQ.c2ln"
+        let d1 = EncryptedContainer.base64UrlEncode(Data("[\"salt1\",\"given_name\",\"Alice\"]".utf8))
+        let d2 = EncryptedContainer.base64UrlEncode(Data("[\"salt2\",\"family_name\",\"Smith\"]".utf8))
+        let credential = "\(issuerJwt)~\(d1)~\(d2)~"
+
+        let vpToken = try await keystore.signVpToken(
+            credential: credential,
+            disclosedClaims: [],
+            nonce: "n1",
+            audience: "aud",
+            kid: nil
+        )
+
+        let parts = vpToken.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+        // Should have ONLY: issuerJwt, KB-JWT - no disclosures at all.
+        XCTAssertEqual(parts.count, 2, "an explicit empty disclosedClaims must disclose zero claims, not every claim")
+        XCTAssertEqual(parts[0], issuerJwt)
+        XCTAssertEqual(parts[1].split(separator: ".").count, 3) // KB-JWT
+    }
+
     func testSignVpTokenSdHashComputedCorrectly() async throws {
         let keystore = JweKeystore()
         try await keystore.unlock(prfOutput: fakePrfOutput, encryptedContainer: Data(), hkdfSalt: hkdfSalt, hkdfInfo: hkdfInfo)

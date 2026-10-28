@@ -221,6 +221,15 @@ final class TransactionDataEndToEndTests: XCTestCase {
         return Fixture(wallet: wallet, keystore: keystore, consent: consent, events: events, listener: listener, store: store)
     }
 
+    /// go-wallet-backend#502 defense in depth: `handleSignRequest`'s `sign_presentation` case now refuses a
+    /// credential with no recorded consent for the flow. This file is about transaction-data/SCA behavior, not
+    /// about consent-enforcement itself (covered by `SignPresentationConsentEnforcementTests`), so each test grants
+    /// whatever a real `credential_selection`/`match_request` would have - claims-free, since none of these fixture
+    /// credentials carry SD-JWT disclosures to begin with (`raw` ends in a bare `~`, no disclosure segments).
+    private func grantConsent(_ wallet: SirosWallet, flow: String, credentialIds: [Int64]) {
+        wallet.recordConsent(flowId: flow, matchResults: [], selectedIds: credentialIds)
+    }
+
     private func kbClaims(_ vpToken: String) throws -> [String: Any] {
         let kb = try XCTUnwrap(vpToken.split(separator: "~", omittingEmptySubsequences: false).last.map(String.init))
         let part = try XCTUnwrap(kb.split(separator: ".").dropFirst().first.map(String.init))
@@ -256,6 +265,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
 
     func testEngineProducesAContractKbJwt() async throws {
         let f = try await fixture()
+        grantConsent(f.wallet, flow: "f1", credentialIds: [1])
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
         let token = try XCTUnwrap(sender.sent.first?.vpToken)
@@ -343,6 +353,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
             ))
         }
         let refs = #"[{"credential_query_id":"pay","credential_id":"1"},{"credential_query_id":"other","credential_id":"2"},{"credential_query_id":"other","credential_id":"3"}]"#
+        grantConsent(f.wallet, flow: "f1", credentialIds: [1, 2, 3])
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage(refs: refs))
         XCTAssertNotNil(sender.sent.first?.vpToken, "one bound credential plus two for an unbound query is a valid combined presentation: \(f.listener.errors)")
@@ -402,6 +413,8 @@ final class TransactionDataEndToEndTests: XCTestCase {
     /// A runtime flip applies to the next flow only.
     func testAFlagFlipAppliesToTheNextFlowOnly() async throws {
         let f = try await fixture()
+        grantConsent(f.wallet, flow: "f1", credentialIds: [1])
+        grantConsent(f.wallet, flow: "f2", credentialIds: [1])
         f.wallet.transactionDataEnabled = false
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
@@ -415,6 +428,8 @@ final class TransactionDataEndToEndTests: XCTestCase {
     /// disabled does not change the first.
     func testOverlappingFlowsKeepTheirOwnSnapshot() async throws {
         let f = try await fixture()          // flow A's start: enabled (queue: [true])
+        grantConsent(f.wallet, flow: "A", credentialIds: [1])
+        grantConsent(f.wallet, flow: "B", credentialIds: [1])
         f.wallet.transactionDataEnabled = false
         f.wallet.snapshotTransactionDataEnablement()   // flow B's start: disabled (queue: [true, false])
         let sender = Sender()
@@ -422,12 +437,18 @@ final class TransactionDataEndToEndTests: XCTestCase {
         XCTAssertNotNil(sender.sent.last?.vpToken, "flow A started enabled")
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage(flow: "B"))
         XCTAssertNil(sender.sent.last?.vpToken, "flow B started disabled")
+        // Flow A's first sign_presentation above already consumed its recorded consent (handleSignRequest removes
+        // it on every successful pass through the credsToInclude loop, same as pendingMatchResultsByFlow) - this
+        // second message for the SAME flow id needs its own, fresh grant.
+        grantConsent(f.wallet, flow: "A", credentialIds: [1])
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage(flow: "A"))
         XCTAssertNotNil(sender.sent.last?.vpToken, "flow A still finishes under its own setting")
     }
 
     func testQueueOrderIsNotAffectedByTheLiveFlagAtProcessingTime() async throws {
         let f = try await fixture()                       // A: enabled
+        grantConsent(f.wallet, flow: "A", credentialIds: [1])
+        grantConsent(f.wallet, flow: "B", credentialIds: [1])
         f.wallet.transactionDataEnabled = false
         f.wallet.snapshotTransactionDataEnablement()      // B: disabled
         f.wallet.transactionDataEnabled = true            // live flag is on again when they are processed
@@ -457,6 +478,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
         let labelsUrl = "https://registry.example.attacker.test/labels.json"
         let entry = metadata.replacingOccurrences(of: #""ui_labels":{"affirmative_action_label":[{"lang":"en","value":"Confirm Payment"}]}"#, with: #""ui_labels_uri":"\#(labelsUrl)""#)
         let f = try await fixture(metadataDoc: entry)
+        grantConsent(f.wallet, flow: "f1", credentialIds: [1])
         let rec = Recorder()
         f.wallet.transactionResourceGet = { url, _ in
             rec.add(url.absoluteString)
@@ -483,6 +505,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
     func testEngineAnswersAtOnceWhenTheUserCancelsThePin() async throws {
         let f = try await fixture()
         f.keystore.signer.scaError = TransactionDataError(.declined, detail: "the user cancelled the authentication")
+        grantConsent(f.wallet, flow: "f1", credentialIds: [1])
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
         XCTAssertEqual(sender.sent.count, 1, "one immediate response")
@@ -497,6 +520,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
     func testEngineAnswersAtOnceWhenTheSignAppliedDifferentFactors() async throws {
         let f = try await fixture()
         f.keystore.signer.applied = [AuthenticationFactor(.possession, "key_in_remote_wscd"), AuthenticationFactor(.knowledge, "pin_less_than_6_digits")]
+        grantConsent(f.wallet, flow: "f1", credentialIds: [1])
         let sender = Sender()
         await f.wallet.handleSignRequest(engine: sender, msg: try engineMessage())
         XCTAssertEqual(sender.sent.count, 1, "one immediate response")
@@ -560,6 +584,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
 
     func testConsentHappensBeforeSigningOnEveryTransport() async throws {
         let engine = try await fixture()
+        grantConsent(engine.wallet, flow: "f1", credentialIds: [1])
         await engine.wallet.handleSignRequest(engine: Sender(), msg: try engineMessage())
         XCTAssertEqual(engine.events.all, ["consent", "sign"], "engine")
 
@@ -796,6 +821,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
         final class Holder: @unchecked Sendable { var task: Task<Void, Never>? }
         let holder = Holder()
         f.keystore.duringSigning = { holder.task?.cancel() }
+        grantConsent(f.wallet, flow: "ended", credentialIds: [1])
         let sender = Sender()
         let msg = try engineMessage(flow: "ended")
         let task = Task { await f.wallet.handleSignRequest(engine: sender, msg: msg) }
@@ -983,6 +1009,7 @@ final class TransactionDataEndToEndTests: XCTestCase {
 
     func testNonScaPresentationUsesTheUnchangedPath() async throws {
         let f = try await fixture(enabled: false)
+        grantConsent(f.wallet, flow: "f2", credentialIds: [1])
         let sender = Sender()
         let json = #"{"type":"sign_request","flow_id":"f2","message_id":"m2","action":"sign_presentation","params":{"audience":"\#(audience)","nonce":"n","credentials_to_include":[{"credential_query_id":"q","credential_id":"1"}]}}"#
         await f.wallet.handleSignRequest(engine: sender, msg: try JSONDecoder().decode(SignRequestMessage.self, from: Data(json.utf8)))

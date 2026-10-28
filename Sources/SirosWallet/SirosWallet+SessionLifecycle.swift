@@ -90,6 +90,7 @@ extension SirosWallet {
         // session starts must never be able to reach the evaluator before
         // this clear has actually finished.
         await clearCredentialStatusCachesAwaited()
+        clearPerFlowAuthorizationState()
         // The teardown above awaits the WMP peer's shutdown, and the caller
         // may have logged out or destroyed the wallet in the meantime. Logging
         // back in then would resurrect a session the user explicitly ended -
