@@ -272,13 +272,26 @@ final class SirosWalletPresentationResponseEncryptionTests: XCTestCase {
 
     func testDcqlTokensAreBuiltByTheWalletPerQuery() async throws {
         let store = InMemoryCredentialStore()
-        await store.save(StoredCredential(id: 1, format: "dc+sd-jwt", raw: "cred-1", kid: nil, batchId: 1, instanceId: 0))
-        await store.save(StoredCredential(id: 2, format: "dc+sd-jwt", raw: "cred-2", kid: nil, batchId: 2, instanceId: 0))
+        let cred1 = StoredCredential(id: 1, format: "dc+sd-jwt", raw: "cred-1", kid: nil, batchId: 1, instanceId: 0)
+        let cred2 = StoredCredential(id: 2, format: "dc+sd-jwt", raw: "cred-2", kid: nil, batchId: 2, instanceId: 0)
+        await store.save(cred1)
+        await store.save(cred2)
         let w = wallet(store: store)
         let sender = RecordingSender()
         let refs: [[String: Any]] = [
             ["credential_id": "1", "credential_query_id": "pid"], ["credential_id": "2", "credential_query_id": "mdl"],
         ]
+        // go-wallet-backend#502 defense in depth: `handleSignRequest` now refuses a credential with no recorded
+        // consent for this flow. `signRequest(credentials:)` hardcodes flow_id "p1" - record what a prior
+        // credential_selection/match_request would have for both credentials before signing either.
+        w.recordConsent(
+            flowId: "p1",
+            matchResults: [
+                CredentialMatcher.MatchResult(queryId: "pid", format: "dc+sd-jwt", candidates: [cred1], requestedClaims: []),
+                CredentialMatcher.MatchResult(queryId: "mdl", format: "dc+sd-jwt", candidates: [cred2], requestedClaims: []),
+            ],
+            selectedIds: [1, 2]
+        )
         await w.handleSignRequest(engine: sender, msg: try signRequest(credentials: refs))
         let jwe = try XCTUnwrap(sender.sent.first?.responseJwe)
         let token = try XCTUnwrap(try claims(jwe)["vp_token"] as? [String: [String]])

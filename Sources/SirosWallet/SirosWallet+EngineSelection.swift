@@ -300,6 +300,11 @@ extension SirosWallet {
     /// Records what was actually consented for `selectedIds` of this flow (`consentByFlow`), per credential id, with
     /// the SAME derivation `buildConsentPayload` uses for the engine's `disclosed_claims` - so `handleSignRequest`'s
     /// defense-in-depth check (go-wallet-backend#502) never disagrees with what the engine was told was consented.
+    ///
+    /// REPLACES this flow's entire recorded consent (review finding), never merges a new selection into an older
+    /// one: `selectedIds` is this flow's complete, current selection, so a credential omitted from it (deselected,
+    /// or simply not part of a later `handleMatchRequest`/`handleCredentialSelection` call for the same flow) must
+    /// stop being authorized, not keep an earlier call's entry alive underneath the new one.
     func recordConsent(flowId: String, matchResults: [CredentialMatcher.MatchResult], selectedIds: [Int64]) {
         var entries: [String: Set<String>] = [:]
         for id in selectedIds {
@@ -308,6 +313,6 @@ extension SirosWallet {
                 requestedClaims: matchResult?.requestedClaims ?? [], credentialIds: [String(id)]
             )[String(id)] ?? []
         }
-        lock.lock(); consentByFlow[flowId, default: [:]].merge(entries) { _, new in new }; lock.unlock()
+        lock.lock(); consentByFlow[flowId] = entries; lock.unlock()
     }
 }

@@ -771,6 +771,14 @@ extension SirosWallet {
                     var vpParts: [PresentationPart] = []
                     var answer: SignResponseMessage?
                     do {
+                    // Validate every reference BEFORE signing any of them (review finding): credential lookup and
+                    // the go-wallet-backend#502 consent check used to run inside the same loop that signed, so a
+                    // consented credential could already be signed - for a WSCD-backed key, possibly after a
+                    // hardware authentication prompt - before a LATER reference in the same request was found to
+                    // be unavailable or over-disclosing and the whole thing refused. No partially-signed state (and
+                    // no needless hardware prompt) survives a late rejection: resolve and check everything first,
+                    // sign only once every reference has passed.
+                    var validated: [(cred: StoredCredential, ref: CredentialRef, matchResult: CredentialMatcher.MatchResult?)] = []
                     for ref in credsToInclude {
                         // A flow that ended (or a logout) while the user decided must not sign.
                         try Task.checkCancellation()
@@ -798,6 +806,12 @@ extension SirosWallet {
                         let matchResult = storedMatchResults?.first(where: { result in
                             result.queryId == ref.credentialQueryId || result.candidates.contains(where: { $0.id == cred.id })
                         })
+                        validated.append((cred, ref, matchResult))
+                    }
+                    for (cred, ref, matchResult) in validated {
+                        // Re-checked per signing await too (unchanged behavior): a flow that ended mid-signing
+                        // must not keep signing the references validated before it did.
+                        try Task.checkCancellation()
                         vpParts.append((ref.credentialQueryId, try await buildSignPresentationVpPart(
                             cred: cred,
                             ref: ref,

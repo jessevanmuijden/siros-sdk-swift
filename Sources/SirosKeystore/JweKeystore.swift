@@ -515,9 +515,16 @@ public final class JweKeystore: @unchecked Sendable, KeystoreManager, ExtensionS
         let issuerJwt = parts[0]
         let disclosures = parts.dropFirst().filter { !$0.isEmpty }
 
-        // Filter disclosures if specific claims requested
+        // Filter disclosures if specific claims requested. `nil` means no filter was given at all (disclose every
+        // disclosure the credential carries - the caller is responsible for that being correct, e.g. a consent-
+        // gated caller only ever reaching here with a concrete list - see ConsentMatcher.claimsToDisclose, which
+        // replaces a nil with the recorded consent before this is ever called from the sign_presentation path).
+        // A non-nil EMPTY array is a distinct, deliberate "disclose zero claims" request (review finding: this
+        // used to collapse to the same "no filter" branch as nil, which let an explicit `disclosed_claims: []`
+        // defeat consent enforcement - ConsentMatcher accepts `[]` as trivially within any consented set, so this
+        // was the one shape that reached the signer still claiming to need a defense-in-depth check applied).
         let selectedDisclosures: [String]
-        if let claims = disclosedClaims, !claims.isEmpty {
+        if let claims = disclosedClaims {
             selectedDisclosures = filterDisclosures(disclosures, claimNames: claims)
         } else {
             selectedDisclosures = Array(disclosures)

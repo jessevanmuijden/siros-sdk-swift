@@ -312,6 +312,7 @@ extension SirosWallet {
         clearBlindIssuanceState()
         keystore.lock()
         resetDefaultTransactionLogStore()
+        clearPerFlowAuthorizationState()
         // Same reason as logout()'s: a self-driven re-login still awaiting the
         // old session's teardown must not log back in after the host has torn
         // this wallet down. The flag is what stops a *later* signal - the
