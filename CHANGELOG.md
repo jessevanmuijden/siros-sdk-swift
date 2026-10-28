@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **sign_presentation disclosed_claims is now verified against recorded consent before signing (go-wallet-backend#502 defense in depth).** The engine's sign_presentation/credentials_to_include previously passed disclosed_claims straight to the signer; a modified or buggy engine listing more than the user actually consented to (at credential_selection/match_request) would have been signed and disclosed, and a nil disclosed_claims was the worst case (most likely disclose everything). A new ConsentMatcher (SirosTransport, pure Foundation) checks the engine's disclosed_claims for each credential against consentByFlow, recorded with the same derivation buildConsentPayload uses to tell the engine what was consented: a nil is replaced by the recorded claims, never passed through; a claim beyond consent refuses before anything is signed; no recorded consent at all also refuses (cannot verify, never guessed).
+
 ### Removed
 - **The superseded secret-bearing issuance shapes.** `DeliveredSecretReceipt` (`org.siros.secret_seed` receipt, strip-before-merge, seed validation), `SecretSeedCommitment.seed(fromHex:)` and the `DEFERRED_SEED` error are gone. The `ssc` commitment reading and checking (`SecretSeedCommitment.opens/ssc(of:)`), `PrivateSeed` and the proof inputs stay. **Fails closed:** a Credential Response whose `credential_metadata` still carries `org.siros.secret_seed`, `holder_commitments`, `org.siros.psc` or `secret_members` is refused whole, immediate or deferred (`LEGACY_SECRET_MEMBER`): nothing is stored or merged and the issuer is sent `credential_failure`. The Swift SDK has no `auxiliary_data` reader yet, so seed-delivery-based `nym_auth` issuance is not possible in Swift until one exists.
 

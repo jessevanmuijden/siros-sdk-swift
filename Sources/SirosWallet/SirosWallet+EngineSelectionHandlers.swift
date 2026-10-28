@@ -106,6 +106,9 @@ extension SirosWallet {
             guard recorded else { return }
 
             let consentPayload = Self.buildConsentPayload(matchResults: matchResults, selectedIds: selectedIds, allCreds: allCreds)
+            // Recorded BEFORE telling the engine, so `sign_presentation`'s defense-in-depth check (go-wallet-backend
+            // #502) has something to verify against even if the engine's own reply never arrives or races the send.
+            recordConsent(flowId: flowId, matchResults: matchResults, selectedIds: selectedIds)
             engine.sendFlowAction(flowId: flowId, action: "consent", payload: consentPayload)
         } catch {
             engine.sendFlowAction(
@@ -207,6 +210,8 @@ extension SirosWallet {
                 vct: CredentialUtils.vctOf(cred)
             )
         }
+        // Same recording as handleCredentialSelection - see recordConsent's doc comment.
+        recordConsent(flowId: msg.flowId, matchResults: matchResults, selectedIds: selectedIds)
         let noMatchReason = matches.isEmpty ? Self.answerForEmptySelection(dcqlQuery: dcqlQuery, selection: selection).reason : nil
         engine.sendMatchResponse(flowId: msg.flowId, matches: matches, noMatchReason: noMatchReason)
     }

@@ -296,4 +296,18 @@ extension SirosWallet {
         }
         return ["selected_credentials": .array(entries)]
     }
+
+    /// Records what was actually consented for `selectedIds` of this flow (`consentByFlow`), per credential id, with
+    /// the SAME derivation `buildConsentPayload` uses for the engine's `disclosed_claims` - so `handleSignRequest`'s
+    /// defense-in-depth check (go-wallet-backend#502) never disagrees with what the engine was told was consented.
+    func recordConsent(flowId: String, matchResults: [CredentialMatcher.MatchResult], selectedIds: [Int64]) {
+        var entries: [String: Set<String>] = [:]
+        for id in selectedIds {
+            let matchResult = matchResults.first(where: { result in result.candidates.contains(where: { $0.id == id }) })
+            entries[String(id)] = ConsentMatcher.consentedClaims(
+                requestedClaims: matchResult?.requestedClaims ?? [], credentialIds: [String(id)]
+            )[String(id)] ?? []
+        }
+        lock.lock(); consentByFlow[flowId, default: [:]].merge(entries) { _, new in new }; lock.unlock()
+    }
 }

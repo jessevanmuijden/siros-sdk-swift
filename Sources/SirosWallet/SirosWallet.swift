@@ -563,6 +563,13 @@ public final class SirosWallet: @unchecked Sendable {
     /// needs to clear it too, the same cross-file-extension-access reason as
     /// `activeOffer`/`activeAttestedKeyIds` etc. above; guarded by the same `lock`.
     var pendingMatchResultsByFlow: [String: [CredentialMatcher.MatchResult]] = [:]
+    /// What this wallet recorded as consented for each credential of a flow (the WMP wire-protocol credential id ->
+    /// the claim names consented, `ConsentMatcher.consentedClaims`'s derivation - the same one
+    /// `buildConsentPayload` used to tell the engine). `handleSignRequest`'s `sign_presentation` checks the
+    /// engine's `disclosed_claims` against this before signing anything (go-wallet-backend#502 defense in depth): a
+    /// credential with no entry here, or a `disclosed_claims` naming more than its entry, refuses. Cleared at the
+    /// same points as `pendingMatchResultsByFlow` (consumed, or the flow terminates).
+    var consentByFlow: [String: [String: Set<String>]] = [:]
     /// Authorization context captured from a flow's `authorization_required`
     /// progress message, keyed by flow ID - needed to resume issuance via a
     /// fresh `flow_start` once the OAuth browser redirect returns, since the

@@ -766,6 +766,7 @@ extension SirosWallet {
                     // `pendingMatchResultsByFlow.remove(msg.flowId)`.
                     lock.lock()
                     let storedMatchResults = pendingMatchResultsByFlow.removeValue(forKey: msg.flowId)
+                    let recordedConsent = consentByFlow.removeValue(forKey: msg.flowId)
                     lock.unlock()
                     var vpParts: [PresentationPart] = []
                     var answer: SignResponseMessage?
@@ -780,6 +781,19 @@ extension SirosWallet {
                         // presentation: exactly one token per selected reference, or none.
                         guard let cred = allCreds.first(where: { $0.id == Int64(ref.credentialId) }) else {
                             throw SirosError.wallet(message: "A selected credential is no longer available")
+                        }
+                        // Defense in depth (go-wallet-backend#502): the engine's `disclosed_claims` must not be
+                        // trusted as given - verified against what THIS wallet recorded as consented when it
+                        // answered credential_selection/match_request, never the request alone. A nil
+                        // `disclosed_claims` is replaced by the recorded claims, never passed through as "disclose
+                        // everything" (the worst case a modified engine could produce).
+                        var ref = ref
+                        do {
+                            ref.disclosedClaims = try ConsentMatcher.claimsToDisclose(
+                                disclosedClaims: ref.disclosedClaims, consented: recordedConsent?[ref.credentialId]
+                            )
+                        } catch let mismatch as ConsentMismatch {
+                            throw SirosError.wallet(message: "sign_presentation refused: \(mismatch.detail)")
                         }
                         let matchResult = storedMatchResults?.first(where: { result in
                             result.queryId == ref.credentialQueryId || result.candidates.contains(where: { $0.id == cred.id })
@@ -1157,6 +1171,7 @@ extension SirosWallet {
         // The flow ends here: a buffered request for it is refused and a previously captured generation is stale.
         flowEndSeq[flowId, default: 0] += 1
         pendingMatchResultsByFlow.removeValue(forKey: flowId)
+        consentByFlow.removeValue(forKey: flowId)
         legacyFlowSnapshots.removeValue(forKey: flowId)
         credentialResponseKeys.removeValue(forKey: flowId)
         decryptedCredentialResponses.removeValue(forKey: flowId)
@@ -1205,6 +1220,7 @@ extension SirosWallet {
         lock.lock()
         let listener = eventListener
         pendingMatchResultsByFlow.removeValue(forKey: fid)
+        consentByFlow.removeValue(forKey: fid)
         legacyFlowSnapshots.removeValue(forKey: fid)
         lock.unlock()
         let redirectUri = msg.error.details?["redirect_uri"]?.stringValue
